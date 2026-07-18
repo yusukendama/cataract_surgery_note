@@ -1,7 +1,7 @@
 import 'package:drift/drift.dart';
 import 'package:uuid/uuid.dart';
 
-import '../domain/ccc_review_rules.dart';
+import '../domain/procedure_timing_rules.dart';
 import '../domain/surgery_models.dart';
 import 'app_database.dart';
 
@@ -11,7 +11,7 @@ class SurgeryRepository {
 
   final AppDatabase _database;
   final Uuid _uuid;
-  final CccReviewRules _rules = const CccReviewRules();
+  final ProcedureTimingRules _rules = const ProcedureTimingRules();
 
   Future<List<SurgeryRecord>> watchableListSnapshot() async {
     final rows = await _database.customSelect('''
@@ -66,8 +66,8 @@ ORDER BY surgery_date DESC, created_at DESC
       '''
 INSERT INTO surgery_records (
   id, surgery_date, eye_side, review_status,
-  video_path, video_display_name, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  video_path, video_display_name, case_memo, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''',
       [
         record.id,
@@ -76,6 +76,7 @@ INSERT INTO surgery_records (
         record.reviewStatus.name,
         record.videoPath,
         record.videoDisplayName,
+        record.caseMemo,
         _dateToMillis(record.createdAt),
         _dateToMillis(record.updatedAt),
       ],
@@ -87,9 +88,16 @@ INSERT INTO surgery_records (
     return record;
   }
 
+  Future<void> deleteRecord(String surgeryRecordId) async {
+    await _database.customStatement(
+      'DELETE FROM surgery_records WHERE id = ?',
+      [surgeryRecordId],
+    );
+  }
+
   Future<void> updateVideoReference({
     required String surgeryRecordId,
-    required String videoPath,
+    required String? videoPath,
     required String? videoDisplayName,
   }) async {
     await _database.customStatement(
@@ -107,10 +115,31 @@ WHERE id = ?
     );
   }
 
-  Future<void> deleteRecord(String surgeryRecordId) async {
+  Future<void> updateCaseMemo({
+    required String surgeryRecordId,
+    required String caseMemo,
+  }) async {
     await _database.customStatement(
-      'DELETE FROM surgery_records WHERE id = ?',
-      [surgeryRecordId],
+      '''
+UPDATE surgery_records
+SET case_memo = ?, updated_at = ?
+WHERE id = ?
+''',
+      [caseMemo, _dateToMillis(DateTime.now()), surgeryRecordId],
+    );
+  }
+
+  /// Clears start/end timing for every step of a record, e.g. because the
+  /// registered video was replaced or removed. Ratings and reflections are
+  /// intentionally preserved.
+  Future<void> clearStepTimings(String surgeryRecordId) async {
+    await _database.customStatement(
+      '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = NULL, end_milliseconds = NULL, updated_at = ?
+WHERE surgery_record_id = ?
+''',
+      [_dateToMillis(DateTime.now()), surgeryRecordId],
     );
   }
 
@@ -145,7 +174,7 @@ INSERT INTO surgical_step_reviews (
       [
         review.id,
         review.surgeryRecordId,
-        review.step.name,
+        review.step.storageId,
         review.startMilliseconds,
         review.endMilliseconds,
         review.rating.name,
@@ -170,7 +199,7 @@ LIMIT 1
 ''',
           variables: [
             Variable<String>(surgeryRecordId),
-            Variable<String>(step.name),
+            Variable<String>(step.storageId),
           ],
           readsFrom: const {},
         )
@@ -179,6 +208,18 @@ LIMIT 1
       return null;
     }
     return _reviewFromRow(rows.single);
+  }
+
+  Future<List<SurgicalStepReview>> ensureStepReviews(
+    String surgeryRecordId,
+  ) async {
+    final reviews = <SurgicalStepReview>[];
+    for (final step in surgicalStepsInDisplayOrder) {
+      reviews.add(
+        await ensureStepReview(surgeryRecordId: surgeryRecordId, step: step),
+      );
+    }
+    return reviews;
   }
 
   Future<SurgicalStepReview> saveStepReview(SurgicalStepReview review) async {
@@ -191,8 +232,9 @@ LIMIT 1
     }
 
     final updated = review.copyWith(updatedAt: DateTime.now());
-    await _database.customStatement(
-      '''
+    await _database.transaction(() async {
+      await _database.customStatement(
+        '''
 UPDATE surgical_step_reviews
 SET start_milliseconds = ?,
     end_milliseconds = ?,
@@ -201,27 +243,28 @@ SET start_milliseconds = ?,
     updated_at = ?
 WHERE id = ?
 ''',
-      [
-        updated.startMilliseconds,
-        updated.endMilliseconds,
-        updated.rating.name,
-        updated.reflection,
-        _dateToMillis(updated.updatedAt),
-        updated.id,
-      ],
-    );
-    await _database.customStatement(
-      '''
+        [
+          updated.startMilliseconds,
+          updated.endMilliseconds,
+          updated.rating.name,
+          updated.reflection,
+          _dateToMillis(updated.updatedAt),
+          updated.id,
+        ],
+      );
+      await _database.customStatement(
+        '''
 UPDATE surgery_records
 SET review_status = ?, updated_at = ?
 WHERE id = ?
 ''',
-      [
-        ReviewStatus.reviewed.name,
-        _dateToMillis(DateTime.now()),
-        updated.surgeryRecordId,
-      ],
-    );
+        [
+          ReviewStatus.reviewed.name,
+          _dateToMillis(DateTime.now()),
+          updated.surgeryRecordId,
+        ],
+      );
+    });
     return updated;
   }
 
@@ -237,6 +280,7 @@ WHERE id = ?
       ),
       videoPath: row.read<String?>('video_path'),
       videoDisplayName: row.read<String?>('video_display_name'),
+      caseMemo: row.read<String?>('case_memo') ?? '',
       createdAt: _millisToDate(row.read<int>('created_at')),
       updatedAt: _millisToDate(row.read<int>('updated_at')),
     );
@@ -246,7 +290,7 @@ WHERE id = ?
     return SurgicalStepReview(
       id: row.read<String>('id'),
       surgeryRecordId: row.read<String>('surgery_record_id'),
-      step: SurgicalStep.values.byName(row.read<String>('step')),
+      step: SurgicalStep.fromStorageId(row.read<String>('step'))!,
       startMilliseconds: row.read<int?>('start_milliseconds'),
       endMilliseconds: row.read<int?>('end_milliseconds'),
       rating: StepRating.values.byName(row.read<String>('rating')),

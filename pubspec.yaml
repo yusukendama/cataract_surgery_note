@@ -1,7 +1,7 @@
 name: cataract_surgery_note
 description: "A new Flutter project."
 publish_to: 'none'
-version:  1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: ^3.10.1
@@ -16,7 +16,6 @@ dependencies:
   intl: ^0.20.3
   path: ^1.9.1
   path_provider: ^2.1.6
-  sqlite3_flutter_libs: ^0.6.0+eol
   uuid: ^4.5.3
   video_player: ^2.11.1
 
@@ -27,3 +26,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+
+hooks:
+  user_defines:
+    sqlite3:
+      source: system
+      name: sqlite3

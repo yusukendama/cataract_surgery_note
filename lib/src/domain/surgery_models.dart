@@ -33,12 +33,60 @@ enum StepRating {
 }
 
 enum SurgicalStep {
-  capsulorhexis;
+  subTenonAnesthesia('sub_tenon_anesthesia', 'テノン嚢下麻酔'),
+  sidePortCreation('side_port_creation', 'サイドポート作成'),
+  ovdInjection('ovd_injection', '粘弾性物質注入'),
 
-  String get label => switch (this) {
-    SurgicalStep.capsulorhexis => 'CCC',
-  };
+  /// The legacy value is intentionally retained for existing CCC records.
+  capsulorhexis('capsulorhexis', 'CCC'),
+  mainPortCreation('main_port_creation', 'メインポート作成'),
+  hydrodissection('hydrodissection', 'ハイドロダイセクション'),
+  nucleusRemoval('nucleus_removal', '核処理'),
+  corticalIrrigationAspiration('cortical_irrigation_aspiration', 'I/A'),
+  iolInsertion('iol_insertion', 'IOL挿入'),
+  ovdRemovalIrrigationAspiration(
+    'ovd_removal_irrigation_aspiration',
+    'I/A（粘弾性物質除去）',
+  ),
+  woundClosureAndPressureAdjustment(
+    'wound_closure_and_pressure_adjustment',
+    '創口閉鎖・圧調整',
+  ),
+  dexartSubconjunctivalInjection(
+    'dexart_subconjunctival_injection',
+    'デキサート結膜下注射',
+  );
+
+  const SurgicalStep(this.storageId, this.label);
+
+  final String storageId;
+  final String label;
+
+  static SurgicalStep? fromStorageId(String storageId) {
+    for (final step in values) {
+      if (step.storageId == storageId) {
+        return step;
+      }
+    }
+    return null;
+  }
 }
+
+/// Explicit display order, kept separate from enum declaration order.
+const surgicalStepsInDisplayOrder = <SurgicalStep>[
+  SurgicalStep.subTenonAnesthesia,
+  SurgicalStep.sidePortCreation,
+  SurgicalStep.ovdInjection,
+  SurgicalStep.capsulorhexis,
+  SurgicalStep.mainPortCreation,
+  SurgicalStep.hydrodissection,
+  SurgicalStep.nucleusRemoval,
+  SurgicalStep.corticalIrrigationAspiration,
+  SurgicalStep.iolInsertion,
+  SurgicalStep.ovdRemovalIrrigationAspiration,
+  SurgicalStep.woundClosureAndPressureAdjustment,
+  SurgicalStep.dexartSubconjunctivalInjection,
+];
 
 class SurgeryRecord {
   const SurgeryRecord({
@@ -50,6 +98,7 @@ class SurgeryRecord {
     required this.updatedAt,
     this.videoPath,
     this.videoDisplayName,
+    this.caseMemo = '',
   });
 
   final String id;
@@ -61,6 +110,7 @@ class SurgeryRecord {
   /// Existing absolute paths are treated as legacy external references.
   final String? videoPath;
   final String? videoDisplayName;
+  final String caseMemo;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -71,6 +121,7 @@ class SurgeryRecord {
     String? videoPath,
     String? videoDisplayName,
     bool clearVideo = false,
+    String? caseMemo,
     DateTime? updatedAt,
   }) {
     return SurgeryRecord(
@@ -82,6 +133,7 @@ class SurgeryRecord {
       videoDisplayName: clearVideo
           ? null
           : videoDisplayName ?? this.videoDisplayName,
+      caseMemo: caseMemo ?? this.caseMemo,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
@@ -119,6 +171,12 @@ class SurgicalStepReview {
     }
     return Duration(milliseconds: end - start);
   }
+
+  bool get isNotStarted => startMilliseconds == null && endMilliseconds == null;
+
+  bool get isRunning => startMilliseconds != null && endMilliseconds == null;
+
+  bool get isCompleted => duration != null;
 
   SurgicalStepReview copyWith({
     int? startMilliseconds,

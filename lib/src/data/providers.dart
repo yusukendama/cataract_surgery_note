@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/surgery_models.dart';
@@ -27,6 +29,17 @@ final recordVideoServiceProvider = Provider<RecordVideoService>((ref) {
   );
 });
 
+final recordVideoFileProvider = FutureProvider.family<File?, String>((
+  ref,
+  recordId,
+) async {
+  final record = await ref.watch(surgeryRecordProvider(recordId).future);
+  if (record == null) {
+    return null;
+  }
+  return ref.watch(recordVideoServiceProvider).resolveVideoForRecord(record);
+});
+
 final surgeryRecordsProvider = FutureProvider<List<SurgeryRecord>>((ref) {
   return ref.watch(surgeryRepositoryProvider).watchableListSnapshot();
 });
@@ -50,13 +63,7 @@ final cccReviewProvider = FutureProvider.family<SurgicalStepReview, String>((
       );
 });
 
-final recordVideoFileProvider = FutureProvider.family((
-  ref,
-  String recordId,
-) async {
-  final record = await ref.watch(surgeryRepositoryProvider).getRecord(recordId);
-  if (record == null) {
-    return null;
-  }
-  return ref.watch(recordVideoServiceProvider).resolveVideoForRecord(record);
-});
+final stepReviewsProvider =
+    FutureProvider.family<List<SurgicalStepReview>, String>((ref, recordId) {
+      return ref.watch(surgeryRepositoryProvider).ensureStepReviews(recordId);
+    });

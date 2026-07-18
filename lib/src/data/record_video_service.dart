@@ -44,8 +44,13 @@ class RecordVideoService {
       rethrow;
     }
 
-    if (oldVideoPath != null && isManagedVideoPath(oldVideoPath)) {
-      await _deleteWithoutThrowing(oldVideoPath);
+    if (oldVideoPath != null) {
+      // Replacing a video invalidates previously recorded step timings,
+      // since they were measured against the old video's timeline.
+      await _surgeryRepository.clearStepTimings(surgeryRecordId);
+      if (isManagedVideoPath(oldVideoPath)) {
+        await _deleteWithoutThrowing(oldVideoPath);
+      }
     }
 
     final updated = await _surgeryRepository.getRecord(surgeryRecordId);
@@ -80,6 +85,32 @@ class RecordVideoService {
       return null;
     }
     return _videoStorageRepository.resolveVideo(migratedPath);
+  }
+
+  /// Removes the registered video (and its managed file, if any) from a
+  /// record without deleting the record itself. Step timings are cleared
+  /// because they no longer correspond to any video; self-review notes and
+  /// the case memo are left untouched.
+  Future<SurgeryRecord> removeVideoForRecord(String surgeryRecordId) async {
+    final record = await _surgeryRepository.getRecord(surgeryRecordId);
+    if (record == null) {
+      throw StateError('Surgery record not found.');
+    }
+    final videoPath = record.videoPath;
+    if (videoPath != null && isManagedVideoPath(videoPath)) {
+      await _deleteWithoutThrowing(videoPath);
+    }
+    await _surgeryRepository.updateVideoReference(
+      surgeryRecordId: surgeryRecordId,
+      videoPath: null,
+      videoDisplayName: null,
+    );
+    await _surgeryRepository.clearStepTimings(surgeryRecordId);
+    final updated = await _surgeryRepository.getRecord(surgeryRecordId);
+    if (updated == null) {
+      throw StateError('Surgery record not found after video removal.');
+    }
+    return updated;
   }
 
   Future<void> deleteRecordAndManagedVideos(String surgeryRecordId) async {

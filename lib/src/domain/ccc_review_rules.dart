@@ -1,29 +1,6 @@
-class CccReviewRules {
-  const CccReviewRules();
+import 'procedure_timing_rules.dart';
 
-  Duration? calculateDuration({
-    required int? startMilliseconds,
-    required int? endMilliseconds,
-  }) {
-    if (startMilliseconds == null || endMilliseconds == null) {
-      return null;
-    }
-    if (endMilliseconds <= startMilliseconds) {
-      return null;
-    }
-    return Duration(milliseconds: endMilliseconds - startMilliseconds);
-  }
+export 'procedure_timing_rules.dart';
 
-  String? validateRange({
-    required int? startMilliseconds,
-    required int? endMilliseconds,
-  }) {
-    if (startMilliseconds == null || endMilliseconds == null) {
-      return null;
-    }
-    if (endMilliseconds <= startMilliseconds) {
-      return 'CCC終了位置は開始位置より後にしてください。';
-    }
-    return null;
-  }
-}
+/// Backward-compatible name for callers of the original CCC-only rules.
+typedef CccReviewRules = ProcedureTimingRules;

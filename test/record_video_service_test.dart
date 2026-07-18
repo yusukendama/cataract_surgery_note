@@ -152,7 +152,7 @@ void main() {
     );
   });
 
-  test('CCCレビューが動画再選択後も維持される', () async {
+  test('動画再選択後もレビュー内容は維持されるが工程位置はクリアされる', () async {
     final record = await surgeryRepository.createRecord(
       surgeryDate: DateTime(2026, 6, 29),
       eyeSide: EyeSide.right,
@@ -185,6 +185,8 @@ void main() {
       sourcePath: firstSource.path,
       originalFileName: 'first.mp4',
     );
+    // Replacing an already-registered video invalidates prior timings,
+    // since they were measured against the old video's timeline.
     await service.importVideoForRecord(
       surgeryRecordId: record.id,
       sourcePath: secondSource.path,
@@ -195,10 +197,50 @@ void main() {
       step: SurgicalStep.capsulorhexis,
     );
 
-    expect(restored!.startMilliseconds, 1000);
-    expect(restored.endMilliseconds, 3000);
+    expect(restored!.startMilliseconds, isNull);
+    expect(restored.endMilliseconds, isNull);
     expect(restored.rating, StepRating.good);
     expect(restored.reflection, '安定していた。');
+  });
+
+  test('動画のみ削除すると工程位置はクリアされレビュー内容は維持される', () async {
+    final record = await surgeryRepository.createRecord(
+      surgeryDate: DateTime(2026, 6, 29),
+      eyeSide: EyeSide.left,
+    );
+    final review = await surgeryRepository.ensureStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    await surgeryRepository.saveStepReview(
+      review.copyWith(
+        startMilliseconds: 500,
+        endMilliseconds: 2500,
+        rating: StepRating.fair,
+        reflection: 'やや不安定。',
+      ),
+    );
+    final source = await _writeSourceVideo(tempDirectory, 'first.mp4', 512);
+    final imported = await service.importVideoForRecord(
+      surgeryRecordId: record.id,
+      sourcePath: source.path,
+      originalFileName: 'first.mp4',
+    );
+    final videoPath = imported.videoPath!;
+
+    final updated = await service.removeVideoForRecord(record.id);
+
+    expect(updated.videoPath, isNull);
+    expect(updated.videoDisplayName, isNull);
+    expect(await videoStorageRepository.resolveVideo(videoPath), isNull);
+    final restoredReview = await surgeryRepository.getStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    expect(restoredReview!.startMilliseconds, isNull);
+    expect(restoredReview.endMilliseconds, isNull);
+    expect(restoredReview.rating, StepRating.fair);
+    expect(restoredReview.reflection, 'やや不安定。');
   });
 }
 

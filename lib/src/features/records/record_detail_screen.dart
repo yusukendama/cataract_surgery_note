@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,7 +7,7 @@ import 'package:intl/intl.dart';
 
 import '../../data/providers.dart';
 import '../../domain/surgery_models.dart';
-import '../review/video_review_screen.dart';
+import '../review/step_review_screen.dart';
 
 class RecordDetailScreen extends ConsumerWidget {
   const RecordDetailScreen({required this.recordId, super.key});
@@ -42,13 +44,13 @@ class _RecordDetailBody extends ConsumerStatefulWidget {
 }
 
 class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
-  bool _isImporting = false;
   bool _isDeleting = false;
+  bool _isUpdatingVideo = false;
 
   @override
   Widget build(BuildContext context) {
     final record = widget.record;
-    final videoFile = ref.watch(recordVideoFileProvider(record.id));
+    final hasVideo = record.videoPath != null;
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -60,80 +62,47 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
         const SizedBox(height: 8),
         Text('状態: ${record.reviewStatus.label}'),
         const SizedBox(height: 24),
-        videoFile.when(
-          data: (file) {
-            final hasVideo = file != null;
-            return ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(hasVideo ? Icons.movie : Icons.movie_outlined),
-              title: Text(record.videoDisplayName ?? '動画未選択'),
-              subtitle: Text(
-                record.videoPath == null
-                    ? '動画を選択してください。'
-                    : hasVideo
-                    ? record.videoPath!
-                    : '保存された動画が見つかりません。動画を再選択してください。',
+        Card(
+          child: ListTile(
+            leading: Icon(hasVideo ? Icons.movie : Icons.movie_outlined),
+            title: Text(record.videoDisplayName ?? '動画未登録'),
+            subtitle: Text(hasVideo ? '登録済みの動画' : '動画が登録されていません'),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            FilledButton.icon(
+              onPressed: _isUpdatingVideo ? null : _pickVideo,
+              icon: _isUpdatingVideo
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.video_call_outlined),
+              label: Text(hasVideo ? '動画を変更' : '動画を選択'),
+            ),
+            if (hasVideo)
+              OutlinedButton.icon(
+                onPressed: _isUpdatingVideo ? null : _deleteVideo,
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('動画を削除'),
+              ),
+          ],
+        ),
+        const SizedBox(height: 24),
+        OutlinedButton.icon(
+          onPressed: () {
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => StepReviewScreen(recordId: record.id),
               ),
             );
           },
-          error: (_, _) => const ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.movie_outlined),
-            title: Text('動画を確認できません'),
-            subtitle: Text('動画を再選択してください。'),
-          ),
-          loading: () => const ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: SizedBox.square(
-              dimension: 24,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
-            title: Text('動画を確認しています'),
-          ),
-        ),
-        const SizedBox(height: 12),
-        if (_isImporting) ...[
-          const LinearProgressIndicator(),
-          const SizedBox(height: 8),
-          const Text('動画をアプリ内に保存しています'),
-          const SizedBox(height: 12),
-        ],
-        FilledButton.icon(
-          onPressed: _isImporting ? null : () => _pickVideo(context),
-          icon: _isImporting
-              ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.video_file),
-          label: Text(record.videoPath == null ? '動画を選択' : '動画を変更'),
-        ),
-        const SizedBox(height: 12),
-        videoFile.when(
-          data: (file) => OutlinedButton.icon(
-            onPressed: file == null || _isImporting
-                ? null
-                : () {
-                    ref.invalidate(recordVideoFileProvider(record.id));
-                    Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => VideoReviewScreen(recordId: record.id),
-                      ),
-                    );
-                  },
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('動画レビューを開始'),
-          ),
-          error: (_, _) => OutlinedButton.icon(
-            onPressed: null,
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('動画レビューを開始'),
-          ),
-          loading: () => OutlinedButton.icon(
-            onPressed: null,
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('動画レビューを開始'),
-          ),
+          icon: const Icon(Icons.rate_review),
+          label: const Text('工程の時間記録を開始'),
         ),
         const SizedBox(height: 24),
         OutlinedButton.icon(
@@ -150,45 +119,120 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     );
   }
 
-  Future<void> _pickVideo(BuildContext context) async {
-    final result = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['mp4', 'mov', 'm4v'],
-      allowMultiple: false,
-    );
-    final file = result?.files.single;
-    final path = file?.path;
-    if (path == null) {
+  Future<void> _pickVideo() async {
+    final record = widget.record;
+    if (record.videoPath != null) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('動画を差し替える'),
+          content: const Text(
+            '動画を差し替えると、現在設定されている工程位置が新しい動画と一致しなくなる可能性があります。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('差し替える'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) {
+        return;
+      }
+    }
+
+    final FilePickerResult? result;
+    try {
+      result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['mp4', 'mov', 'm4v'],
+      );
+    } catch (_) {
+      _showMessage('動画を選択できませんでした。もう一度お試しください。');
       return;
     }
-    setState(() => _isImporting = true);
+    final path = result?.files.single.path;
+    if (result == null || path == null) {
+      return;
+    }
+    final fileName = result.files.single.name;
+
+    setState(() => _isUpdatingVideo = true);
     try {
       await ref
           .read(recordVideoServiceProvider)
           .importVideoForRecord(
-            surgeryRecordId: widget.record.id,
+            surgeryRecordId: record.id,
             sourcePath: path,
-            originalFileName: file?.name ?? path.split('/').last,
+            originalFileName: fileName,
           );
-      ref.invalidate(surgeryRecordProvider(widget.record.id));
-      ref.invalidate(recordVideoFileProvider(widget.record.id));
-      ref.invalidate(surgeryRecordsProvider);
-      if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('動画を保存しました')));
-      }
+      _invalidateRecordProviders();
     } catch (error) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('動画保存に失敗しました: $error')));
-      }
+      _showMessage(_videoErrorMessage(error));
     } finally {
       if (mounted) {
-        setState(() => _isImporting = false);
+        setState(() => _isUpdatingVideo = false);
       }
     }
+  }
+
+  Future<void> _deleteVideo() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('動画を削除'),
+        content: const Text('登録されている動画を削除します。工程の開始・終了位置もあわせて削除されます。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('削除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+
+    setState(() => _isUpdatingVideo = true);
+    try {
+      await ref
+          .read(recordVideoServiceProvider)
+          .removeVideoForRecord(widget.record.id);
+      _invalidateRecordProviders();
+    } catch (_) {
+      _showMessage('動画を削除できませんでした。もう一度お試しください。');
+    } finally {
+      if (mounted) {
+        setState(() => _isUpdatingVideo = false);
+      }
+    }
+  }
+
+  void _invalidateRecordProviders() {
+    ref.invalidate(surgeryRecordProvider(widget.record.id));
+    ref.invalidate(surgeryRecordsProvider);
+    ref.invalidate(recordVideoFileProvider(widget.record.id));
+    ref.invalidate(stepReviewsProvider(widget.record.id));
+  }
+
+  String _videoErrorMessage(Object error) {
+    if (error is ArgumentError) {
+      return 'この動画形式は再生できません。MP4形式などに変換してから、もう一度選択してください。';
+    }
+    if (error is FileSystemException) {
+      return '動画を保存できませんでした。ストレージの空き容量をご確認ください。';
+    }
+    return '動画を保存できませんでした。もう一度お試しください。';
   }
 
   Future<void> _deleteRecord() async {
@@ -225,6 +269,14 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
       if (mounted) {
         setState(() => _isDeleting = false);
       }
+    }
+  }
+
+  void _showMessage(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 }

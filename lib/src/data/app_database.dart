@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS surgery_records (
   review_status TEXT NOT NULL,
   video_path TEXT NULL,
   video_display_name TEXT NULL,
+  case_memo TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 )
@@ -54,6 +55,30 @@ CREATE TABLE IF NOT EXISTS surgical_step_reviews (
 CREATE INDEX IF NOT EXISTS idx_surgical_step_reviews_record
 ON surgical_step_reviews(surgery_record_id)
 ''');
+      await _ensureColumn('surgery_records', 'video_path', 'TEXT NULL');
+      await _ensureColumn(
+        'surgery_records',
+        'video_display_name',
+        'TEXT NULL',
+      );
+      await _ensureColumn(
+        'surgery_records',
+        'case_memo',
+        "TEXT NOT NULL DEFAULT ''",
+      );
     },
   );
+
+  /// Adds [column] to [table] when upgrading a database created by an older
+  /// schema. Existing installs may predate either the video columns (from
+  /// before the 12-step refactor) or the case memo column (added alongside
+  /// the in-app video review feature), so each column is checked
+  /// independently rather than assuming a single prior schema shape.
+  Future<void> _ensureColumn(String table, String column, String ddl) async {
+    final info = await customSelect('PRAGMA table_info($table)').get();
+    final exists = info.any((row) => row.data['name'] == column);
+    if (!exists) {
+      await customStatement('ALTER TABLE $table ADD COLUMN $column $ddl');
+    }
+  }
 }
