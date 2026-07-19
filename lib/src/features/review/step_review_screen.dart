@@ -527,10 +527,16 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     SurgicalStepReview review,
     List<SurgicalStepReview> reviews,
   ) async {
-    final running = reviews.where((item) => item.isRunning).firstOrNull;
-    if (running != null && running.step != review.step) {
+    final conflictingRunning = reviews
+        .where(
+          (item) =>
+              item.isRunning && !review.step.canRunConcurrentlyWith(item.step),
+        )
+        .firstOrNull;
+    if (conflictingRunning != null) {
       _showMessage(
-        '現在「${running.step.label}」を計測中です。先に${running.step.label}の計測を終了してください。',
+        '現在「${conflictingRunning.step.label}」を計測中です。'
+        '先に${conflictingRunning.step.label}の計測を終了してください。',
       );
       return;
     }

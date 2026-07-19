@@ -61,14 +61,14 @@ void main() {
     expect(restored.reflection, '前嚢切開の中心がやや鼻側。');
   });
 
-  test('12工程を保存し再取得できる', () async {
+  test('11項目を保存し再取得できる', () async {
     final record = await repository.createRecord(
       surgeryDate: DateTime(2026, 7, 15),
       eyeSide: EyeSide.right,
     );
     final reviews = await repository.ensureStepReviews(record.id);
 
-    expect(reviews, hasLength(12));
+    expect(reviews, hasLength(11));
     expect(reviews.map((item) => item.step), surgicalStepsInDisplayOrder);
 
     final nucleus = reviews.firstWhere(
@@ -136,7 +136,7 @@ void main() {
 
     expect(ccc, isNotNull);
     expect(ccc!.step.storageId, 'capsulorhexis');
-    expect((await repository.ensureStepReviews(record.id)), hasLength(12));
+    expect((await repository.ensureStepReviews(record.id)), hasLength(11));
   });
 
   test('動画情報を保存・更新・クリアできる', () async {

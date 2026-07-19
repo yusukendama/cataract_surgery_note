@@ -16,17 +16,46 @@ void main() {
     );
   }
 
-  test('12工程のIDが一意で表示順が固定されている', () {
-    expect(surgicalStepsInDisplayOrder, hasLength(12));
+  test('11項目のIDが一意で表示順が固定されている', () {
+    expect(surgicalStepsInDisplayOrder, hasLength(11));
     expect(
       surgicalStepsInDisplayOrder.map((step) => step.storageId).toSet(),
-      hasLength(12),
+      hasLength(11),
     );
-    expect(surgicalStepsInDisplayOrder.first.label, 'テノン嚢下麻酔');
-    expect(surgicalStepsInDisplayOrder.last.label, 'デキサート結膜下注射');
+    expect(surgicalStepsInDisplayOrder.first.label, '総手術時間');
+    expect(surgicalStepsInDisplayOrder.last.label, '創口閉鎖・圧調整');
+    expect(
+      surgicalStepsInDisplayOrder,
+      isNot(contains(SurgicalStep.subTenonAnesthesia)),
+    );
+    expect(
+      surgicalStepsInDisplayOrder,
+      isNot(contains(SurgicalStep.dexartSubconjunctivalInjection)),
+    );
     expect(
       SurgicalStep.corticalIrrigationAspiration.storageId,
       isNot(SurgicalStep.ovdRemovalIrrigationAspiration.storageId),
+    );
+  });
+
+  test('総手術時間だけは個別工程と並行計測できる', () {
+    expect(
+      SurgicalStep.totalSurgeryTime.canRunConcurrentlyWith(
+        SurgicalStep.capsulorhexis,
+      ),
+      isTrue,
+    );
+    expect(
+      SurgicalStep.capsulorhexis.canRunConcurrentlyWith(
+        SurgicalStep.totalSurgeryTime,
+      ),
+      isTrue,
+    );
+    expect(
+      SurgicalStep.capsulorhexis.canRunConcurrentlyWith(
+        SurgicalStep.nucleusRemoval,
+      ),
+      isFalse,
     );
   });
 
@@ -36,6 +65,14 @@ void main() {
       SurgicalStep.capsulorhexis,
     );
     expect(SurgicalStep.fromStorageId('unknown_future_step'), isNull);
+    expect(
+      SurgicalStep.fromStorageId('sub_tenon_anesthesia'),
+      SurgicalStep.subTenonAnesthesia,
+    );
+    expect(
+      SurgicalStep.fromStorageId('dexart_subconjunctival_injection'),
+      SurgicalStep.dexartSubconjunctivalInjection,
+    );
   });
 
   test('未開始、計測中、完了と所要時間を判定する', () {

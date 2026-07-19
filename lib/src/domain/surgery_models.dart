@@ -33,6 +33,9 @@ enum StepRating {
 }
 
 enum SurgicalStep {
+  totalSurgeryTime('total_surgery_time', '総手術時間'),
+
+  /// Retained only so records saved by older app versions remain readable.
   subTenonAnesthesia('sub_tenon_anesthesia', 'テノン嚢下麻酔'),
   sidePortCreation('side_port_creation', 'サイドポート作成'),
   ovdInjection('ovd_injection', '粘弾性物質注入'),
@@ -52,6 +55,8 @@ enum SurgicalStep {
     'wound_closure_and_pressure_adjustment',
     '創口閉鎖・圧調整',
   ),
+
+  /// Retained only so records saved by older app versions remain readable.
   dexartSubconjunctivalInjection(
     'dexart_subconjunctival_injection',
     'デキサート結膜下注射',
@@ -61,6 +66,12 @@ enum SurgicalStep {
 
   final String storageId;
   final String label;
+
+  bool get isTotalSurgeryTime => this == SurgicalStep.totalSurgeryTime;
+
+  bool canRunConcurrentlyWith(SurgicalStep other) {
+    return this == other || isTotalSurgeryTime || other.isTotalSurgeryTime;
+  }
 
   static SurgicalStep? fromStorageId(String storageId) {
     for (final step in values) {
@@ -74,7 +85,7 @@ enum SurgicalStep {
 
 /// Explicit display order, kept separate from enum declaration order.
 const surgicalStepsInDisplayOrder = <SurgicalStep>[
-  SurgicalStep.subTenonAnesthesia,
+  SurgicalStep.totalSurgeryTime,
   SurgicalStep.sidePortCreation,
   SurgicalStep.ovdInjection,
   SurgicalStep.capsulorhexis,
@@ -85,7 +96,6 @@ const surgicalStepsInDisplayOrder = <SurgicalStep>[
   SurgicalStep.iolInsertion,
   SurgicalStep.ovdRemovalIrrigationAspiration,
   SurgicalStep.woundClosureAndPressureAdjustment,
-  SurgicalStep.dexartSubconjunctivalInjection,
 ];
 
 class SurgeryRecord {
