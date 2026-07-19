@@ -19,11 +19,13 @@ class StepReviewScreen extends ConsumerStatefulWidget {
   ConsumerState<StepReviewScreen> createState() => _StepReviewScreenState();
 }
 
-class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
+class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
+    with SingleTickerProviderStateMixin {
   final TextEditingController _caseMemoController = TextEditingController();
   final Map<SurgicalStep, TextEditingController> _reflectionControllers = {};
   final Map<SurgicalStep, StepRating> _ratings = {};
 
+  late final TabController _tabController;
   VideoPlayerController? _videoController;
   String? _loadedVideoPath;
   String? _loadedRecordId;
@@ -40,7 +42,17 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
       _videoController?.value.position.inMilliseconds ?? 0;
 
   @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(
+      length: surgicalStepsInDisplayOrder.length + 1,
+      vsync: this,
+    );
+  }
+
+  @override
   void dispose() {
+    _tabController.dispose();
     _videoController?.dispose();
     _caseMemoController.dispose();
     for (final controller in _reflectionControllers.values) {
@@ -51,9 +63,33 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final record = ref.watch(surgeryRecordProvider(widget.recordId));
-    final reviews = ref.watch(stepReviewsProvider(widget.recordId));
+    final recordAsync = ref.watch(surgeryRecordProvider(widget.recordId));
+    final reviewsAsync = ref.watch(stepReviewsProvider(widget.recordId));
     final videoFile = ref.watch(recordVideoFileProvider(widget.recordId));
+
+    final record = recordAsync.hasValue ? recordAsync.value : null;
+    final reviews = reviewsAsync.hasValue ? reviewsAsync.value : null;
+
+    final Widget body;
+    if (recordAsync.hasError) {
+      body = Center(child: Text('症例読み込み失敗: ${recordAsync.error}'));
+    } else if (reviewsAsync.hasError) {
+      body = Center(child: Text('工程読み込み失敗: ${reviewsAsync.error}'));
+    } else if (record == null || reviews == null) {
+      if (recordAsync.hasValue && record == null) {
+        body = const Center(child: Text('症例が見つかりません'));
+      } else {
+        body = const Center(child: CircularProgressIndicator());
+      }
+    } else {
+      _syncInitialState(record, reviews);
+      _latestRecord = record;
+      _latestReviews = reviews;
+      body = _buildBody(record, reviews, videoFile);
+    }
+
+    final readyRecord = record;
+    final readyReviews = reviews;
 
     return PopScope<void>(
       canPop: !_isDirty,
@@ -64,26 +100,30 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
         await _handleLeaveAttempt();
       },
       child: Scaffold(
-        appBar: AppBar(title: const Text('手術工程の時間記録')),
-        body: record.when(
-          data: (item) {
-            if (item == null) {
-              return const Center(child: Text('症例が見つかりません'));
-            }
-            return reviews.when(
-              data: (items) {
-                _syncInitialState(item, items);
-                _latestRecord = item;
-                _latestReviews = items;
-                return _buildBody(item, items, videoFile);
-              },
-              error: (error, _) => Center(child: Text('工程読み込み失敗: $error')),
-              loading: () => const Center(child: CircularProgressIndicator()),
-            );
-          },
-          error: (error, _) => Center(child: Text('症例読み込み失敗: $error')),
-          loading: () => const Center(child: CircularProgressIndicator()),
+        appBar: AppBar(
+          title: const Text('手術工程の時間記録'),
+          actions: [
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: TextButton.icon(
+                onPressed:
+                    (_isSavingReview ||
+                        readyRecord == null ||
+                        readyReviews == null)
+                    ? null
+                    : () => _saveReview(readyRecord, readyReviews),
+                icon: _isSavingReview
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save),
+                label: const Text('保存'),
+              ),
+            ),
+          ],
         ),
+        body: body,
       ),
     );
   }
@@ -97,63 +137,96 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
 
     return GestureDetector(
       onTap: () => FocusScope.of(context).unfocus(),
-      child: ListView(
-        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-        padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildVideoSection(record, videoFile),
-          const SizedBox(height: 20),
-          for (final step in surgicalStepsInDisplayOrder) ...[
-            ProcedureTimingCard(
-              step: step,
-              timing: byStep[step]!,
-              isSaving: _savingStep == step,
-              onStart: () => _startStep(byStep[step]!, reviews),
-              onEnd: () => _endStep(byStep[step]!),
-              onReset: () => _resetStep(byStep[step]!),
-              onTapStart: byStep[step]!.startMilliseconds == null
-                  ? null
-                  : () => _seekToMilliseconds(byStep[step]!.startMilliseconds!),
-              onTapEnd: byStep[step]!.endMilliseconds == null
-                  ? null
-                  : () => _seekToMilliseconds(byStep[step]!.endMilliseconds!),
-            ),
-            _StepNotesTile(
-              rating: _ratings[step] ?? StepRating.unreviewed,
-              controller: _reflectionControllers[step]!,
-              onRatingChanged: (value) {
-                setState(() {
-                  _ratings[step] = value;
-                  _isDirty = true;
-                });
-              },
-            ),
-            const SizedBox(height: 12),
-          ],
-          const Divider(height: 32),
-          Text('症例メモ', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _caseMemoController,
-            minLines: 3,
-            maxLines: 6,
-            decoration: const InputDecoration(
-              labelText: '症例全体のメモ',
-              border: OutlineInputBorder(),
-            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: _buildVideoSection(record, videoFile),
           ),
-          const SizedBox(height: 12),
-          FilledButton.icon(
-            onPressed: _isSavingReview
-                ? null
-                : () => _saveReview(record, reviews),
-            icon: _isSavingReview
-                ? const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.save),
-            label: const Text('レビューを保存'),
+          TabBar(
+            controller: _tabController,
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            tabs: [
+              for (final step in surgicalStepsInDisplayOrder)
+                Tab(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (byStep[step]!.isCompleted) ...[
+                        const Icon(Icons.check, size: 14),
+                        const SizedBox(width: 4),
+                      ] else if (byStep[step]!.isRunning) ...[
+                        const Icon(Icons.timer_outlined, size: 14),
+                        const SizedBox(width: 4),
+                      ],
+                      Text(step.label),
+                    ],
+                  ),
+                ),
+              const Tab(text: '症例メモ'),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              controller: _tabController,
+              children: [
+                for (final step in surgicalStepsInDisplayOrder)
+                  ListView(
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      ProcedureTimingCard(
+                        step: step,
+                        timing: byStep[step]!,
+                        isSaving: _savingStep == step,
+                        onStart: () => _startStep(byStep[step]!, reviews),
+                        onEnd: () => _endStep(byStep[step]!),
+                        onReset: () => _resetStep(byStep[step]!),
+                        onTapStart: byStep[step]!.startMilliseconds == null
+                            ? null
+                            : () => _seekToMilliseconds(
+                                byStep[step]!.startMilliseconds!,
+                              ),
+                        onTapEnd: byStep[step]!.endMilliseconds == null
+                            ? null
+                            : () => _seekToMilliseconds(
+                                byStep[step]!.endMilliseconds!,
+                              ),
+                      ),
+                      const SizedBox(height: 12),
+                      _StepNotesCard(
+                        rating: _ratings[step] ?? StepRating.unreviewed,
+                        controller: _reflectionControllers[step]!,
+                        onRatingChanged: (value) {
+                          setState(() {
+                            _ratings[step] = value;
+                            _isDirty = true;
+                          });
+                        },
+                      ),
+                    ],
+                  ),
+                ListView(
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: const EdgeInsets.all(16),
+                  children: [
+                    TextField(
+                      controller: _caseMemoController,
+                      minLines: 3,
+                      maxLines: 8,
+                      decoration: const InputDecoration(
+                        labelText: '症例全体のメモ',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -225,15 +298,26 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
     final durationMs = duration.inMilliseconds > 0
         ? duration.inMilliseconds.toDouble()
         : 1.0;
-    final positionMs = position.inMilliseconds.toDouble().clamp(0.0, durationMs);
+    final positionMs = position.inMilliseconds.toDouble().clamp(
+      0.0,
+      durationMs,
+    );
 
     return Column(
       children: [
-        AspectRatio(
-          aspectRatio: controller.value.aspectRatio,
-          child: ColoredBox(color: Colors.black, child: VideoPlayer(controller)),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 280),
+          child: Center(
+            child: AspectRatio(
+              aspectRatio: controller.value.aspectRatio,
+              child: ColoredBox(
+                color: Colors.black,
+                child: VideoPlayer(controller),
+              ),
+            ),
+          ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 4),
         Text(
           '${formatTimelineMilliseconds(position.inMilliseconds)} / '
           '${formatTimelineMilliseconds(duration.inMilliseconds)}',
@@ -249,6 +333,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
           spacing: 8,
           runSpacing: 8,
           alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             IconButton.filledTonal(
               tooltip: '1秒戻る',
@@ -270,8 +355,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
             ),
             IconButton.filledTonal(
               tooltip: '0.2秒進む',
-              onPressed: () =>
-                  _seekRelative(const Duration(milliseconds: 200)),
+              onPressed: () => _seekRelative(const Duration(milliseconds: 200)),
               icon: const Icon(Icons.keyboard_arrow_right),
             ),
             IconButton.filledTonal(
@@ -279,25 +363,20 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
               onPressed: () => _seekRelative(const Duration(seconds: 1)),
               icon: const Icon(Icons.keyboard_double_arrow_right),
             ),
+            PopupMenuButton<double>(
+              tooltip: '再生速度',
+              initialValue: _playbackSpeed,
+              onSelected: _setPlaybackSpeed,
+              itemBuilder: (context) => [
+                for (final speed in const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
+                  PopupMenuItem<double>(value: speed, child: Text('${speed}x')),
+              ],
+              child: Chip(
+                avatar: const Icon(Icons.speed, size: 18),
+                label: Text('${_playbackSpeed}x'),
+              ),
+            ),
           ],
-        ),
-        const SizedBox(height: 12),
-        DropdownButtonFormField<double>(
-          initialValue: _playbackSpeed,
-          decoration: const InputDecoration(labelText: '再生速度'),
-          items: const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
-              .map(
-                (speed) => DropdownMenuItem<double>(
-                  value: speed,
-                  child: Text('${speed}x'),
-                ),
-              )
-              .toList(),
-          onChanged: (speed) {
-            if (speed != null) {
-              _setPlaybackSpeed(speed);
-            }
-          },
         ),
       ],
     );
@@ -423,7 +502,10 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
     return '動画を保存できませんでした。もう一度お試しください。';
   }
 
-  void _syncInitialState(SurgeryRecord record, List<SurgicalStepReview> reviews) {
+  void _syncInitialState(
+    SurgeryRecord record,
+    List<SurgicalStepReview> reviews,
+  ) {
     if (_loadedRecordId != widget.recordId) {
       _loadedRecordId = widget.recordId;
       _caseMemoController.text = record.caseMemo;
@@ -435,6 +517,16 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
         _reflectionControllers[review.step] = controller;
       }
       _isDirty = false;
+      final firstIncomplete = reviews.indexWhere(
+        (review) => !review.isCompleted,
+      );
+      if (firstIncomplete > 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _tabController.index == 0) {
+            _tabController.index = firstIncomplete;
+          }
+        });
+      }
     }
   }
 
@@ -599,8 +691,8 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen> {
   }
 }
 
-class _StepNotesTile extends StatelessWidget {
-  const _StepNotesTile({
+class _StepNotesCard extends StatelessWidget {
+  const _StepNotesCard({
     required this.rating,
     required this.controller,
     required this.onRatingChanged,
@@ -613,38 +705,40 @@ class _StepNotesTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      margin: const EdgeInsets.only(top: 4),
-      child: ExpansionTile(
-        title: const Text('自己評価・反省点'),
-        subtitle: Text(rating.label),
-        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        children: [
-          DropdownButtonFormField<StepRating>(
-            initialValue: rating,
-            decoration: const InputDecoration(labelText: '自己評価'),
-            items: StepRating.values
-                .map(
-                  (item) =>
-                      DropdownMenuItem(value: item, child: Text(item.label)),
-                )
-                .toList(),
-            onChanged: (value) {
-              if (value != null) {
-                onRatingChanged(value);
-              }
-            },
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: controller,
-            minLines: 2,
-            maxLines: 5,
-            decoration: const InputDecoration(
-              labelText: '反省点',
-              border: OutlineInputBorder(),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('自己評価・反省点', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<StepRating>(
+              initialValue: rating,
+              decoration: const InputDecoration(labelText: '自己評価'),
+              items: StepRating.values
+                  .map(
+                    (item) =>
+                        DropdownMenuItem(value: item, child: Text(item.label)),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  onRatingChanged(value);
+                }
+              },
             ),
-          ),
-        ],
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              minLines: 2,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                labelText: '反省点',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
