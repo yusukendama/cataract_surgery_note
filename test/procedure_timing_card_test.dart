@@ -35,25 +35,32 @@ void main() {
     );
   }
 
-  testWidgets('未開始時は開始ボタンだけを表示する', (tester) async {
+  testWidgets('未開始時は大きな開始ボタンだけを表示する', (tester) async {
     await pumpCard(tester, review());
-    expect(find.text('開始'), findsOneWidget);
-    expect(find.text('終了'), findsNothing);
+    final startButton = find.byKey(const Key('procedure-start-button'));
+    expect(startButton, findsOneWidget);
+    expect(tester.getSize(startButton).height, greaterThanOrEqualTo(48));
+    expect(find.textContaining('開始時刻'), findsNothing);
+    expect(find.text('この工程を終了'), findsNothing);
     expect(find.text('再設定'), findsNothing);
   });
 
-  testWidgets('計測中は終了ボタンと状態を表示する', (tester) async {
+  testWidgets('計測中は大きな終了ボタンと状態を表示する', (tester) async {
     await pumpCard(tester, review(start: 1000));
     expect(find.text('計測中'), findsOneWidget);
-    expect(find.text('開始'), findsNothing);
-    expect(find.text('終了'), findsOneWidget);
+    expect(find.text('この工程を開始'), findsNothing);
+    final endButton = find.byKey(const Key('procedure-end-button'));
+    expect(endButton, findsOneWidget);
+    expect(tester.getSize(endButton).height, greaterThanOrEqualTo(48));
+    expect(find.text('開始時刻：0:01.0'), findsOneWidget);
+    expect(find.textContaining('終了時刻'), findsNothing);
     expect(find.text('再設定'), findsNothing);
   });
 
   testWidgets('完了時は再設定だけと時刻・所要時間を表示する', (tester) async {
     await pumpCard(tester, review(start: 1000, end: 66000));
-    expect(find.text('開始'), findsNothing);
-    expect(find.text('終了'), findsNothing);
+    expect(find.text('この工程を開始'), findsNothing);
+    expect(find.text('この工程を終了'), findsNothing);
     expect(find.text('再設定'), findsOneWidget);
     expect(find.text('開始時刻：0:01.0'), findsOneWidget);
     expect(find.text('終了時刻：1:06.0'), findsOneWidget);

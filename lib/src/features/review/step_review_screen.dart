@@ -318,9 +318,39 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
           ),
         ),
         const SizedBox(height: 4),
-        Text(
-          '${formatTimelineMilliseconds(position.inMilliseconds)} / '
-          '${formatTimelineMilliseconds(duration.inMilliseconds)}',
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${formatTimelineMilliseconds(position.inMilliseconds)} / '
+                '${formatTimelineMilliseconds(duration.inMilliseconds)}',
+              ),
+            ),
+            PopupMenuButton<double>(
+              tooltip: '再生速度を変更',
+              initialValue: _playbackSpeed,
+              onSelected: _setPlaybackSpeed,
+              itemBuilder: (context) => [
+                for (final speed in const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
+                  PopupMenuItem<double>(value: speed, child: Text('${speed}x')),
+              ],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 8,
+                  vertical: 12,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.speed, size: 18),
+                    const SizedBox(width: 4),
+                    Text('速度 ${_playbackSpeed}x'),
+                    const Icon(Icons.arrow_drop_down),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
         Slider(
           value: positionMs,
@@ -329,54 +359,11 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
             controller.seekTo(Duration(milliseconds: value.round()));
           },
         ),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          alignment: WrapAlignment.center,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            IconButton.filledTonal(
-              tooltip: '1秒戻る',
-              onPressed: () => _seekRelative(const Duration(seconds: -1)),
-              icon: const Icon(Icons.keyboard_double_arrow_left),
-            ),
-            IconButton.filledTonal(
-              tooltip: '0.2秒戻る',
-              onPressed: () =>
-                  _seekRelative(const Duration(milliseconds: -200)),
-              icon: const Icon(Icons.keyboard_arrow_left),
-            ),
-            IconButton.filled(
-              tooltip: controller.value.isPlaying ? '一時停止' : '再生',
-              onPressed: _togglePlayback,
-              icon: Icon(
-                controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
-              ),
-            ),
-            IconButton.filledTonal(
-              tooltip: '0.2秒進む',
-              onPressed: () => _seekRelative(const Duration(milliseconds: 200)),
-              icon: const Icon(Icons.keyboard_arrow_right),
-            ),
-            IconButton.filledTonal(
-              tooltip: '1秒進む',
-              onPressed: () => _seekRelative(const Duration(seconds: 1)),
-              icon: const Icon(Icons.keyboard_double_arrow_right),
-            ),
-            PopupMenuButton<double>(
-              tooltip: '再生速度',
-              initialValue: _playbackSpeed,
-              onSelected: _setPlaybackSpeed,
-              itemBuilder: (context) => [
-                for (final speed in const [0.5, 0.75, 1.0, 1.25, 1.5, 2.0])
-                  PopupMenuItem<double>(value: speed, child: Text('${speed}x')),
-              ],
-              child: Chip(
-                avatar: const Icon(Icons.speed, size: 18),
-                label: Text('${_playbackSpeed}x'),
-              ),
-            ),
-          ],
+        VideoTransportControls(
+          isPlaying: controller.value.isPlaying,
+          onSeekBackward: () => _seekRelative(const Duration(seconds: -15)),
+          onTogglePlayback: _togglePlayback,
+          onSeekForward: () => _seekRelative(const Duration(seconds: 15)),
         ),
       ],
     );
@@ -705,41 +692,103 @@ class _StepNotesCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('自己評価・反省点', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<StepRating>(
-              initialValue: rating,
-              decoration: const InputDecoration(labelText: '自己評価'),
-              items: StepRating.values
-                  .map(
-                    (item) =>
-                        DropdownMenuItem(value: item, child: Text(item.label)),
-                  )
-                  .toList(),
-              onChanged: (value) {
-                if (value != null) {
-                  onRatingChanged(value);
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: controller,
-              minLines: 2,
-              maxLines: 5,
-              decoration: const InputDecoration(
-                labelText: '反省点',
-                border: OutlineInputBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        title: const Text('自己評価・反省点'),
+        subtitle: const Text('任意'),
+        maintainState: true,
+        childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              DropdownButtonFormField<StepRating>(
+                initialValue: rating,
+                decoration: const InputDecoration(labelText: '自己評価'),
+                items: StepRating.values
+                    .map(
+                      (item) => DropdownMenuItem(
+                        value: item,
+                        child: Text(item.label),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) {
+                    onRatingChanged(value);
+                  }
+                },
               ),
-            ),
-          ],
-        ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                minLines: 2,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  labelText: '反省点',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
+    );
+  }
+}
+
+class VideoTransportControls extends StatelessWidget {
+  const VideoTransportControls({
+    required this.isPlaying,
+    required this.onSeekBackward,
+    required this.onTogglePlayback,
+    required this.onSeekForward,
+    super.key,
+  });
+
+  final bool isPlaying;
+  final VoidCallback onSeekBackward;
+  final VoidCallback onTogglePlayback;
+  final VoidCallback onSeekForward;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Tooltip(
+            message: '15秒戻る',
+            child: FilledButton.tonalIcon(
+              key: const Key('seek-backward-15-seconds'),
+              style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+              onPressed: onSeekBackward,
+              icon: const Icon(Icons.fast_rewind),
+              label: const Text('15秒'),
+            ),
+          ),
+        ),
+        const SizedBox(width: 12),
+        IconButton.filled(
+          key: const Key('toggle-video-playback'),
+          style: IconButton.styleFrom(minimumSize: const Size.square(56)),
+          tooltip: isPlaying ? '一時停止' : '再生',
+          onPressed: onTogglePlayback,
+          icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Tooltip(
+            message: '15秒進む',
+            child: FilledButton.tonalIcon(
+              key: const Key('seek-forward-15-seconds'),
+              style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
+              onPressed: onSeekForward,
+              icon: const Icon(Icons.fast_forward),
+              label: const Text('15秒'),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -795,22 +844,62 @@ class ProcedureTimingCard extends StatelessWidget {
                   ),
               ],
             ),
-            onTapStart == null
-                ? startText
-                : InkWell(onTap: onTapStart, child: startText),
-            onTapEnd == null
-                ? endText
-                : InkWell(onTap: onTapEnd, child: endText),
-            Text('所要時間：${formatProcedureDuration(timing.duration)}'),
-            const SizedBox(height: 10),
+            if (timing.isRunning) ...[
+              onTapStart == null
+                  ? startText
+                  : InkWell(onTap: onTapStart, child: startText),
+              const SizedBox(height: 16),
+            ] else if (timing.isCompleted) ...[
+              onTapStart == null
+                  ? startText
+                  : InkWell(onTap: onTapStart, child: startText),
+              onTapEnd == null
+                  ? endText
+                  : InkWell(onTap: onTapEnd, child: endText),
+              Text('所要時間：${formatProcedureDuration(timing.duration)}'),
+              const SizedBox(height: 16),
+            ] else
+              const SizedBox(height: 12),
             if (isSaving)
-              const Center(child: CircularProgressIndicator())
+              const SizedBox(
+                height: 56,
+                child: Center(child: CircularProgressIndicator()),
+              )
             else if (timing.isNotStarted)
-              FilledButton(onPressed: onStart, child: const Text('開始'))
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: FilledButton.icon(
+                  key: const Key('procedure-start-button'),
+                  onPressed: onStart,
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('この工程を開始'),
+                ),
+              )
             else if (timing.isRunning)
-              FilledButton(onPressed: onEnd, child: const Text('終了'))
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: FilledButton.icon(
+                  key: const Key('procedure-end-button'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Theme.of(context).colorScheme.error,
+                    foregroundColor: Theme.of(context).colorScheme.onError,
+                  ),
+                  onPressed: onEnd,
+                  icon: const Icon(Icons.stop),
+                  label: const Text('この工程を終了'),
+                ),
+              )
             else
-              OutlinedButton(onPressed: onReset, child: const Text('再設定')),
+              Align(
+                alignment: Alignment.centerRight,
+                child: OutlinedButton.icon(
+                  onPressed: onReset,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('再設定'),
+                ),
+              ),
           ],
         ),
       ),

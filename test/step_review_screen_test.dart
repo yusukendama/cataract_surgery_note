@@ -76,6 +76,12 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('自己評価・反省点'), findsOneWidget);
+    expect(find.text('任意'), findsOneWidget);
+    expect(find.widgetWithText(TextField, '反省点'), findsNothing);
+
+    await tester.tap(find.text('自己評価・反省点'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(TextField, '反省点'), findsOneWidget);
 
     await tester.ensureVisible(find.widgetWithText(Tab, '症例メモ'));
     await tester.pumpAndSettle();
