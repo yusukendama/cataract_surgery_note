@@ -46,6 +46,7 @@ class _RecordDetailBody extends ConsumerStatefulWidget {
 class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
   bool _isDeleting = false;
   bool _isUpdatingVideo = false;
+  bool _isUpdatingDetails = false;
 
   @override
   Widget build(BuildContext context) {
@@ -55,9 +56,20 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        Text(
-          '${DateFormat('yyyy/MM/dd').format(record.surgeryDate)} ${record.eyeSide.label}',
-          style: Theme.of(context).textTheme.headlineSmall,
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${DateFormat('yyyy/MM/dd').format(record.surgeryDate)} ${record.eyeSide.label}',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+            ),
+            IconButton(
+              tooltip: '手術日・左右眼を変更',
+              onPressed: _isUpdatingDetails ? null : _editRecordDetails,
+              icon: const Icon(Icons.edit_outlined),
+            ),
+          ],
         ),
         const SizedBox(height: 8),
         Text('状態: ${record.reviewStatus.label}'),
@@ -119,6 +131,39 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     );
   }
 
+  Future<void> _editRecordDetails() async {
+    final record = widget.record;
+    final result = await showDialog<(DateTime, EyeSide)>(
+      context: context,
+      builder: (_) => _EditRecordDialog(
+        initialDate: record.surgeryDate,
+        initialEyeSide: record.eyeSide,
+      ),
+    );
+    if (result == null) {
+      return;
+    }
+
+    setState(() => _isUpdatingDetails = true);
+    try {
+      await ref
+          .read(surgeryRepositoryProvider)
+          .updateRecordDetails(
+            surgeryRecordId: record.id,
+            surgeryDate: result.$1,
+            eyeSide: result.$2,
+          );
+      ref.invalidate(surgeryRecordProvider(record.id));
+      ref.invalidate(surgeryRecordsProvider);
+    } catch (_) {
+      _showMessage('変更を保存できませんでした。もう一度お試しください。');
+    } finally {
+      if (mounted) {
+        setState(() => _isUpdatingDetails = false);
+      }
+    }
+  }
+
   Future<void> _pickVideo() async {
     final record = widget.record;
     if (record.videoPath != null) {
@@ -126,9 +171,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
         context: context,
         builder: (context) => AlertDialog(
           title: const Text('動画を差し替える'),
-          content: const Text(
-            '動画を差し替えると、現在設定されている工程位置が新しい動画と一致しなくなる可能性があります。',
-          ),
+          content: const Text('動画を差し替えると、現在設定されている工程位置が新しい動画と一致しなくなる可能性があります。'),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -277,6 +320,80 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+}
+
+class _EditRecordDialog extends StatefulWidget {
+  const _EditRecordDialog({
+    required this.initialDate,
+    required this.initialEyeSide,
+  });
+
+  final DateTime initialDate;
+  final EyeSide initialEyeSide;
+
+  @override
+  State<_EditRecordDialog> createState() => _EditRecordDialogState();
+}
+
+class _EditRecordDialogState extends State<_EditRecordDialog> {
+  late DateTime _surgeryDate = widget.initialDate;
+  late EyeSide _eyeSide = widget.initialEyeSide;
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('手術日・左右眼を変更'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('手術日'),
+            subtitle: Text(DateFormat('yyyy/MM/dd').format(_surgeryDate)),
+            trailing: const Icon(Icons.calendar_today),
+            onTap: _pickDate,
+          ),
+          const SizedBox(height: 12),
+          SegmentedButton<EyeSide>(
+            segments: EyeSide.values
+                .map(
+                  (side) => ButtonSegment<EyeSide>(
+                    value: side,
+                    label: Text(side.label),
+                  ),
+                )
+                .toList(),
+            selected: {_eyeSide},
+            onSelectionChanged: (selection) {
+              setState(() => _eyeSide = selection.single);
+            },
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('キャンセル'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, (_surgeryDate, _eyeSide)),
+          child: const Text('保存'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _surgeryDate,
+      firstDate: DateTime(2000),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+    if (picked != null) {
+      setState(() => _surgeryDate = picked);
     }
   }
 }

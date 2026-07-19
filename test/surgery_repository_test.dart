@@ -180,6 +180,27 @@ void main() {
     expect(restored!.caseMemo, '第一助手あり。');
   });
 
+  test('手術日と左右眼を修正できる', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 7, 15),
+      eyeSide: EyeSide.right,
+    );
+
+    await repository.updateRecordDetails(
+      surgeryRecordId: record.id,
+      surgeryDate: DateTime(2026, 7, 18, 13, 45),
+      eyeSide: EyeSide.left,
+    );
+
+    final restored = await repository.getRecord(record.id);
+    expect(restored!.eyeSide, EyeSide.left);
+    expect(restored.surgeryDate.year, 2026);
+    expect(restored.surgeryDate.month, 7);
+    expect(restored.surgeryDate.day, 18);
+    expect(restored.surgeryDate.hour, 0);
+    expect(restored.updatedAt.isAfter(record.updatedAt), isTrue);
+  });
+
   test('clearStepTimingsで全工程の開始・終了のみクリアされる', () async {
     final record = await repository.createRecord(
       surgeryDate: DateTime(2026, 7, 15),

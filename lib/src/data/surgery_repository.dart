@@ -115,6 +115,31 @@ WHERE id = ?
     );
   }
 
+  Future<void> updateRecordDetails({
+    required String surgeryRecordId,
+    required DateTime surgeryDate,
+    required EyeSide eyeSide,
+  }) async {
+    final normalizedDate = DateTime(
+      surgeryDate.year,
+      surgeryDate.month,
+      surgeryDate.day,
+    );
+    await _database.customStatement(
+      '''
+UPDATE surgery_records
+SET surgery_date = ?, eye_side = ?, updated_at = ?
+WHERE id = ?
+''',
+      [
+        _dateToMillis(normalizedDate),
+        eyeSide.name,
+        _dateToMillis(DateTime.now()),
+        surgeryRecordId,
+      ],
+    );
+  }
+
   Future<void> updateCaseMemo({
     required String surgeryRecordId,
     required String caseMemo,
