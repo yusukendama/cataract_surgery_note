@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/surgery_models.dart';
+import '../domain/surgery_trend.dart';
 import 'app_database.dart';
 import 'record_video_service.dart';
 import 'surgery_repository.dart';
@@ -47,6 +48,10 @@ final recordVideoFileProvider = FutureProvider.family<File?, String>((
 
 final surgeryRecordsProvider = FutureProvider<List<SurgeryRecord>>((ref) {
   return ref.watch(surgeryRepositoryProvider).watchableListSnapshot();
+});
+
+final surgeryAnalysisProvider = FutureProvider<SurgeryAnalysisSnapshot>((ref) {
+  return ref.watch(surgeryRepositoryProvider).fetchAnalysisSnapshot();
 });
 
 final surgeryRecordProvider = FutureProvider.family<SurgeryRecord?, String>((

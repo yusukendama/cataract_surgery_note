@@ -240,6 +240,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
           );
       ref.invalidate(surgeryRecordProvider(record.id));
       ref.invalidate(surgeryRecordsProvider);
+      ref.invalidate(surgeryAnalysisProvider);
     } catch (_) {
       _showMessage('変更を保存できませんでした。もう一度お試しください。');
     } finally {
@@ -351,6 +352,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     ref.invalidate(surgeryRecordsProvider);
     ref.invalidate(recordVideoFileProvider(widget.record.id));
     ref.invalidate(stepReviewsProvider(widget.record.id));
+    ref.invalidate(surgeryAnalysisProvider);
   }
 
   String _videoErrorMessage(Object error) {
@@ -390,6 +392,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
           .read(recordVideoServiceProvider)
           .deleteRecordAndManagedVideos(widget.record.id);
       ref.invalidate(surgeryRecordsProvider);
+      ref.invalidate(surgeryAnalysisProvider);
       if (mounted) {
         Navigator.of(context).pop();
       }

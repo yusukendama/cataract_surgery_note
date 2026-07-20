@@ -1,8 +1,10 @@
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
 import '../domain/procedure_timing_rules.dart';
 import '../domain/surgery_models.dart';
+import '../domain/surgery_trend.dart';
 import 'app_database.dart';
 
 class SurgeryRepository {
@@ -29,6 +31,69 @@ ORDER BY surgery_date DESC, created_at DESC
 ''', readsFrom: const {})
         .watch()
         .map((rows) => rows.map(_recordFromRow).toList());
+  }
+
+  /// Reads only the metadata and timing values needed by the analysis screen.
+  /// This method never creates missing step reviews or touches video files.
+  Future<SurgeryAnalysisSnapshot> fetchAnalysisSnapshot() async {
+    final rows = await _database.customSelect('''
+SELECT
+  r.id AS record_id,
+  r.surgery_date,
+  r.created_at,
+  r.eye_side,
+  s.step,
+  s.start_milliseconds,
+  s.end_milliseconds
+FROM surgery_records AS r
+LEFT JOIN surgical_step_reviews AS s
+  ON s.surgery_record_id = r.id
+ORDER BY r.surgery_date ASC, r.created_at ASC, r.id ASC
+''', readsFrom: const {}).get();
+
+    final recordIds = <String>{};
+    final measurements = <SurgeryAnalysisMeasurement>[];
+    for (final row in rows) {
+      final recordId = row.read<String>('record_id');
+      recordIds.add(recordId);
+      final storageId = row.read<String?>('step');
+      if (storageId == null) {
+        continue;
+      }
+      final step = SurgicalStep.fromStorageId(storageId);
+      if (step == null) {
+        assert(() {
+          debugPrint('分析対象外の未知の工程IDを除外しました: $storageId');
+          return true;
+        }());
+        continue;
+      }
+      if (!surgicalStepsInDisplayOrder.contains(step)) {
+        continue;
+      }
+      final eyeSideName = row.read<String>('eye_side');
+      final eyeSide = EyeSide.values
+          .where((value) => value.name == eyeSideName)
+          .firstOrNull;
+      if (eyeSide == null) {
+        continue;
+      }
+      measurements.add(
+        SurgeryAnalysisMeasurement(
+          recordId: recordId,
+          surgeryDate: _millisToDate(row.read<int>('surgery_date')),
+          createdAt: _millisToDate(row.read<int>('created_at')),
+          eyeSide: eyeSide,
+          step: step,
+          startMilliseconds: row.read<int?>('start_milliseconds'),
+          endMilliseconds: row.read<int?>('end_milliseconds'),
+        ),
+      );
+    }
+    return SurgeryAnalysisSnapshot(
+      recordCount: recordIds.length,
+      measurements: List.unmodifiable(measurements),
+    );
   }
 
   Future<SurgeryRecord?> getRecord(String id) async {

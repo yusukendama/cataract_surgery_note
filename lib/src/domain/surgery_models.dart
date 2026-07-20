@@ -1,3 +1,5 @@
+import 'duration_formatters.dart';
+
 enum EyeSide {
   right,
   left;
@@ -174,12 +176,7 @@ class SurgicalStepReview {
   final DateTime updatedAt;
 
   Duration? get duration {
-    final start = startMilliseconds;
-    final end = endMilliseconds;
-    if (start == null || end == null || end <= start) {
-      return null;
-    }
-    return Duration(milliseconds: end - start);
+    return procedureDurationBetween(startMilliseconds, endMilliseconds);
   }
 
   bool get isNotStarted => startMilliseconds == null && endMilliseconds == null;

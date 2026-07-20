@@ -349,6 +349,7 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
             originalFileName: _selectedVideo.displayName,
           );
       ref.invalidate(surgeryRecordsProvider);
+      ref.invalidate(surgeryAnalysisProvider);
       if (!mounted) {
         return;
       }

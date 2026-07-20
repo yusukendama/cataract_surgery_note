@@ -7,6 +7,7 @@ import 'package:video_player/video_player.dart';
 
 import '../../data/providers.dart';
 import '../../domain/surgery_models.dart';
+import '../../domain/duration_formatters.dart';
 
 enum _LeaveAction { cancel, discard, save }
 
@@ -474,6 +475,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       ref.invalidate(surgeryRecordProvider(widget.recordId));
       ref.invalidate(surgeryRecordsProvider);
       ref.invalidate(stepReviewsProvider(widget.recordId));
+      ref.invalidate(surgeryAnalysisProvider);
     } catch (error) {
       _showMessage(_describeVideoError(error));
     }
@@ -587,6 +589,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       ref.invalidate(stepReviewsProvider(widget.recordId));
       ref.invalidate(surgeryRecordProvider(widget.recordId));
       ref.invalidate(surgeryRecordsProvider);
+      ref.invalidate(surgeryAnalysisProvider);
     } catch (_) {
       _showMessage('計測結果を保存できませんでした。もう一度お試しください。');
     } finally {
@@ -911,27 +914,4 @@ class ProcedureTimingCard extends StatelessWidget {
       ),
     );
   }
-}
-
-String formatTimelineMilliseconds(int? milliseconds) {
-  if (milliseconds == null) {
-    return '未設定';
-  }
-  final duration = Duration(milliseconds: milliseconds);
-  final minutes = duration.inMinutes;
-  final seconds = duration.inSeconds % 60;
-  final tenths = (duration.inMilliseconds % 1000) ~/ 100;
-  return '$minutes:${seconds.toString().padLeft(2, '0')}.$tenths';
-}
-
-String formatProcedureDuration(Duration? duration) {
-  if (duration == null) {
-    return '未設定';
-  }
-  final minutes = duration.inMinutes;
-  final seconds = duration.inSeconds % 60;
-  if (minutes == 0) {
-    return '$seconds秒';
-  }
-  return '$minutes分${seconds.toString().padLeft(2, '0')}秒';
 }

@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../../data/providers.dart';
 import '../../data/surgery_video_picker.dart';
 import '../../domain/surgery_models.dart';
+import '../analysis/analysis_screen.dart';
 import 'new_record_screen.dart';
 import 'record_detail_screen.dart';
 
@@ -20,7 +21,20 @@ class RecordListScreen extends ConsumerWidget {
     final records = ref.watch(surgeryRecordsProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('白内障執刀ノート')),
+      appBar: AppBar(
+        title: const Text('白内障執刀ノート'),
+        actions: [
+          IconButton(
+            tooltip: '分析',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const AnalysisScreen()),
+              );
+            },
+            icon: const Icon(Icons.show_chart, semanticLabel: '分析'),
+          ),
+        ],
+      ),
       body: records.when(
         data: (items) {
           if (items.isEmpty) {
