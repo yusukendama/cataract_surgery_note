@@ -41,6 +41,57 @@ void main() {
     }
   });
 
+  test('動画と症例情報を一連の処理で新規登録できる', () async {
+    final source = await _writeSourceVideo(tempDirectory, 'surgery.mp4', 512);
+
+    final record = await service.createRecordWithVideo(
+      surgeryDate: DateTime(2026, 7, 19, 14, 30),
+      eyeSide: EyeSide.left,
+      sourcePath: source.path,
+      originalFileName: 'surgery.mp4',
+    );
+
+    expect(record.surgeryDate, DateTime(2026, 7, 19));
+    expect(record.eyeSide, EyeSide.left);
+    expect(record.videoDisplayName, 'surgery.mp4');
+    expect(record.videoPath, isNotNull);
+    expect(
+      await videoStorageRepository.resolveVideo(record.videoPath!),
+      isNotNull,
+    );
+    expect(await surgeryRepository.watchableListSnapshot(), hasLength(1));
+  });
+
+  test('新規登録時の動画コピー失敗で空の症例を残さない', () async {
+    await expectLater(
+      () => service.createRecordWithVideo(
+        surgeryDate: DateTime(2026, 7, 19),
+        eyeSide: EyeSide.right,
+        sourcePath: p.join(tempDirectory.path, 'missing.mp4'),
+        originalFileName: 'missing.mp4',
+      ),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(await surgeryRepository.watchableListSnapshot(), isEmpty);
+  });
+
+  test('新規登録時の非対応形式エラーで空の症例を残さない', () async {
+    final source = await _writeSourceVideo(tempDirectory, 'surgery.avi', 512);
+
+    await expectLater(
+      () => service.createRecordWithVideo(
+        surgeryDate: DateTime(2026, 7, 19),
+        eyeSide: EyeSide.right,
+        sourcePath: source.path,
+        originalFileName: 'surgery.avi',
+      ),
+      throwsA(isA<ArgumentError>()),
+    );
+
+    expect(await surgeryRepository.watchableListSnapshot(), isEmpty);
+  });
+
   test('コピー失敗時に既存パスが維持される', () async {
     final record = await surgeryRepository.createRecord(
       surgeryDate: DateTime(2026, 6, 29),

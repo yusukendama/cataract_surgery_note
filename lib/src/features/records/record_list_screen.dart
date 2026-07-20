@@ -3,12 +3,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/providers.dart';
+import '../../data/surgery_video_picker.dart';
 import '../../domain/surgery_models.dart';
 import 'new_record_screen.dart';
 import 'record_detail_screen.dart';
 
+typedef NewRecordScreenBuilder = Widget Function(SelectedSurgeryVideo video);
+
 class RecordListScreen extends ConsumerWidget {
-  const RecordListScreen({super.key});
+  const RecordListScreen({this.newRecordScreenBuilder, super.key});
+
+  final NewRecordScreenBuilder? newRecordScreenBuilder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -45,13 +50,36 @@ class RecordListScreen extends ConsumerWidget {
         loading: () => const Center(child: CircularProgressIndicator()),
       ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          Navigator.of(context).push(
-            MaterialPageRoute<void>(builder: (_) => const NewRecordScreen()),
-          );
-        },
+        onPressed: () => _startNewRecord(context, ref),
         icon: const Icon(Icons.add),
         label: const Text('新規症例'),
+      ),
+    );
+  }
+
+  Future<void> _startNewRecord(BuildContext context, WidgetRef ref) async {
+    final SelectedSurgeryVideo? selectedVideo;
+    try {
+      selectedVideo = await ref.read(surgeryVideoPickerProvider).pickVideo();
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('動画を選択できませんでした。写真へのアクセス権限を確認して、もう一度お試しください。'),
+          ),
+        );
+      }
+      return;
+    }
+    if (!context.mounted || selectedVideo == null) {
+      return;
+    }
+    final video = selectedVideo;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            newRecordScreenBuilder?.call(video) ??
+            NewRecordScreen(initialVideo: video),
       ),
     );
   }

@@ -62,29 +62,31 @@ ORDER BY surgery_date DESC, created_at DESC
       createdAt: now,
       updatedAt: now,
     );
-    await _database.customStatement(
-      '''
+    await _database.transaction(() async {
+      await _database.customStatement(
+        '''
 INSERT INTO surgery_records (
   id, surgery_date, eye_side, review_status,
   video_path, video_display_name, case_memo, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''',
-      [
-        record.id,
-        _dateToMillis(record.surgeryDate),
-        record.eyeSide.name,
-        record.reviewStatus.name,
-        record.videoPath,
-        record.videoDisplayName,
-        record.caseMemo,
-        _dateToMillis(record.createdAt),
-        _dateToMillis(record.updatedAt),
-      ],
-    );
-    await ensureStepReview(
-      surgeryRecordId: record.id,
-      step: SurgicalStep.capsulorhexis,
-    );
+        [
+          record.id,
+          _dateToMillis(record.surgeryDate),
+          record.eyeSide.name,
+          record.reviewStatus.name,
+          record.videoPath,
+          record.videoDisplayName,
+          record.caseMemo,
+          _dateToMillis(record.createdAt),
+          _dateToMillis(record.updatedAt),
+        ],
+      );
+      await ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+    });
     return record;
   }
 

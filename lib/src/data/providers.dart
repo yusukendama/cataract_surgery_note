@@ -6,6 +6,7 @@ import '../domain/surgery_models.dart';
 import 'app_database.dart';
 import 'record_video_service.dart';
 import 'surgery_repository.dart';
+import 'surgery_video_picker.dart';
 import 'video_storage_repository.dart';
 
 final appDatabaseProvider = Provider<AppDatabase>((ref) {
@@ -20,6 +21,10 @@ final surgeryRepositoryProvider = Provider<SurgeryRepository>((ref) {
 
 final videoStorageRepositoryProvider = Provider<VideoStorageRepository>((ref) {
   return LocalVideoStorageRepository();
+});
+
+final surgeryVideoPickerProvider = Provider<SurgeryVideoPicker>((ref) {
+  return const FilePickerSurgeryVideoPicker();
 });
 
 final recordVideoServiceProvider = Provider<RecordVideoService>((ref) {

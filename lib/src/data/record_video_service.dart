@@ -16,6 +16,37 @@ class RecordVideoService {
   final SurgeryRepository _surgeryRepository;
   final VideoStorageRepository _videoStorageRepository;
 
+  Future<SurgeryRecord> createRecordWithVideo({
+    required DateTime surgeryDate,
+    required EyeSide eyeSide,
+    required String sourcePath,
+    required String originalFileName,
+  }) async {
+    SurgeryRecord? record;
+    try {
+      record = await _surgeryRepository.createRecord(
+        surgeryDate: surgeryDate,
+        eyeSide: eyeSide,
+      );
+      return await importVideoForRecord(
+        surgeryRecordId: record.id,
+        sourcePath: sourcePath,
+        originalFileName: originalFileName,
+      );
+    } catch (_) {
+      if (record != null) {
+        try {
+          await _videoStorageRepository.deleteVideosForRecord(record.id);
+        } on Object {
+          // Continue removing the incomplete database record even if file
+          // cleanup fails.
+        }
+        await _surgeryRepository.deleteRecord(record.id);
+      }
+      rethrow;
+    }
+  }
+
   Future<SurgeryRecord> importVideoForRecord({
     required String surgeryRecordId,
     required String sourcePath,
