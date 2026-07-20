@@ -51,7 +51,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
   @override
   Widget build(BuildContext context) {
     final record = widget.record;
-    final hasVideo = record.videoPath != null;
+    final videoFile = ref.watch(recordVideoFileProvider(record.id));
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -74,36 +74,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
         const SizedBox(height: 8),
         Text('状態: ${record.reviewStatus.label}'),
         const SizedBox(height: 24),
-        Card(
-          child: ListTile(
-            leading: Icon(hasVideo ? Icons.movie : Icons.movie_outlined),
-            title: Text(record.videoDisplayName ?? '動画未登録'),
-            subtitle: Text(hasVideo ? '登録済みの動画' : '動画が登録されていません'),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            FilledButton.icon(
-              onPressed: _isUpdatingVideo ? null : _pickVideo,
-              icon: _isUpdatingVideo
-                  ? const SizedBox.square(
-                      dimension: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.video_call_outlined),
-              label: Text(hasVideo ? '動画を変更' : '動画を選択'),
-            ),
-            if (hasVideo)
-              OutlinedButton.icon(
-                onPressed: _isUpdatingVideo ? null : _deleteVideo,
-                icon: const Icon(Icons.delete_outline),
-                label: const Text('動画を削除'),
-              ),
-          ],
-        ),
+        ..._buildVideoSection(context, record, videoFile),
         const SizedBox(height: 24),
         OutlinedButton.icon(
           onPressed: () {
@@ -128,6 +99,120 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
           label: const Text('症例を削除'),
         ),
       ],
+    );
+  }
+
+  /// Builds the video area, distinguishing four states so the screen never
+  /// claims a video is available when its file is gone (e.g. after an
+  /// iCloud restore, which keeps the database but not the excluded videos):
+  /// unregistered, checking, registered-and-present, and registered-but-missing.
+  List<Widget> _buildVideoSection(
+    BuildContext context,
+    SurgeryRecord record,
+    AsyncValue<File?> videoFile,
+  ) {
+    if (record.videoPath == null) {
+      return [
+        const Card(
+          child: ListTile(
+            leading: Icon(Icons.movie_outlined),
+            title: Text('動画未登録'),
+            subtitle: Text('動画が登録されていません'),
+          ),
+        ),
+        const SizedBox(height: 12),
+        _pickVideoButton('動画を選択'),
+      ];
+    }
+
+    return videoFile.when(
+      data: (file) {
+        if (file != null) {
+          return [
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.movie),
+                title: Text(record.videoDisplayName ?? '登録済みの動画'),
+                subtitle: const Text('登録済みの動画'),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
+              child: Text(
+                'アプリ内に保存した動画はバックアップされません。元の動画は別途保管してください。',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [_pickVideoButton('動画を変更'), _deleteVideoButton()],
+            ),
+          ];
+        }
+        return [
+          Card(
+            child: ListTile(
+              isThreeLine: true,
+              leading: const Icon(Icons.error_outline),
+              title: Text(record.videoDisplayName ?? '動画'),
+              subtitle: const Text(
+                '保存した動画が見つかりません。機種変更や端末の復元後は、元の動画を選び直してください。',
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _pickVideoButton('動画を再選択'),
+        ];
+      },
+      loading: () => [
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.movie),
+            title: Text(record.videoDisplayName ?? '動画'),
+            subtitle: const Text('動画を確認しています…'),
+            trailing: const SizedBox.square(
+              dimension: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+          ),
+        ),
+      ],
+      error: (_, _) => [
+        Card(
+          child: ListTile(
+            leading: const Icon(Icons.error_outline),
+            title: Text(record.videoDisplayName ?? '動画'),
+            subtitle: const Text('動画を確認できませんでした。もう一度お試しください。'),
+          ),
+        ),
+        const SizedBox(height: 12),
+        _pickVideoButton('動画を再選択'),
+      ],
+    );
+  }
+
+  Widget _pickVideoButton(String label) {
+    return FilledButton.icon(
+      onPressed: _isUpdatingVideo ? null : _pickVideo,
+      icon: _isUpdatingVideo
+          ? const SizedBox.square(
+              dimension: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.video_call_outlined),
+      label: Text(label),
+    );
+  }
+
+  Widget _deleteVideoButton() {
+    return OutlinedButton.icon(
+      onPressed: _isUpdatingVideo ? null : _deleteVideo,
+      icon: const Icon(Icons.delete_outline),
+      label: const Text('動画を削除'),
     );
   }
 
