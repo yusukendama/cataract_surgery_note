@@ -778,77 +778,67 @@ class VideoTransportControls extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final playbackLabel = isPlaying ? '一時停止' : '再生';
-    return Column(
+    return Row(
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: _VideoSeekButton(
-                controlKey: const Key('seek-backward-5-seconds'),
-                semanticsLabel: '5秒戻る',
-                secondsLabel: '5秒',
-                icon: Icons.fast_rewind,
-                onPressed: onSeekBackward5,
-                emphasized: true,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Semantics(
-              key: const Key('toggle-video-playback'),
-              label: playbackLabel,
-              button: true,
-              onTap: onTogglePlayback,
-              excludeSemantics: true,
-              child: Tooltip(
-                message: playbackLabel,
-                excludeFromSemantics: true,
-                child: IconButton.filled(
-                  style: IconButton.styleFrom(
-                    minimumSize: const Size.square(56),
-                  ),
-                  onPressed: onTogglePlayback,
-                  icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _VideoSeekButton(
-                controlKey: const Key('seek-forward-5-seconds'),
-                semanticsLabel: '5秒進む',
-                secondsLabel: '5秒',
-                icon: Icons.fast_forward,
-                onPressed: onSeekForward5,
-                emphasized: true,
-              ),
-            ),
-          ],
+        Expanded(
+          child: _VideoSeekButton(
+            controlKey: const Key('seek-backward-15-seconds'),
+            semanticsLabel: '15秒戻る',
+            secondsLabel: '15秒',
+            icon: Icons.fast_rewind,
+            onPressed: onSeekBackward15,
+            emphasized: false,
+          ),
         ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: _VideoSeekButton(
-                controlKey: const Key('seek-backward-15-seconds'),
-                semanticsLabel: '15秒戻る',
-                secondsLabel: '15秒',
-                icon: Icons.fast_rewind,
-                onPressed: onSeekBackward15,
-                emphasized: false,
-              ),
+        const SizedBox(width: 4),
+        Expanded(
+          child: _VideoSeekButton(
+            controlKey: const Key('seek-backward-5-seconds'),
+            semanticsLabel: '5秒戻る',
+            secondsLabel: '5秒',
+            icon: Icons.fast_rewind,
+            onPressed: onSeekBackward5,
+            emphasized: true,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Semantics(
+          key: const Key('toggle-video-playback'),
+          label: playbackLabel,
+          button: true,
+          onTap: onTogglePlayback,
+          excludeSemantics: true,
+          child: Tooltip(
+            message: playbackLabel,
+            excludeFromSemantics: true,
+            child: IconButton.filled(
+              style: IconButton.styleFrom(minimumSize: const Size.square(56)),
+              onPressed: onTogglePlayback,
+              icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _VideoSeekButton(
-                controlKey: const Key('seek-forward-15-seconds'),
-                semanticsLabel: '15秒進む',
-                secondsLabel: '15秒',
-                icon: Icons.fast_forward,
-                onPressed: onSeekForward15,
-                emphasized: false,
-              ),
-            ),
-          ],
+          ),
+        ),
+        const SizedBox(width: 4),
+        Expanded(
+          child: _VideoSeekButton(
+            controlKey: const Key('seek-forward-5-seconds'),
+            semanticsLabel: '5秒進む',
+            secondsLabel: '5秒',
+            icon: Icons.fast_forward,
+            onPressed: onSeekForward5,
+            emphasized: true,
+          ),
+        ),
+        const SizedBox(width: 4),
+        Expanded(
+          child: _VideoSeekButton(
+            controlKey: const Key('seek-forward-15-seconds'),
+            semanticsLabel: '15秒進む',
+            secondsLabel: '15秒',
+            icon: Icons.fast_forward,
+            onPressed: onSeekForward15,
+            emphasized: false,
+          ),
         ),
       ],
     );
@@ -876,26 +866,24 @@ class _VideoSeekButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final style = emphasized
         ? FilledButton.styleFrom(
-            minimumSize: const Size(0, 48),
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+            minimumSize: const Size(48, 64),
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
           )
         : OutlinedButton.styleFrom(
-            minimumSize: const Size(0, 48),
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+            minimumSize: const Size(48, 64),
+            padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
           );
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 20),
+        const SizedBox(height: 2),
+        Text(secondsLabel, maxLines: 1),
+      ],
+    );
     final button = emphasized
-        ? FilledButton.tonalIcon(
-            style: style,
-            onPressed: onPressed,
-            icon: Icon(icon),
-            label: Text(secondsLabel),
-          )
-        : OutlinedButton.icon(
-            style: style,
-            onPressed: onPressed,
-            icon: Icon(icon),
-            label: Text(secondsLabel),
-          );
+        ? FilledButton.tonal(style: style, onPressed: onPressed, child: content)
+        : OutlinedButton(style: style, onPressed: onPressed, child: content);
     return Semantics(
       key: controlKey,
       label: semanticsLabel,

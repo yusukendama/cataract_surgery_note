@@ -40,12 +40,20 @@ void main() {
     expect(find.text('15秒'), findsNWidgets(2));
     expect(find.textContaining('0.2秒'), findsNothing);
 
-    expect(tester.getCenter(backward5).dy, tester.getCenter(toggle).dy);
-    expect(tester.getCenter(forward5).dy, tester.getCenter(toggle).dy);
-    expect(
-      tester.getCenter(backward15).dy,
-      greaterThan(tester.getCenter(toggle).dy),
-    );
+    final backward15Center = tester.getCenter(backward15);
+    final backward5Center = tester.getCenter(backward5);
+    final toggleCenter = tester.getCenter(toggle);
+    final forward5Center = tester.getCenter(forward5);
+    final forward15Center = tester.getCenter(forward15);
+
+    expect(backward15Center.dy, toggleCenter.dy);
+    expect(backward5Center.dy, toggleCenter.dy);
+    expect(forward5Center.dy, toggleCenter.dy);
+    expect(forward15Center.dy, toggleCenter.dy);
+    expect(backward15Center.dx, lessThan(backward5Center.dx));
+    expect(backward5Center.dx, lessThan(toggleCenter.dx));
+    expect(toggleCenter.dx, lessThan(forward5Center.dx));
+    expect(forward5Center.dx, lessThan(forward15Center.dx));
     expect(tester.getSize(backward5).height, greaterThanOrEqualTo(48));
     expect(tester.getSize(forward5).height, greaterThanOrEqualTo(48));
     expect(tester.getSize(backward15).height, greaterThanOrEqualTo(48));
@@ -140,7 +148,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('横幅320と大きな文字でも全操作へアクセスできる', (tester) async {
+  testWidgets('横幅288と大きな文字でも全操作へアクセスできる', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -149,7 +157,7 @@ void main() {
             child: Align(
               alignment: Alignment.topCenter,
               child: SizedBox(
-                width: 320,
+                width: 288,
                 child: VideoTransportControls(
                   isPlaying: false,
                   onSeekBackward5: () {},
