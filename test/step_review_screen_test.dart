@@ -55,6 +55,15 @@ void main() {
     expect(find.byType(ProcedureTimingCard), findsOneWidget);
   });
 
+  testWidgets('動画が未初期化の場合は再生操作を表示しない', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+
+    await pumpScreen(tester, database, record.id);
+
+    expect(find.byType(VideoTransportControls), findsNothing);
+  });
+
   testWidgets('タブ切替で該当工程のカードと症例メモ欄が表示される', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);

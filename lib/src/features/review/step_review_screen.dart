@@ -6,8 +6,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../data/providers.dart';
-import '../../domain/surgery_models.dart';
 import '../../domain/duration_formatters.dart';
+import '../../domain/surgery_models.dart';
+import '../../domain/video_seek_coordinator.dart';
 
 enum _LeaveAction { cancel, discard, save }
 
@@ -28,6 +29,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
 
   late final TabController _tabController;
   VideoPlayerController? _videoController;
+  VideoSeekCoordinator? _videoSeekCoordinator;
   String? _loadedVideoPath;
   String? _loadedRecordId;
   String? _videoErrorMessage;
@@ -40,7 +42,9 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   List<SurgicalStepReview>? _latestReviews;
 
   int get _currentMilliseconds =>
-      _videoController?.value.position.inMilliseconds ?? 0;
+      _videoSeekCoordinator?.effectivePosition.inMilliseconds ??
+      _videoController?.value.position.inMilliseconds ??
+      0;
 
   @override
   void initState() {
@@ -54,6 +58,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   @override
   void dispose() {
     _tabController.dispose();
+    _videoSeekCoordinator?.dispose();
     _videoController?.dispose();
     _caseMemoController.dispose();
     for (final controller in _reflectionControllers.values) {
@@ -357,14 +362,16 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
           value: positionMs,
           max: durationMs,
           onChanged: (value) {
-            controller.seekTo(Duration(milliseconds: value.round()));
+            _seekToMilliseconds(value.round());
           },
         ),
         VideoTransportControls(
           isPlaying: controller.value.isPlaying,
-          onSeekBackward: () => _seekRelative(const Duration(seconds: -15)),
+          onSeekBackward5: () => _seekRelative(const Duration(seconds: -5)),
+          onSeekForward5: () => _seekRelative(const Duration(seconds: 5)),
+          onSeekBackward15: () => _seekRelative(const Duration(seconds: -15)),
+          onSeekForward15: () => _seekRelative(const Duration(seconds: 15)),
           onTogglePlayback: _togglePlayback,
-          onSeekForward: () => _seekRelative(const Duration(seconds: 15)),
         ),
       ],
     );
@@ -375,10 +382,16 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       return;
     }
     _loadedVideoPath = file.path;
+    _videoSeekCoordinator?.dispose();
     _videoController?.dispose();
     _videoErrorMessage = null;
     final controller = VideoPlayerController.file(file);
     _videoController = controller;
+    _videoSeekCoordinator = VideoSeekCoordinator(
+      currentPosition: () => controller.value.position,
+      videoDuration: () => controller.value.duration,
+      seekTo: controller.seekTo,
+    );
     controller
         .initialize()
         .then((_) {
@@ -405,26 +418,24 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
 
   Future<void> _seekRelative(Duration offset) async {
     final controller = _videoController;
-    if (controller == null || !controller.value.isInitialized) {
+    final seekCoordinator = _videoSeekCoordinator;
+    if (controller == null ||
+        seekCoordinator == null ||
+        !controller.value.isInitialized) {
       return;
     }
-    final duration = controller.value.duration;
-    final current = controller.value.position;
-    final target = current + offset;
-    final bounded = target < Duration.zero
-        ? Duration.zero
-        : target > duration
-        ? duration
-        : target;
-    await controller.seekTo(bounded);
+    await seekCoordinator.seekRelative(offset);
   }
 
   Future<void> _seekToMilliseconds(int milliseconds) async {
     final controller = _videoController;
-    if (controller == null || !controller.value.isInitialized) {
+    final seekCoordinator = _videoSeekCoordinator;
+    if (controller == null ||
+        seekCoordinator == null ||
+        !controller.value.isInitialized) {
       return;
     }
-    await controller.seekTo(Duration(milliseconds: milliseconds));
+    await seekCoordinator.seekTo(Duration(milliseconds: milliseconds));
   }
 
   void _togglePlayback() {
@@ -749,55 +760,153 @@ class _StepNotesCard extends StatelessWidget {
 class VideoTransportControls extends StatelessWidget {
   const VideoTransportControls({
     required this.isPlaying,
-    required this.onSeekBackward,
+    required this.onSeekBackward5,
+    required this.onSeekForward5,
+    required this.onSeekBackward15,
+    required this.onSeekForward15,
     required this.onTogglePlayback,
-    required this.onSeekForward,
     super.key,
   });
 
   final bool isPlaying;
-  final VoidCallback onSeekBackward;
+  final VoidCallback onSeekBackward5;
+  final VoidCallback onSeekForward5;
+  final VoidCallback onSeekBackward15;
+  final VoidCallback onSeekForward15;
   final VoidCallback onTogglePlayback;
-  final VoidCallback onSeekForward;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final playbackLabel = isPlaying ? '一時停止' : '再生';
+    return Column(
       children: [
-        Expanded(
-          child: Tooltip(
-            message: '15秒戻る',
-            child: FilledButton.tonalIcon(
-              key: const Key('seek-backward-15-seconds'),
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
-              onPressed: onSeekBackward,
-              icon: const Icon(Icons.fast_rewind),
-              label: const Text('15秒'),
+        Row(
+          children: [
+            Expanded(
+              child: _VideoSeekButton(
+                controlKey: const Key('seek-backward-5-seconds'),
+                semanticsLabel: '5秒戻る',
+                secondsLabel: '5秒',
+                icon: Icons.fast_rewind,
+                onPressed: onSeekBackward5,
+                emphasized: true,
+              ),
             ),
-          ),
-        ),
-        const SizedBox(width: 12),
-        IconButton.filled(
-          key: const Key('toggle-video-playback'),
-          style: IconButton.styleFrom(minimumSize: const Size.square(56)),
-          tooltip: isPlaying ? '一時停止' : '再生',
-          onPressed: onTogglePlayback,
-          icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Tooltip(
-            message: '15秒進む',
-            child: FilledButton.tonalIcon(
-              key: const Key('seek-forward-15-seconds'),
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
-              onPressed: onSeekForward,
-              icon: const Icon(Icons.fast_forward),
-              label: const Text('15秒'),
+            const SizedBox(width: 12),
+            Semantics(
+              key: const Key('toggle-video-playback'),
+              label: playbackLabel,
+              button: true,
+              onTap: onTogglePlayback,
+              excludeSemantics: true,
+              child: Tooltip(
+                message: playbackLabel,
+                excludeFromSemantics: true,
+                child: IconButton.filled(
+                  style: IconButton.styleFrom(
+                    minimumSize: const Size.square(56),
+                  ),
+                  onPressed: onTogglePlayback,
+                  icon: Icon(isPlaying ? Icons.pause : Icons.play_arrow),
+                ),
+              ),
             ),
-          ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _VideoSeekButton(
+                controlKey: const Key('seek-forward-5-seconds'),
+                semanticsLabel: '5秒進む',
+                secondsLabel: '5秒',
+                icon: Icons.fast_forward,
+                onPressed: onSeekForward5,
+                emphasized: true,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _VideoSeekButton(
+                controlKey: const Key('seek-backward-15-seconds'),
+                semanticsLabel: '15秒戻る',
+                secondsLabel: '15秒',
+                icon: Icons.fast_rewind,
+                onPressed: onSeekBackward15,
+                emphasized: false,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _VideoSeekButton(
+                controlKey: const Key('seek-forward-15-seconds'),
+                semanticsLabel: '15秒進む',
+                secondsLabel: '15秒',
+                icon: Icons.fast_forward,
+                onPressed: onSeekForward15,
+                emphasized: false,
+              ),
+            ),
+          ],
         ),
       ],
+    );
+  }
+}
+
+class _VideoSeekButton extends StatelessWidget {
+  const _VideoSeekButton({
+    required this.controlKey,
+    required this.semanticsLabel,
+    required this.secondsLabel,
+    required this.icon,
+    required this.onPressed,
+    required this.emphasized,
+  });
+
+  final Key controlKey;
+  final String semanticsLabel;
+  final String secondsLabel;
+  final IconData icon;
+  final VoidCallback onPressed;
+  final bool emphasized;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = emphasized
+        ? FilledButton.styleFrom(
+            minimumSize: const Size(0, 48),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+          )
+        : OutlinedButton.styleFrom(
+            minimumSize: const Size(0, 48),
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+          );
+    final button = emphasized
+        ? FilledButton.tonalIcon(
+            style: style,
+            onPressed: onPressed,
+            icon: Icon(icon),
+            label: Text(secondsLabel),
+          )
+        : OutlinedButton.icon(
+            style: style,
+            onPressed: onPressed,
+            icon: Icon(icon),
+            label: Text(secondsLabel),
+          );
+    return Semantics(
+      key: controlKey,
+      label: semanticsLabel,
+      button: true,
+      onTap: onPressed,
+      excludeSemantics: true,
+      child: Tooltip(
+        message: semanticsLabel,
+        excludeFromSemantics: true,
+        child: button,
+      ),
     );
   }
 }
