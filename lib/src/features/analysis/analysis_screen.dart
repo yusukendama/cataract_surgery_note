@@ -21,16 +21,8 @@ class AnalysisScreen extends ConsumerStatefulWidget {
 class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
   static const _calculator = SurgeryTrendCalculator();
 
-  final ScrollController _chartScrollController = ScrollController();
   SurgicalStep _selectedStep = SurgicalStep.totalSurgeryTime;
   String? _selectedRecordId;
-  bool _shouldScrollToLatest = true;
-
-  @override
-  void dispose() {
-    _chartScrollController.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -56,13 +48,10 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
 
     final trend = _calculator.calculate(snapshot.measurements, _selectedStep);
     _reconcileSelectedPoint(trend.points);
-    if (_shouldScrollToLatest && trend.points.isNotEmpty) {
-      _scheduleScrollToLatest();
-    }
 
-    final selectedPoint = trend.points
-        .where((point) => point.recordId == _selectedRecordId)
-        .firstOrNull;
+    final selectedIndex = trend.points.indexWhere(
+      (point) => point.recordId == _selectedRecordId,
+    );
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
@@ -87,7 +76,6 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
             SurgeryTrendChart(
               points: trend.points,
               selectedRecordId: _selectedRecordId,
-              scrollController: _chartScrollController,
               onPointSelected: (point) {
                 setState(() => _selectedRecordId = point.recordId);
               },
@@ -96,11 +84,19 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
               const SizedBox(height: 8),
               const Text('あと1件記録すると推移を確認できます', textAlign: TextAlign.center),
             ],
-            if (selectedPoint != null) ...[
+            if (selectedIndex >= 0) ...[
               const SizedBox(height: 16),
               _SelectedPointCard(
-                point: selectedPoint,
-                onOpenDetails: () => _openRecord(selectedPoint),
+                point: trend.points[selectedIndex],
+                position: selectedIndex + 1,
+                total: trend.points.length,
+                onSelectPrevious: selectedIndex > 0
+                    ? () => _selectAdjacent(trend.points, selectedIndex - 1)
+                    : null,
+                onSelectNext: selectedIndex < trend.points.length - 1
+                    ? () => _selectAdjacent(trend.points, selectedIndex + 1)
+                    : null,
+                onOpenDetails: () => _openRecord(trend.points[selectedIndex]),
               ),
             ],
             const SizedBox(height: 12),
@@ -127,8 +123,11 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     setState(() {
       _selectedStep = selected;
       _selectedRecordId = null;
-      _shouldScrollToLatest = true;
     });
+  }
+
+  void _selectAdjacent(List<SurgeryTrendPoint> points, int index) {
+    setState(() => _selectedRecordId = points[index].recordId);
   }
 
   Future<void> _openRecord(SurgeryTrendPoint point) async {
@@ -178,24 +177,23 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       }
     });
   }
-
-  void _scheduleScrollToLatest() {
-    _shouldScrollToLatest = false;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_chartScrollController.hasClients) {
-        return;
-      }
-      _chartScrollController.jumpTo(
-        _chartScrollController.position.maxScrollExtent,
-      );
-    });
-  }
 }
 
 class _SelectedPointCard extends StatelessWidget {
-  const _SelectedPointCard({required this.point, required this.onOpenDetails});
+  const _SelectedPointCard({
+    required this.point,
+    required this.position,
+    required this.total,
+    required this.onSelectPrevious,
+    required this.onSelectNext,
+    required this.onOpenDetails,
+  });
 
   final SurgeryTrendPoint point;
+  final int position;
+  final int total;
+  final VoidCallback? onSelectPrevious;
+  final VoidCallback? onSelectNext;
   final VoidCallback onOpenDetails;
 
   @override
@@ -209,6 +207,13 @@ class _SelectedPointCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            _CaseNavigator(
+              position: position,
+              total: total,
+              onPrevious: onSelectPrevious,
+              onNext: onSelectNext,
+            ),
+            const SizedBox(height: 4),
             Text('$date ${point.eyeSide.label}'),
             const SizedBox(height: 4),
             Text(
@@ -224,6 +229,50 @@ class _SelectedPointCard extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _CaseNavigator extends StatelessWidget {
+  const _CaseNavigator({
+    required this.position,
+    required this.total,
+    required this.onPrevious,
+    required this.onNext,
+  });
+
+  final int position;
+  final int total;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onNext;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Row(
+      children: [
+        IconButton(
+          key: const Key('analysis-select-previous'),
+          onPressed: onPrevious,
+          icon: const Icon(Icons.chevron_left),
+          tooltip: '前の症例',
+        ),
+        Expanded(
+          child: Text(
+            '$position / $total 症例目',
+            textAlign: TextAlign.center,
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+        IconButton(
+          key: const Key('analysis-select-next'),
+          onPressed: onNext,
+          icon: const Icon(Icons.chevron_right),
+          tooltip: '次の症例',
+        ),
+      ],
     );
   }
 }

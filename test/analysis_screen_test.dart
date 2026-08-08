@@ -5,6 +5,7 @@ import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_trend.dart';
 import 'package:cataract_surgery_note/src/features/analysis/analysis_screen.dart';
+import 'package:cataract_surgery_note/src/features/analysis/surgery_trend_chart.dart';
 import 'package:cataract_surgery_note/src/features/records/record_detail_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_list_screen.dart';
 import 'package:flutter/material.dart';
@@ -176,6 +177,104 @@ void main() {
     expect(find.text('2026年7月20日 左眼'), findsOneWidget);
     expect(find.text('総手術時間：1分05秒'), findsOneWidget);
     expect(find.text('症例詳細を見る'), findsOneWidget);
+  });
+
+  SurgeryAnalysisSnapshot manyCases(int count) {
+    return SurgeryAnalysisSnapshot(
+      recordCount: count,
+      measurements: [
+        for (var index = 0; index < count; index++)
+          measurement(
+            id: 'c$index',
+            date: DateTime(2026, 1, 1).add(Duration(days: index)),
+            end: 60000 + index * 1000,
+          ),
+      ],
+    );
+  }
+
+  testWidgets('症例が増えても全症例を一画面に表示し横スクロールしない', (tester) async {
+    await pumpAnalysis(tester, manyCases(50));
+
+    expect(
+      find.descendant(
+        of: find.byType(SurgeryTrendChart),
+        matching: find.byType(Scrollable),
+      ),
+      findsNothing,
+    );
+    // 最古と最新の両方が同時に描画されている（＝スクロール不要で全期間が見える）。
+    expect(find.byKey(const Key('analysis-point-c0')), findsOneWidget);
+    expect(find.byKey(const Key('analysis-point-c49')), findsOneWidget);
+
+    final chart = tester.getRect(find.byType(SurgeryTrendChart));
+    final content = tester.getRect(find.byKey(const Key('analysis-content')));
+    expect(chart.width, lessThanOrEqualTo(content.width));
+  });
+
+  testWidgets('データ点の外側をタップしても最寄りの症例が選択される', (tester) async {
+    await pumpAnalysis(tester, manyCases(3));
+
+    final firstBand = tester.getRect(
+      find.byKey(const Key('analysis-point-c0')),
+    );
+    final middleBand = tester.getRect(
+      find.byKey(const Key('analysis-point-c1')),
+    );
+    final lastBand = tester.getRect(find.byKey(const Key('analysis-point-c2')));
+    // 帯は隙間なく・重なりなくチャートを覆う。
+    expect(firstBand.right, closeTo(middleBand.left, 0.5));
+    expect(middleBand.right, closeTo(lastBand.left, 0.5));
+
+    // 中央の点そのものではなく、その帯の左端付近をタップする。
+    await tester.tapAt(Offset(middleBand.left + 2, middleBand.center.dy));
+    await tester.pumpAndSettle();
+    await tester.drag(
+      find.byKey(const Key('analysis-content')),
+      const Offset(0, -300),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 / 3 症例目'), findsOneWidget);
+    expect(find.text('2026年1月2日 右眼'), findsOneWidget);
+    expect(find.text('総手術時間：1分01秒'), findsOneWidget);
+  });
+
+  testWidgets('前後ボタンで隣接症例へ移動し、両端で無効になる', (tester) async {
+    await pumpAnalysis(tester, manyCases(3));
+
+    await tester.tap(find.byKey(const Key('analysis-point-c1')));
+    await tester.pumpAndSettle();
+    await tester.drag(
+      find.byKey(const Key('analysis-content')),
+      const Offset(0, -300),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('2 / 3 症例目'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('analysis-select-previous')));
+    await tester.pumpAndSettle();
+    expect(find.text('1 / 3 症例目'), findsOneWidget);
+    expect(find.text('2026年1月1日 右眼'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(find.byKey(const Key('analysis-select-previous')))
+          .onPressed,
+      isNull,
+    );
+
+    await tester.tap(find.byKey(const Key('analysis-select-next')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('analysis-select-next')));
+    await tester.pumpAndSettle();
+    expect(find.text('3 / 3 症例目'), findsOneWidget);
+    expect(find.text('2026年1月3日 右眼'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(find.byKey(const Key('analysis-select-next')))
+          .onPressed,
+      isNull,
+    );
   });
 
   testWidgets('大きな文字でも指標選択と主要情報へアクセスできる', (tester) async {
