@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import '../../domain/duration_formatters.dart';
 import '../../domain/surgery_trend.dart';
 import 'date_label_layout.dart';
+import 'duration_axis_scale.dart';
 
 const double _chartHeight = 320;
 
@@ -112,8 +113,7 @@ class _ChartGeometry {
   const _ChartGeometry({
     required this.width,
     required this.height,
-    required this.minimumMilliseconds,
-    required this.maximumMilliseconds,
+    required this.durationAxis,
     required this.pointCount,
   });
 
@@ -122,28 +122,23 @@ class _ChartGeometry {
     required double height,
     required List<SurgeryTrendPoint> points,
   }) {
-    final values = points
-        .map((point) => point.duration.inMilliseconds)
-        .toList();
-    final minimum = values.reduce(math.min);
-    final maximum = values.reduce(math.max);
-    final range = maximum - minimum;
-    final basePadding = range == 0
-        ? math.max(5000, (maximum * 0.1).round())
-        : math.max(1000, (range * 0.1).round());
+    final maximumDuration = points
+        .map((point) => point.duration)
+        .reduce((current, next) => current > next ? current : next);
     return _ChartGeometry(
       width: width,
       height: height,
-      minimumMilliseconds: math.max(0, minimum - basePadding),
-      maximumMilliseconds: maximum + basePadding,
+      durationAxis: DurationAxisScale.forMaximum(
+        step: points.first.step,
+        maximumDuration: maximumDuration,
+      ),
       pointCount: points.length,
     );
   }
 
   final double width;
   final double height;
-  final int minimumMilliseconds;
-  final int maximumMilliseconds;
+  final DurationAxisScale durationAxis;
   final int pointCount;
 
   double get plotLeft => 56;
@@ -162,10 +157,7 @@ class _ChartGeometry {
       : plotLeft + plotWidth * index / (pointCount - 1);
 
   Offset offsetFor(int index, SurgeryTrendPoint point) {
-    final valueRange = maximumMilliseconds - minimumMilliseconds;
-    final ratio = valueRange == 0
-        ? 0.5
-        : (point.duration.inMilliseconds - minimumMilliseconds) / valueRange;
+    final ratio = durationAxis.ratioFor(point.duration);
     final y = plotBottom - (plotBottom - plotTop) * ratio;
     return Offset(xFor(index), y);
   }
@@ -183,19 +175,12 @@ class _ChartGeometry {
     return other is _ChartGeometry &&
         other.width == width &&
         other.height == height &&
-        other.minimumMilliseconds == minimumMilliseconds &&
-        other.maximumMilliseconds == maximumMilliseconds &&
+        other.durationAxis == durationAxis &&
         other.pointCount == pointCount;
   }
 
   @override
-  int get hashCode => Object.hash(
-    width,
-    height,
-    minimumMilliseconds,
-    maximumMilliseconds,
-    pointCount,
-  );
+  int get hashCode => Object.hash(width, height, durationAxis, pointCount);
 }
 
 enum _TextAnchor { start, center, end }
@@ -239,9 +224,8 @@ class _TrendChartPainter extends CustomPainter {
     final gridPaint = Paint()
       ..color = colorScheme.outlineVariant
       ..strokeWidth = 1;
-    const tickCount = 4;
-    for (var tick = 0; tick <= tickCount; tick++) {
-      final ratio = tick / tickCount;
+    for (final tick in geometry.durationAxis.ticks) {
+      final ratio = geometry.durationAxis.ratioFor(tick);
       final y =
           geometry.plotBottom -
           (geometry.plotBottom - geometry.plotTop) * ratio;
@@ -250,14 +234,9 @@ class _TrendChartPainter extends CustomPainter {
         Offset(geometry.plotRight, y),
         gridPaint,
       );
-      final value =
-          geometry.minimumMilliseconds +
-          ((geometry.maximumMilliseconds - geometry.minimumMilliseconds) *
-                  ratio)
-              .round();
       _paintText(
         canvas,
-        formatMinutesSeconds(Duration(milliseconds: value)),
+        geometry.durationAxis.labelFor(tick),
         Offset(geometry.plotLeft - 8, y),
         anchor: _TextAnchor.end,
         centerVertically: true,
