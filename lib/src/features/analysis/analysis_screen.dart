@@ -47,11 +47,10 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     }
 
     final trend = _calculator.calculate(snapshot.measurements, _selectedStep);
-    _reconcileSelectedPoint(trend.points);
-
-    final selectedIndex = trend.points.indexWhere(
-      (point) => point.recordId == _selectedRecordId,
-    );
+    final selectedIndex = _selectedIndexFor(trend.points);
+    final effectiveSelectedRecordId = selectedIndex < 0
+        ? null
+        : trend.points[selectedIndex].recordId;
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
@@ -60,7 +59,7 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
         children: [
           AnalysisMetricSelector(
             selectedStep: _selectedStep,
-            onTap: _selectMetric,
+            onTap: () => _selectMetric(effectiveSelectedRecordId),
           ),
           const SizedBox(height: 16),
           if (trend.summary != null)
@@ -75,7 +74,7 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
           else ...[
             SurgeryTrendChart(
               points: trend.points,
-              selectedRecordId: _selectedRecordId,
+              selectedRecordId: effectiveSelectedRecordId,
               onPointSelected: (point) {
                 setState(() => _selectedRecordId = point.recordId);
               },
@@ -112,7 +111,17 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     );
   }
 
-  Future<void> _selectMetric() async {
+  int _selectedIndexFor(List<SurgeryTrendPoint> points) {
+    if (points.isEmpty) {
+      return -1;
+    }
+    final selectedIndex = points.indexWhere(
+      (point) => point.recordId == _selectedRecordId,
+    );
+    return selectedIndex < 0 ? points.length - 1 : selectedIndex;
+  }
+
+  Future<void> _selectMetric(String? currentlySelectedRecordId) async {
     final selected = await showAnalysisMetricPicker(
       context: context,
       selectedStep: _selectedStep,
@@ -122,7 +131,9 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     }
     setState(() {
       _selectedStep = selected;
-      _selectedRecordId = null;
+      // 新指標に同じ症例があれば選択を維持し、なければ
+      // 次のbuildでその指標の最新症例へfallbackする。
+      _selectedRecordId = currentlySelectedRecordId;
     });
   }
 
@@ -164,19 +175,6 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
   void _retry() {
     ref.invalidate(surgeryAnalysisProvider);
   }
-
-  void _reconcileSelectedPoint(List<SurgeryTrendPoint> points) {
-    final selectedRecordId = _selectedRecordId;
-    if (selectedRecordId == null ||
-        points.any((point) => point.recordId == selectedRecordId)) {
-      return;
-    }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _selectedRecordId == selectedRecordId) {
-        setState(() => _selectedRecordId = null);
-      }
-    });
-  }
 }
 
 class _SelectedPointCard extends StatelessWidget {
@@ -198,7 +196,7 @@ class _SelectedPointCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final date = DateFormat('yyyy年M月d日').format(point.surgeryDate);
+    final date = DateFormat('yyyy年M月d日', 'ja_JP').format(point.surgeryDate);
     return Card(
       key: const Key('analysis-selected-point'),
       margin: EdgeInsets.zero,

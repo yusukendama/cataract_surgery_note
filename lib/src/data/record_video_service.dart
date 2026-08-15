@@ -3,11 +3,29 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../domain/surgery_models.dart';
+import 'record_mutation_coordinator.dart';
 import 'surgery_repository.dart';
 import 'video_storage_repository.dart';
 
+enum RecordVideoStateKind {
+  unregistered,
+  availableManaged,
+  availableLegacy,
+  missing,
+  invalidReference,
+  checkFailed,
+}
+
+class RecordVideoState {
+  const RecordVideoState(this.kind, {this.file, this.error});
+
+  final RecordVideoStateKind kind;
+  final File? file;
+  final Object? error;
+}
+
 class RecordVideoService {
-  const RecordVideoService({
+  RecordVideoService({
     required SurgeryRepository surgeryRepository,
     required VideoStorageRepository videoStorageRepository,
   }) : _surgeryRepository = surgeryRepository,
@@ -16,37 +34,57 @@ class RecordVideoService {
   final SurgeryRepository _surgeryRepository;
   final VideoStorageRepository _videoStorageRepository;
 
+  VideoStorageMaintenanceReport? _lastMaintenanceReport;
+
+  VideoStorageMaintenanceReport? get lastMaintenanceReport =>
+      _lastMaintenanceReport;
+
+  bool get hasPendingCleanup =>
+      _lastMaintenanceReport?.hasPendingCleanup ?? false;
+
+  Future<VideoStorageMaintenanceReport?> initialize() =>
+      reconcileManagedStorage();
+
   Future<SurgeryRecord> createRecordWithVideo({
     required DateTime surgeryDate,
     required EyeSide eyeSide,
     required String sourcePath,
     required String originalFileName,
   }) async {
-    SurgeryRecord? record;
-    try {
-      record = await _surgeryRepository.createRecord(
-        surgeryDate: surgeryDate,
-        eyeSide: eyeSide,
-      );
-      return await importVideoForRecord(
-        surgeryRecordId: record.id,
-        sourcePath: sourcePath,
-        originalFileName: originalFileName,
-      );
-    } catch (_) {
-      if (record != null) {
+    final recordId = _surgeryRepository.allocateRecordId();
+    return _surgeryRepository.runRecordMutation(
+      recordId,
+      () => _runStorageMutation(() async {
+        final storedVideo = await _videoStorageRepository.importVideo(
+          surgeryRecordId: recordId,
+          sourcePath: sourcePath,
+          originalFileName: originalFileName,
+        );
         try {
-          await _videoStorageRepository.deleteVideosForRecord(record.id);
-        } on Object {
-          // Continue removing the incomplete database record even if file
-          // cleanup fails.
+          final record = await _surgeryRepository
+              .createRecordWithVideoReference(
+                surgeryRecordId: recordId,
+                surgeryDate: surgeryDate,
+                eyeSide: eyeSide,
+                videoPath: storedVideo.relativePath,
+                videoDisplayName: storedVideo.originalFileName,
+              );
+          await _finishImportWithoutThrowing(storedVideo.relativePath);
+          await _maintainWithoutThrowing();
+          return record;
+        } catch (_) {
+          await _deleteStagedWithoutThrowing(storedVideo.relativePath);
+          await _finishImportWithoutThrowing(storedVideo.relativePath);
+          await _maintainWithoutThrowing();
+          rethrow;
         }
-        await _surgeryRepository.deleteRecord(record.id);
-      }
-      rethrow;
-    }
+      }),
+    );
   }
 
+  /// Compatibility entry point. New callers must select the semantic action
+  /// explicitly with [attachVideoToRecord], [relinkSameVideo], or
+  /// [replaceVideoForRecord].
   Future<SurgeryRecord> importVideoForRecord({
     required String surgeryRecordId,
     required String sourcePath,
@@ -54,110 +92,444 @@ class RecordVideoService {
   }) async {
     final record = await _surgeryRepository.getRecord(surgeryRecordId);
     if (record == null) {
-      throw StateError('Surgery record not found.');
+      throw SurgeryRecordNotFoundException(surgeryRecordId);
     }
-
-    final oldVideoPath = record.videoPath;
-    final storedVideo = await _videoStorageRepository.importVideo(
+    if (record.videoPath == null) {
+      return attachVideoToRecord(
+        surgeryRecordId: surgeryRecordId,
+        sourcePath: sourcePath,
+        originalFileName: originalFileName,
+      );
+    }
+    return replaceVideoForRecord(
       surgeryRecordId: surgeryRecordId,
+      expectedVideoPath: record.videoPath!,
       sourcePath: sourcePath,
       originalFileName: originalFileName,
     );
+  }
 
-    try {
-      await _surgeryRepository.updateVideoReference(
-        surgeryRecordId: surgeryRecordId,
-        videoPath: storedVideo.relativePath,
-        videoDisplayName: storedVideo.originalFileName,
-      );
-    } catch (_) {
-      await _videoStorageRepository.deleteVideo(storedVideo.relativePath);
-      rethrow;
-    }
+  Future<SurgeryRecord> attachVideoToRecord({
+    required String surgeryRecordId,
+    required String sourcePath,
+    required String originalFileName,
+  }) {
+    return _preservingVideoMutation(
+      surgeryRecordId: surgeryRecordId,
+      sourcePath: sourcePath,
+      originalFileName: originalFileName,
+      requireUnregistered: true,
+    );
+  }
 
-    if (oldVideoPath != null) {
-      // Replacing a video invalidates previously recorded step timings,
-      // since they were measured against the old video's timeline.
-      await _surgeryRepository.clearStepTimings(surgeryRecordId);
-      if (isManagedVideoPath(oldVideoPath)) {
-        await _deleteWithoutThrowing(oldVideoPath);
-      }
-    }
+  Future<SurgeryRecord> relinkSameVideo({
+    required String surgeryRecordId,
+    required String expectedVideoPath,
+    required String sourcePath,
+    required String originalFileName,
+  }) {
+    return _preservingVideoMutation(
+      surgeryRecordId: surgeryRecordId,
+      sourcePath: sourcePath,
+      originalFileName: originalFileName,
+      requireUnregistered: false,
+      expectedExistingPath: expectedVideoPath,
+    );
+  }
 
-    final updated = await _surgeryRepository.getRecord(surgeryRecordId);
-    if (updated == null) {
-      throw StateError('Surgery record not found after video import.');
+  Future<SurgeryRecord> _preservingVideoMutation({
+    required String surgeryRecordId,
+    required String sourcePath,
+    required String originalFileName,
+    required bool requireUnregistered,
+    String? expectedExistingPath,
+  }) {
+    return _surgeryRepository.runRecordMutation(
+      surgeryRecordId,
+      () => _runStorageMutation(() async {
+        final record = await _requireRecord(surgeryRecordId);
+        final expectedPath = record.videoPath;
+        if (requireUnregistered && expectedPath != null) {
+          throw VideoReferenceConflictException(
+            expectedPath: null,
+            currentPath: expectedPath,
+          );
+        }
+        if (!requireUnregistered && expectedPath == null) {
+          throw VideoReferenceConflictException(
+            expectedPath: '<existing video>',
+            currentPath: null,
+          );
+        }
+        if (!requireUnregistered && expectedPath != expectedExistingPath) {
+          throw VideoReferenceConflictException(
+            expectedPath: expectedExistingPath,
+            currentPath: expectedPath,
+          );
+        }
+
+        final storedVideo = await _videoStorageRepository.importVideo(
+          surgeryRecordId: surgeryRecordId,
+          sourcePath: sourcePath,
+          originalFileName: originalFileName,
+        );
+        try {
+          await _surgeryRepository.updateVideoReferenceIfCurrent(
+            surgeryRecordId: surgeryRecordId,
+            expectedVideoPath: expectedPath,
+            videoPath: storedVideo.relativePath,
+            videoDisplayName: storedVideo.originalFileName,
+          );
+        } catch (_) {
+          await _deleteStagedWithoutThrowing(storedVideo.relativePath);
+          await _finishImportWithoutThrowing(storedVideo.relativePath);
+          await _maintainWithoutThrowing();
+          rethrow;
+        }
+
+        await _finishImportWithoutThrowing(storedVideo.relativePath);
+        await _maintainWithoutThrowing();
+        return _committedRecordFallback(
+          before: record,
+          videoPath: storedVideo.relativePath,
+          videoDisplayName: storedVideo.originalFileName,
+        );
+      }),
+    );
+  }
+
+  Future<SurgeryRecord> replaceVideoForRecord({
+    required String surgeryRecordId,
+    required String expectedVideoPath,
+    required String sourcePath,
+    required String originalFileName,
+  }) {
+    return _surgeryRepository.runRecordMutation(
+      surgeryRecordId,
+      () => _runStorageMutation(() async {
+        final record = await _requireRecord(surgeryRecordId);
+        final expectedPath = record.videoPath;
+        if (expectedPath == null) {
+          throw VideoReferenceConflictException(
+            expectedPath: '<existing video>',
+            currentPath: null,
+          );
+        }
+        if (expectedPath != expectedVideoPath) {
+          throw VideoReferenceConflictException(
+            expectedPath: expectedVideoPath,
+            currentPath: expectedPath,
+          );
+        }
+        final storedVideo = await _videoStorageRepository.importVideo(
+          surgeryRecordId: surgeryRecordId,
+          sourcePath: sourcePath,
+          originalFileName: originalFileName,
+        );
+        try {
+          await _surgeryRepository.replaceVideoReferenceAndClearTimings(
+            surgeryRecordId: surgeryRecordId,
+            expectedVideoPath: expectedPath,
+            videoPath: storedVideo.relativePath,
+            videoDisplayName: storedVideo.originalFileName,
+          );
+        } catch (_) {
+          await _deleteStagedWithoutThrowing(storedVideo.relativePath);
+          await _finishImportWithoutThrowing(storedVideo.relativePath);
+          await _maintainWithoutThrowing();
+          rethrow;
+        }
+
+        await _finishImportWithoutThrowing(storedVideo.relativePath);
+        await _maintainWithoutThrowing();
+        return _committedRecordFallback(
+          before: record,
+          videoPath: storedVideo.relativePath,
+          videoDisplayName: storedVideo.originalFileName,
+        );
+      }),
+    );
+  }
+
+  Future<SurgeryRecord> migrateLegacyVideoForRecord(SurgeryRecord record) {
+    return _surgeryRepository.runRecordMutation(
+      record.id,
+      () => _runStorageMutation(() async {
+        final current = await _requireRecord(record.id);
+        if (current.videoPath != record.videoPath) {
+          throw VideoReferenceConflictException(
+            expectedPath: record.videoPath,
+            currentPath: current.videoPath,
+          );
+        }
+        final classification = classifyVideoPath(
+          recordId: current.id,
+          videoPath: current.videoPath,
+        );
+        if (classification.kind != VideoPathKind.legacyExternal) {
+          throw const FileSystemException('旧形式の動画参照ではありません。');
+        }
+        final sourcePath = classification.path!;
+        if (await FileSystemEntity.type(sourcePath, followLinks: true) !=
+            FileSystemEntityType.file) {
+          throw const FileSystemException('旧形式の動画が見つかりません。');
+        }
+        final storedVideo = await _videoStorageRepository.importVideo(
+          surgeryRecordId: current.id,
+          sourcePath: sourcePath,
+          originalFileName: current.videoDisplayName ?? p.basename(sourcePath),
+        );
+        try {
+          await _surgeryRepository.updateVideoReferenceIfCurrent(
+            surgeryRecordId: current.id,
+            expectedVideoPath: sourcePath,
+            videoPath: storedVideo.relativePath,
+            videoDisplayName: storedVideo.originalFileName,
+          );
+        } catch (_) {
+          await _deleteStagedWithoutThrowing(storedVideo.relativePath);
+          await _finishImportWithoutThrowing(storedVideo.relativePath);
+          await _maintainWithoutThrowing();
+          rethrow;
+        }
+        // The legacy external original is deliberately never deleted.
+        await _finishImportWithoutThrowing(storedVideo.relativePath);
+        await _maintainWithoutThrowing();
+        return _committedRecordFallback(
+          before: current,
+          videoPath: storedVideo.relativePath,
+          videoDisplayName: storedVideo.originalFileName,
+        );
+      }),
+    );
+  }
+
+  /// Side-effect-free state inspection used by list/detail supporting data.
+  Future<RecordVideoState> inspectVideoState(SurgeryRecord record) async {
+    final classification = classifyVideoPath(
+      recordId: record.id,
+      videoPath: record.videoPath,
+    );
+    switch (classification.kind) {
+      case VideoPathKind.unregistered:
+        return const RecordVideoState(RecordVideoStateKind.unregistered);
+      case VideoPathKind.invalidReference:
+        return const RecordVideoState(RecordVideoStateKind.invalidReference);
+      case VideoPathKind.managed:
+        try {
+          final file = await _videoStorageRepository.resolveVideo(
+            classification.path!,
+          );
+          return file == null
+              ? const RecordVideoState(RecordVideoStateKind.missing)
+              : RecordVideoState(
+                  RecordVideoStateKind.availableManaged,
+                  file: file,
+                );
+        } on Object catch (error) {
+          return RecordVideoState(
+            RecordVideoStateKind.checkFailed,
+            error: error,
+          );
+        }
+      case VideoPathKind.legacyExternal:
+        try {
+          final file = File(classification.path!);
+          final type = await FileSystemEntity.type(
+            file.path,
+            followLinks: true,
+          );
+          return type == FileSystemEntityType.file
+              ? RecordVideoState(
+                  RecordVideoStateKind.availableLegacy,
+                  file: file,
+                )
+              : const RecordVideoState(RecordVideoStateKind.missing);
+        } on Object catch (error) {
+          return RecordVideoState(
+            RecordVideoStateKind.checkFailed,
+            error: error,
+          );
+        }
     }
-    return updated;
   }
 
   Future<File?> resolveVideoForRecord(SurgeryRecord record) async {
-    final videoPath = record.videoPath;
-    if (videoPath == null) {
-      return null;
+    final state = await inspectVideoState(record);
+    if (state.kind == RecordVideoStateKind.availableManaged) {
+      return state.file;
     }
-    if (isManagedVideoPath(videoPath)) {
-      return _videoStorageRepository.resolveVideo(videoPath);
-    }
-
-    final legacyExternalFile = File(videoPath);
-    if (!p.isAbsolute(videoPath) || !await legacyExternalFile.exists()) {
+    if (state.kind != RecordVideoStateKind.availableLegacy) {
       return null;
     }
 
-    await importVideoForRecord(
-      surgeryRecordId: record.id,
-      sourcePath: videoPath,
-      originalFileName: record.videoDisplayName ?? p.basename(videoPath),
-    );
-    final migrated = await _surgeryRepository.getRecord(record.id);
-    final migratedPath = migrated?.videoPath;
-    if (migratedPath == null) {
-      return null;
+    // Migration is a best-effort optimization. Failure must never prevent the
+    // existing external original from being played.
+    try {
+      final migrated = await migrateLegacyVideoForRecord(record);
+      final migratedPath = migrated.videoPath;
+      if (migratedPath != null) {
+        final resolved = await _videoStorageRepository.resolveVideo(
+          migratedPath,
+        );
+        if (resolved != null) {
+          return resolved;
+        }
+      }
+    } on Object {
+      return state.file;
     }
-    return _videoStorageRepository.resolveVideo(migratedPath);
+    return state.file;
   }
 
-  /// Removes the registered video (and its managed file, if any) from a
-  /// record without deleting the record itself. Step timings are cleared
-  /// because they no longer correspond to any video; self-review notes and
-  /// the case memo are left untouched.
-  Future<SurgeryRecord> removeVideoForRecord(String surgeryRecordId) async {
+  Future<SurgeryRecord> removeVideoForRecord(
+    String surgeryRecordId, {
+    required String expectedVideoPath,
+  }) {
+    return _surgeryRepository.runRecordMutation(
+      surgeryRecordId,
+      () => _runStorageMutation(() async {
+        final record = await _requireRecord(surgeryRecordId);
+        final oldVideoPath = record.videoPath;
+        if (oldVideoPath == null) {
+          throw VideoReferenceConflictException(
+            expectedPath: '<existing video>',
+            currentPath: null,
+          );
+        }
+        if (oldVideoPath != expectedVideoPath) {
+          throw VideoReferenceConflictException(
+            expectedPath: expectedVideoPath,
+            currentPath: oldVideoPath,
+          );
+        }
+        await _surgeryRepository.replaceVideoReferenceAndClearTimings(
+          surgeryRecordId: surgeryRecordId,
+          expectedVideoPath: oldVideoPath,
+          videoPath: null,
+          videoDisplayName: null,
+        );
+        await _maintainWithoutThrowing();
+        return _committedRecordFallback(
+          before: record,
+          videoPath: null,
+          videoDisplayName: null,
+          clearVideo: true,
+        );
+      }),
+    );
+  }
+
+  Future<void> deleteRecordAndManagedVideos(String surgeryRecordId) {
+    if (!isValidRecordId(surgeryRecordId)) {
+      throw InvalidRecordIdentifierException(surgeryRecordId);
+    }
+    return _surgeryRepository.runRecordMutation(
+      surgeryRecordId,
+      () => _runStorageMutation(() async {
+        // The database commit and its exact affected-row check happen first.
+        await _surgeryRepository.deleteRecordChecked(surgeryRecordId);
+        // Reconciliation, rather than recursive deletion, protects a file that
+        // another record still references through a legacy absolute/symlink path.
+        await _maintainWithoutThrowing();
+      }),
+    );
+  }
+
+  Future<VideoStorageMaintenanceReport?> reconcileManagedStorage() async {
+    final storage = _videoStorageRepository;
+    if (storage is! ManagedVideoStorageRepository) {
+      return null;
+    }
+    final report = await storage.maintainManagedStorage(() async {
+      final rows = await _surgeryRepository.fetchAllVideoReferencesWithIds();
+      return RecordVideoReferenceSnapshot.complete(
+        rows
+            .map(
+              (row) => RecordVideoReference(
+                recordId: row.recordId,
+                videoPath: row.videoPath,
+              ),
+            )
+            .toList(growable: false),
+      );
+    });
+    _lastMaintenanceReport = report;
+    return report;
+  }
+
+  Future<SurgeryRecord> _requireRecord(String surgeryRecordId) async {
     final record = await _surgeryRepository.getRecord(surgeryRecordId);
     if (record == null) {
-      throw StateError('Surgery record not found.');
+      throw SurgeryRecordNotFoundException(surgeryRecordId);
     }
-    final videoPath = record.videoPath;
-    if (videoPath != null && isManagedVideoPath(videoPath)) {
-      await _deleteWithoutThrowing(videoPath);
-    }
-    await _surgeryRepository.updateVideoReference(
-      surgeryRecordId: surgeryRecordId,
-      videoPath: null,
-      videoDisplayName: null,
-    );
-    await _surgeryRepository.clearStepTimings(surgeryRecordId);
-    final updated = await _surgeryRepository.getRecord(surgeryRecordId);
-    if (updated == null) {
-      throw StateError('Surgery record not found after video removal.');
-    }
-    return updated;
+    return record;
   }
 
-  Future<void> deleteRecordAndManagedVideos(String surgeryRecordId) async {
+  Future<SurgeryRecord> _committedRecordFallback({
+    required SurgeryRecord before,
+    required String? videoPath,
+    required String? videoDisplayName,
+    bool clearVideo = false,
+  }) async {
     try {
-      await _videoStorageRepository.deleteVideosForRecord(surgeryRecordId);
+      final updated = await _surgeryRepository.getRecord(before.id);
+      if (updated != null) {
+        return updated;
+      }
     } on Object {
-      // Orphaned managed files are preferable to a half-deleted DB state.
+      // The logical commit already succeeded. A refresh problem must not be
+      // represented as a failed mutation or trigger destructive compensation.
     }
-    await _surgeryRepository.deleteRecord(surgeryRecordId);
+    return before.copyWith(
+      videoPath: videoPath,
+      videoDisplayName: videoDisplayName,
+      clearVideo: clearVideo,
+      updatedAt: DateTime.now(),
+    );
   }
 
-  Future<void> _deleteWithoutThrowing(String relativePath) async {
+  Future<void> _deleteStagedWithoutThrowing(String relativePath) async {
     try {
       await _videoStorageRepository.deleteVideo(relativePath);
     } on Object {
-      // A failed cleanup should not roll back a successful DB update.
+      // The unreferenced staged file is intentionally left for reconciliation.
+    }
+  }
+
+  Future<void> _finishImportWithoutThrowing(String relativePath) async {
+    final storage = _videoStorageRepository;
+    if (storage is! ManagedVideoStorageRepository) {
+      return;
+    }
+    try {
+      await storage.finishImport(relativePath);
+    } on Object {
+      // In-flight protection is an additional process-local guard. The DB
+      // reference snapshot remains authoritative for later reconciliation.
+    }
+  }
+
+  Future<T> _runStorageMutation<T>(Future<T> Function() action) {
+    final storage = _videoStorageRepository;
+    if (storage is ManagedVideoStorageRepository) {
+      return storage.runStorageTransaction(action);
+    }
+    return action();
+  }
+
+  Future<void> _maintainWithoutThrowing() async {
+    try {
+      await reconcileManagedStorage();
+    } on Object {
+      // A maintenance failure must not alter the already-determined logical
+      // result of a mutation. Keep an explicit pending state so the UI can
+      // distinguish "committed, cleanup pending" and initialization can retry.
+      _lastMaintenanceReport = const VideoStorageMaintenanceReport(
+        snapshotComplete: false,
+        deletedPaths: <String>[],
+        backupExclusionFailures: <String>[],
+      );
     }
   }
 }

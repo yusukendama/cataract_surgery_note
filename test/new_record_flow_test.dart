@@ -92,13 +92,19 @@ void main() {
 
     expect(find.byType(NewRecordScreen), findsOneWidget);
     expect(find.text('first.mp4'), findsOneWidget);
+    expect(find.byKey(const Key('surgery-date-error')), findsNothing);
+    expect(find.byKey(const Key('eye-side-error')), findsNothing);
     await tester.drag(find.byType(ListView).last, const Offset(0, -500));
     await tester.pumpAndSettle();
     expect(find.text('未選択'), findsOneWidget);
     final register = tester.widget<ButtonStyleButton>(
       find.byKey(const Key('register-record-button')),
     );
-    expect(register.onPressed, isNull);
+    expect(register.onPressed, isNotNull);
+    await tester.tap(find.byKey(const Key('register-record-button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('surgery-date-error')), findsOneWidget);
+    expect(find.byKey(const Key('eye-side-error')), findsOneWidget);
     expect(await recordCount(tester), 0);
 
     await tester.pageBack();

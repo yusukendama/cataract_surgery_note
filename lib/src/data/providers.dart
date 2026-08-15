@@ -35,6 +35,11 @@ final recordVideoServiceProvider = Provider<RecordVideoService>((ref) {
   );
 });
 
+final videoStorageMaintenanceProvider =
+    FutureProvider<VideoStorageMaintenanceReport?>((ref) {
+      return ref.watch(recordVideoServiceProvider).initialize();
+    });
+
 final recordVideoFileProvider = FutureProvider.family<File?, String>((
   ref,
   recordId,
@@ -50,6 +55,13 @@ final surgeryRecordsProvider = FutureProvider<List<SurgeryRecord>>((ref) {
   return ref.watch(surgeryRepositoryProvider).watchableListSnapshot();
 });
 
+final surgeryRecordProgressProvider =
+    FutureProvider<List<SurgeryRecordProgress>>((ref) {
+      return ref
+          .watch(surgeryRepositoryProvider)
+          .fetchRecordProgressSnapshots();
+    });
+
 final surgeryAnalysisProvider = FutureProvider<SurgeryAnalysisSnapshot>((ref) {
   return ref.watch(surgeryRepositoryProvider).fetchAnalysisSnapshot();
 });
@@ -60,6 +72,15 @@ final surgeryRecordProvider = FutureProvider.family<SurgeryRecord?, String>((
 ) {
   return ref.watch(surgeryRepositoryProvider).getRecord(recordId);
 });
+
+final recordVideoStateProvider =
+    FutureProvider.family<RecordVideoState, String>((ref, recordId) async {
+      final record = await ref.watch(surgeryRecordProvider(recordId).future);
+      if (record == null) {
+        throw StateError('症例が見つかりません。');
+      }
+      return ref.watch(recordVideoServiceProvider).inspectVideoState(record);
+    });
 
 final cccReviewProvider = FutureProvider.family<SurgicalStepReview, String>((
   ref,

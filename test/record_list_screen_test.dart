@@ -1,4 +1,8 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:cataract_surgery_note/src/data/providers.dart';
+import 'package:cataract_surgery_note/src/data/record_video_service.dart';
+import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/features/records/record_detail_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_list_screen.dart';
@@ -33,6 +37,9 @@ void main() {
     List<SurgeryRecord> records, {
     Size size = const Size(800, 600),
     SurgeryRecord? detailRecord,
+    List<SurgeryRecordProgress>? progress,
+    Map<String, RecordVideoState>? videoStates,
+    bool progressFails = false,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
@@ -42,6 +49,28 @@ void main() {
       ProviderScope(
         overrides: [
           surgeryRecordsProvider.overrideWith((ref) async => records),
+          surgeryRecordProgressProvider.overrideWith((ref) async {
+            if (progressFails) {
+              throw StateError('supporting data failure');
+            }
+            return progress ??
+                records
+                    .map(
+                      (record) => SurgeryRecordProgress(
+                        record: record,
+                        completedStepCount: 0,
+                        hasRunningStep: false,
+                        totalSurgeryDuration: null,
+                      ),
+                    )
+                    .toList();
+          }),
+          for (final record in records)
+            recordVideoStateProvider(record.id).overrideWith(
+              (ref) async =>
+                  videoStates?[record.id] ??
+                  const RecordVideoState(RecordVideoStateKind.unregistered),
+            ),
           if (detailRecord != null) ...[
             surgeryRecordProvider(
               detailRecord.id,
@@ -108,25 +137,98 @@ void main() {
       ),
       record(id: 'july', surgeryDate: DateTime(2026, 7, 30)),
       record(id: 'previous-year', surgeryDate: DateTime(2025, 12, 31)),
-    ]);
+    ], size: const Size(800, 1200));
 
     expect(find.text('総手術件数'), findsOneWidget);
     expect(find.text('4件'), findsOneWidget);
     expect(find.text('2026年8月　2件'), findsOneWidget);
     expect(find.text('2026年7月　1件'), findsOneWidget);
     expect(find.text('2025年12月　1件'), findsOneWidget);
-    expect(find.text('8月8日 右眼'), findsOneWidget);
-    expect(find.text('8月6日 左眼'), findsOneWidget);
+    expect(find.text('8月8日（土）'), findsOneWidget);
+    expect(find.text('8月6日（木）'), findsOneWidget);
+    expect(find.text('右眼'), findsNWidgets(3));
+    expect(find.text('左眼'), findsOneWidget);
     expect(find.textContaining('2026/'), findsNothing);
   });
 
-  testWidgets('0件でも総件数と既存の空状態を表示する', (tester) async {
+  testWidgets('0件では件数カードを出さず用途説明と登録CTAを表示する', (tester) async {
     await pumpList(tester, []);
 
-    expect(find.text('総手術件数'), findsOneWidget);
-    expect(find.text('0件'), findsOneWidget);
-    expect(find.text('症例がありません'), findsOneWidget);
+    expect(find.text('総手術件数'), findsNothing);
+    expect(find.byKey(const Key('record-total-count')), findsNothing);
+    expect(find.text('まだ症例がありません'), findsOneWidget);
+    expect(find.text('最初の症例を登録'), findsOneWidget);
     expect(find.byType(SliverPersistentHeader), findsNothing);
+  });
+
+  testWidgets('工程進捗、独立した総手術時間、動画状態を表示する', (tester) async {
+    final unstarted = record(
+      id: 'unstarted',
+      surgeryDate: DateTime(2026, 8, 8),
+    );
+    final partial = record(id: 'partial', surgeryDate: DateTime(2026, 8, 7));
+    final complete = record(id: 'complete', surgeryDate: DateTime(2026, 8, 6));
+    final runningOnly = record(
+      id: 'running-only',
+      surgeryDate: DateTime(2026, 8, 5),
+    );
+    await pumpList(
+      tester,
+      [unstarted, partial, complete, runningOnly],
+      size: const Size(800, 1200),
+      progress: [
+        SurgeryRecordProgress(
+          record: unstarted,
+          completedStepCount: 0,
+          hasRunningStep: false,
+          totalSurgeryDuration: null,
+        ),
+        SurgeryRecordProgress(
+          record: partial,
+          completedStepCount: 4,
+          hasRunningStep: true,
+          totalSurgeryDuration: null,
+        ),
+        SurgeryRecordProgress(
+          record: complete,
+          completedStepCount: 10,
+          hasRunningStep: false,
+          totalSurgeryDuration: const Duration(minutes: 12, seconds: 34),
+        ),
+        SurgeryRecordProgress(
+          record: runningOnly,
+          completedStepCount: 0,
+          hasRunningStep: true,
+          totalSurgeryDuration: null,
+        ),
+      ],
+      videoStates: const {
+        'unstarted': RecordVideoState(RecordVideoStateKind.unregistered),
+        'partial': RecordVideoState(RecordVideoStateKind.availableLegacy),
+        'complete': RecordVideoState(RecordVideoStateKind.missing),
+        'running-only': RecordVideoState(RecordVideoStateKind.checkFailed),
+      },
+    );
+
+    expect(find.text('未記録'), findsOneWidget);
+    expect(find.text('工程 4/10・計測中'), findsOneWidget);
+    expect(find.text('工程 10/10'), findsOneWidget);
+    expect(find.text('未記録・計測中'), findsOneWidget);
+    expect(find.text('工程 0/10・計測中'), findsNothing);
+    expect(find.text('総手術時間 12分34秒'), findsOneWidget);
+    expect(find.text('動画未登録'), findsOneWidget);
+    expect(find.text('旧形式動画あり'), findsOneWidget);
+    expect(find.text('動画の実体なし'), findsOneWidget);
+  });
+
+  testWidgets('補助情報の取得失敗でも基本症例を表示し再読み込みを提供する', (tester) async {
+    final item = record(id: 'visible', surgeryDate: DateTime(2026, 8, 8));
+    await pumpList(tester, [item], progressFails: true);
+
+    expect(find.text('8月8日（土）'), findsOneWidget);
+    expect(find.text('工程情報を確認できません'), findsOneWidget);
+    expect(find.text('工程情報を読み込めませんでした。'), findsOneWidget);
+    expect(find.text('再読み込み'), findsOneWidget);
   });
 
   testWidgets('一覧の再読込で総件数と月見出しを即時更新する', (tester) async {
@@ -142,7 +244,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('0件'), findsOneWidget);
+    expect(find.byKey(const Key('record-total-count')), findsNothing);
+    expect(find.text('まだ症例がありません'), findsOneWidget);
 
     records = [record(id: 'added', surgeryDate: DateTime(2026, 8, 8))];
     container.invalidate(surgeryRecordsProvider);
@@ -155,7 +258,7 @@ void main() {
     container.invalidate(surgeryRecordsProvider);
     await tester.pumpAndSettle();
 
-    expect(find.text('0件'), findsOneWidget);
+    expect(find.byKey(const Key('record-total-count')), findsNothing);
     expect(find.text('2026年8月　1件'), findsNothing);
   });
 
@@ -185,9 +288,9 @@ void main() {
       findsNothing,
     );
 
-    await tester.drag(
-      find.byKey(const Key('record-list-scroll')),
-      const Offset(0, -800),
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('record-list-item-july-9')),
+      500,
     );
     await tester.pumpAndSettle();
 
@@ -207,5 +310,27 @@ void main() {
 
     expect(find.byType(RecordDetailScreen), findsOneWidget);
     expect(find.text('症例詳細'), findsOneWidget);
+  });
+
+  testWidgets('症例カードをVoiceOverのactivate操作で詳細へ開ける', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final item = record(
+      id: 'semantics-target',
+      surgeryDate: DateTime(2026, 8, 8),
+    );
+    await pumpList(tester, [item], detailRecord: item);
+
+    final node = tester.getSemantics(
+      find.byKey(Key('record-list-semantics-${item.id}')),
+    );
+    expect(node.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+    expect(node.label, contains('8月8日（土）'));
+    expect(node.label, contains('右眼'));
+
+    node.owner!.performAction(node.id, SemanticsAction.tap);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(RecordDetailScreen), findsOneWidget);
+    semantics.dispose();
   });
 }

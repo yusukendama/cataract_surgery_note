@@ -2,7 +2,9 @@ import 'dart:io';
 
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/providers.dart';
+import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
+import 'package:cataract_surgery_note/src/data/surgery_video_picker.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/features/records/record_detail_screen.dart';
@@ -50,6 +52,65 @@ class _MissingVideoStorage implements VideoStorageRepository {
   Future<void> deleteVideosForRecord(String surgeryRecordId) async {}
 }
 
+class _QueueVideoPicker implements SurgeryVideoPicker {
+  _QueueVideoPicker(this.values);
+
+  final List<SelectedSurgeryVideo?> values;
+
+  @override
+  Future<SelectedSurgeryVideo?> pickVideo() async => values.removeAt(0);
+}
+
+class _ImportingVideoStorage implements VideoStorageRepository {
+  var importCount = 0;
+
+  @override
+  Future<StoredVideo> importVideo({
+    required String surgeryRecordId,
+    required String sourcePath,
+    required String originalFileName,
+  }) async {
+    importCount++;
+    return StoredVideo(
+      relativePath: 'videos/$surgeryRecordId/import-$importCount.mp4',
+      originalFileName: originalFileName,
+      sizeBytes: 1,
+      sha256: 'fixture',
+    );
+  }
+
+  @override
+  Future<File?> resolveVideo(String relativePath) async => null;
+
+  @override
+  Future<void> deleteVideo(String relativePath) async {}
+
+  @override
+  Future<void> deleteVideosForRecord(String surgeryRecordId) async {}
+}
+
+class _PendingCleanupVideoStorage extends _ImportingVideoStorage
+    implements ManagedVideoStorageRepository {
+  @override
+  Future<T> runStorageTransaction<T>(Future<T> Function() action) => action();
+
+  @override
+  Future<void> finishImport(String relativePath) async {}
+
+  @override
+  Future<VideoStorageMaintenanceReport> maintainManagedStorage(
+    Future<RecordVideoReferenceSnapshot> Function() loadReferences,
+  ) async {
+    await loadReferences();
+    return const VideoStorageMaintenanceReport(
+      snapshotComplete: true,
+      deletedPaths: <String>[],
+      backupExclusionFailures: <String>[],
+      cleanupFailures: <String>['videos/fixture/old.mp4'],
+    );
+  }
+}
+
 void main() {
   Future<(AppDatabase, SurgeryRecord)> createRecord(WidgetTester tester) async {
     late AppDatabase database;
@@ -67,11 +128,18 @@ void main() {
   Future<void> pumpScreen(
     WidgetTester tester,
     AppDatabase database,
-    String recordId,
-  ) async {
+    String recordId, {
+    RecordVideoState? videoState,
+  }) async {
     await tester.pumpWidget(
       ProviderScope(
-        overrides: [appDatabaseProvider.overrideWith((ref) => database)],
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          if (videoState != null)
+            recordVideoStateProvider(
+              recordId,
+            ).overrideWith((ref) async => videoState),
+        ],
         child: MaterialApp(home: RecordDetailScreen(recordId: recordId)),
       ),
     );
@@ -124,7 +192,7 @@ void main() {
     expect(find.text('2026/07/18 右眼'), findsOneWidget);
   });
 
-  testWidgets('動画ファイルが存在するときはバックアップ注意書きを表示する', (tester) async {
+  testWidgets('管理動画と除外read-backの両方が成功したときだけ確認済みと表示する', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
     await tester.runAsync(() async {
@@ -142,6 +210,13 @@ void main() {
           videoStorageRepositoryProvider.overrideWithValue(
             _PresentVideoStorage(),
           ),
+          videoStorageMaintenanceProvider.overrideWith(
+            (ref) async => const VideoStorageMaintenanceReport(
+              snapshotComplete: true,
+              deletedPaths: <String>[],
+              backupExclusionFailures: <String>[],
+            ),
+          ),
         ],
         child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
       ),
@@ -152,15 +227,53 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('present.mp4'), findsOneWidget);
-    expect(
-      find.text('アプリ内に保存した動画はバックアップされません。元の動画は別途保管してください。'),
-      findsOneWidget,
-    );
-    expect(find.text('動画を変更'), findsOneWidget);
+    expect(find.byKey(const Key('backup-exclusion-verified')), findsOneWidget);
+    expect(find.text('バックアップ除外を確認済みです。選択元の動画も別途保管してください。'), findsOneWidget);
+    expect(find.byKey(const Key('backup-exclusion-warning')), findsNothing);
+    expect(find.text('別の動画に差し替え'), findsOneWidget);
     expect(
       find.text('保存した動画が見つかりません。機種変更や端末の復元後は、元の動画を選び直してください。'),
       findsNothing,
     );
+  });
+
+  testWidgets('除外read-backを確認できない管理動画では断定せず再確認を出す', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      await SurgeryRepository(database).updateVideoReference(
+        surgeryRecordId: record.id,
+        videoPath: 'videos/${record.id}/present.mp4',
+        videoDisplayName: 'present.mp4',
+      );
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          videoStorageRepositoryProvider.overrideWithValue(
+            _PresentVideoStorage(),
+          ),
+          videoStorageMaintenanceProvider.overrideWith(
+            (ref) async => const VideoStorageMaintenanceReport(
+              snapshotComplete: true,
+              deletedPaths: <String>[],
+              backupExclusionFailures: <String>[
+                'videos/root-record/present.mp4',
+              ],
+            ),
+          ),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('backup-exclusion-warning')), findsOneWidget);
+    expect(find.text('再確認'), findsOneWidget);
+    expect(find.byKey(const Key('backup-exclusion-verified')), findsNothing);
+    expect(find.textContaining('バックアップ対象外です'), findsNothing);
   });
 
   testWidgets('DBにパスがあり実ファイルが無いときは再選択を促す', (tester) async {
@@ -190,11 +303,282 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(
-      find.text('保存した動画が見つかりません。機種変更や端末の復元後は、元の動画を選び直してください。'),
-      findsOneWidget,
-    );
-    expect(find.text('動画を再選択'), findsOneWidget);
+    expect(find.text('保存した動画の実体が見つかりません。工程記録は保持されています。'), findsOneWidget);
+    expect(find.text('同じ動画を再登録'), findsOneWidget);
+    expect(find.text('別の動画に差し替え'), findsOneWidget);
     expect(find.text('登録済みの動画'), findsNothing);
+  });
+
+  testWidgets('4セクションを表示しreviewStatusに依存しない', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+
+    await pumpScreen(tester, database, record.id);
+
+    expect(find.text('症例情報'), findsOneWidget);
+    expect(find.text('動画'), findsOneWidget);
+    expect(find.text('工程記録'), findsOneWidget);
+    await tester.drag(find.byType(ListView), const Offset(0, -500));
+    await tester.pumpAndSettle();
+    expect(find.text('危険操作'), findsOneWidget);
+    expect(find.textContaining('状態:'), findsNothing);
+    expect(find.text(record.reviewStatus.label), findsNothing);
+  });
+
+  testWidgets('不正参照を開かず、同じ動画再登録と別動画差し替えを分ける', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      await SurgeryRepository(database).updateVideoReference(
+        surgeryRecordId: record.id,
+        videoPath: '../unsafe.mp4',
+        videoDisplayName: 'unsafe.mp4',
+      );
+    });
+
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      videoState: const RecordVideoState(RecordVideoStateKind.invalidReference),
+    );
+
+    expect(find.textContaining('動画参照が不正'), findsOneWidget);
+    expect(find.text('同じ動画を再登録'), findsOneWidget);
+    expect(find.text('別の動画に差し替え'), findsOneWidget);
+  });
+
+  testWidgets('同じ動画の再登録は詳細画面から工程時刻を保持して参照だけ更新する', (tester) async {
+    final (database, created) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    late SurgeryRecord record;
+    late SurgicalStepReview ccc;
+    await tester.runAsync(() async {
+      await repository.updateVideoReference(
+        surgeryRecordId: created.id,
+        videoPath: 'videos/${created.id}/missing.mp4',
+        videoDisplayName: 'missing.mp4',
+      );
+      ccc = (await repository.ensureStepReviews(
+        created.id,
+      )).singleWhere((review) => review.step == SurgicalStep.capsulorhexis);
+      await repository.saveStepReview(
+        ccc.copyWith(
+          startMilliseconds: 100,
+          endMilliseconds: 500,
+          rating: StepRating.good,
+          reflection: '保持する記録',
+        ),
+      );
+      record = (await repository.getRecord(created.id))!;
+    });
+    final storage = _ImportingVideoStorage();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          videoStorageRepositoryProvider.overrideWithValue(storage),
+          surgeryVideoPickerProvider.overrideWithValue(
+            _QueueVideoPicker([
+              const SelectedSurgeryVideo(
+                path: '/fixture/same.mp4',
+                displayName: 'same.mp4',
+              ),
+            ]),
+          ),
+          recordVideoStateProvider(created.id).overrideWith(
+            (ref) async => const RecordVideoState(RecordVideoStateKind.missing),
+          ),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('同じ動画を再登録'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('動画を選ぶ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('同じ動画として登録'));
+    await tester.pumpAndSettle();
+
+    late SurgeryRecord? updated;
+    late SurgicalStepReview? updatedCcc;
+    await tester.runAsync(() async {
+      updated = await repository.getRecord(created.id);
+      updatedCcc = await repository.getStepReview(
+        surgeryRecordId: created.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+    });
+    expect(updated!.videoPath, 'videos/${created.id}/import-1.mp4');
+    expect(updatedCcc!.startMilliseconds, 100);
+    expect(updatedCcc!.endMilliseconds, 500);
+    expect(updatedCcc!.rating, StepRating.good);
+    expect(updatedCcc!.reflection, '保持する記録');
+    expect(storage.importCount, 1);
+  });
+
+  testWidgets('別動画への差し替えは確認後だけ全工程時刻を消去しレビューを保持する', (tester) async {
+    final (database, created) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    late SurgeryRecord record;
+    await tester.runAsync(() async {
+      await repository.updateVideoReference(
+        surgeryRecordId: created.id,
+        videoPath: 'videos/${created.id}/missing.mp4',
+        videoDisplayName: 'missing.mp4',
+      );
+      final ccc = (await repository.ensureStepReviews(
+        created.id,
+      )).singleWhere((review) => review.step == SurgicalStep.capsulorhexis);
+      await repository.saveStepReview(
+        ccc.copyWith(
+          startMilliseconds: 100,
+          endMilliseconds: 500,
+          rating: StepRating.good,
+          reflection: '保持する記録',
+        ),
+      );
+      record = (await repository.getRecord(created.id))!;
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          videoStorageRepositoryProvider.overrideWithValue(
+            _ImportingVideoStorage(),
+          ),
+          surgeryVideoPickerProvider.overrideWithValue(
+            _QueueVideoPicker([
+              const SelectedSurgeryVideo(
+                path: '/fixture/replacement.mp4',
+                displayName: 'replacement.mp4',
+              ),
+            ]),
+          ),
+          recordVideoStateProvider(created.id).overrideWith(
+            (ref) async => const RecordVideoState(RecordVideoStateKind.missing),
+          ),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('別の動画に差し替え'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('総手術時間を含む全工程の開始・終了位置が削除されます'), findsOneWidget);
+    await tester.tap(find.text('動画を選ぶ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('差し替え'));
+    await tester.pumpAndSettle();
+
+    late SurgicalStepReview? updatedCcc;
+    await tester.runAsync(() async {
+      updatedCcc = await repository.getStepReview(
+        surgeryRecordId: created.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+    });
+    expect(updatedCcc!.startMilliseconds, isNull);
+    expect(updatedCcc!.endMilliseconds, isNull);
+    expect(updatedCcc!.rating, StepRating.good);
+    expect(updatedCcc!.reflection, '保持する記録');
+  });
+
+  testWidgets('動画操作commit後のcleanup失敗を後処理保留として表示する', (tester) async {
+    final (database, created) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    await tester.runAsync(() async {
+      await repository.updateVideoReference(
+        surgeryRecordId: created.id,
+        videoPath: 'videos/${created.id}/missing.mp4',
+        videoDisplayName: 'missing.mp4',
+      );
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          videoStorageRepositoryProvider.overrideWithValue(
+            _PendingCleanupVideoStorage(),
+          ),
+          surgeryVideoPickerProvider.overrideWithValue(
+            _QueueVideoPicker([
+              const SelectedSurgeryVideo(
+                path: '/fixture/replacement.mp4',
+                displayName: 'replacement.mp4',
+              ),
+            ]),
+          ),
+          recordVideoStateProvider(created.id).overrideWith(
+            (ref) async => const RecordVideoState(RecordVideoStateKind.missing),
+          ),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: created.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('別の動画に差し替え'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('動画を選ぶ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('差し替え'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('動画の保存は完了しました。動画ファイルの後処理は次回起動時に再試行します。'), findsOneWidget);
+  });
+
+  testWidgets('確認失敗を実体なしと誤表示せず再試行を出す', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      videoState: const RecordVideoState(RecordVideoStateKind.checkFailed),
+    );
+
+    expect(find.textContaining('実体なしとは判定していません'), findsOneWidget);
+    expect(find.text('もう一度確認'), findsOneWidget);
+    expect(find.textContaining('動画の実体が見つかりません'), findsNothing);
+  });
+
+  testWidgets('10工程進捗と独立した総手術時間を表示する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      final ccc = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+      await repository.saveStepTiming(
+        review: ccc.copyWith(startMilliseconds: 1000, endMilliseconds: 61000),
+        expectedVideoPath: null,
+      );
+      final total = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+      await repository.saveStepTiming(
+        review: total.copyWith(startMilliseconds: 0, endMilliseconds: 754000),
+        expectedVideoPath: null,
+      );
+    });
+
+    await pumpScreen(tester, database, record.id);
+
+    expect(find.text('工程 1/10'), findsOneWidget);
+    expect(find.text('総手術時間：12分34秒'), findsOneWidget);
   });
 }
