@@ -61,6 +61,6 @@ flutter run
 
 ## 配布アセット
 
-LaunchScreenはLight `#006D77`、Dark `#003F45`の背景のみで構成します。正式な15度ナイフ原画を受領するまで、配布用AppIconの生成・差し替えは行いません。
+LaunchScreenはLight `#006D77`、Dark `#003F45`の背景のみで構成します。AppIconのフルブリード原画は`assets/branding/app_icon_master.png`で管理し、iOS／iPadOSの全slotとAndroidの各mipmapへ反映します。
 
 テスト、スクリーンショット、Golden、fixtureには、実患者情報、実手術動画、実ファイル名を使用しません。
