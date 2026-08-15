@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/providers.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
@@ -212,6 +214,64 @@ void main() {
     expect(chart.width, lessThanOrEqualTo(content.width));
   });
 
+  testWidgets('最新症例を初期選択しグラフ全体を1つのadjustable controlとする', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await pumpAnalysis(tester, manyCases(3));
+
+    await tester.drag(
+      find.byKey(const Key('analysis-content')),
+      const Offset(0, -300),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('3 / 3 症例目'), findsOneWidget);
+
+    final graphFinder = find.byKey(const Key('analysis-trend-adjustable'));
+    final graph = tester.getSemantics(graphFinder);
+    expect(graph.label, '総手術時間の推移');
+    expect(graph.value, contains('全3件中3件目'));
+    expect(graph.value, contains('2026年1月3日'));
+    expect(
+      graph.getSemanticsData().hasAction(SemanticsAction.increase),
+      isTrue,
+    );
+    expect(
+      graph.getSemanticsData().hasAction(SemanticsAction.decrease),
+      isTrue,
+    );
+    expect(find.bySemanticsLabel('総手術時間の推移'), findsOneWidget);
+
+    graph.owner!.performAction(graph.id, SemanticsAction.decrease);
+    await tester.pumpAndSettle();
+    expect(tester.getSemantics(graphFinder).value, contains('全3件中2件目'));
+
+    final middleGraph = tester.getSemantics(graphFinder);
+    middleGraph.owner!.performAction(middleGraph.id, SemanticsAction.increase);
+    await tester.pumpAndSettle();
+    expect(tester.getSemantics(graphFinder).value, contains('全3件中3件目'));
+
+    final newestGraph = tester.getSemantics(graphFinder);
+    newestGraph.owner!.performAction(newestGraph.id, SemanticsAction.increase);
+    await tester.pumpAndSettle();
+    expect(tester.getSemantics(graphFinder).value, contains('全3件中3件目'));
+    semantics.dispose();
+  });
+
+  testWidgets('1件のadjustable controlは1/1を読み上げ操作で選択を変えない', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await pumpAnalysis(tester, manyCases(1));
+
+    final graphFinder = find.byKey(const Key('analysis-trend-adjustable'));
+    final graph = tester.getSemantics(graphFinder);
+    expect(graph.value, contains('全1件中1件目'));
+
+    for (final action in [SemanticsAction.increase, SemanticsAction.decrease]) {
+      graph.owner!.performAction(graph.id, action);
+      await tester.pump();
+      expect(tester.getSemantics(graphFinder).value, contains('全1件中1件目'));
+    }
+    semantics.dispose();
+  });
+
   testWidgets('データ点の外側をタップしても最寄りの症例が選択される', (tester) async {
     await pumpAnalysis(tester, manyCases(3));
 
@@ -277,6 +337,73 @@ void main() {
     );
   });
 
+  testWidgets('指標変更で同じ症例を保持し、値がなければ新指標の最新へ戻る', (tester) async {
+    final firstDate = DateTime(2026, 7, 19);
+    final secondDate = DateTime(2026, 7, 20);
+    await pumpAnalysis(
+      tester,
+      SurgeryAnalysisSnapshot(
+        recordCount: 2,
+        measurements: [
+          measurement(id: 'first', date: firstDate),
+          measurement(id: 'second', date: secondDate),
+          measurement(
+            id: 'first',
+            date: firstDate,
+            step: SurgicalStep.capsulorhexis,
+            end: 80000,
+          ),
+          measurement(
+            id: 'second',
+            date: secondDate,
+            step: SurgicalStep.capsulorhexis,
+            end: 70000,
+          ),
+          measurement(
+            id: 'first',
+            date: firstDate,
+            step: SurgicalStep.hydrodissection,
+            end: 40000,
+          ),
+        ],
+      ),
+    );
+
+    expect(
+      tester
+          .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
+          .value,
+      contains('全2件中2件目'),
+    );
+
+    await tester.tap(find.byKey(const Key('analysis-metric-selector')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('analysis-metric-capsulorhexis')));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
+          .value,
+      allOf(contains('全2件中2件目'), contains('2026年7月20日')),
+    );
+
+    await tester.tap(find.byKey(const Key('analysis-metric-selector')));
+    await tester.pumpAndSettle();
+    await tester.dragUntilVisible(
+      find.byKey(const Key('analysis-metric-hydrodissection')),
+      find.byType(ListView).last,
+      const Offset(0, -200),
+    );
+    await tester.tap(find.byKey(const Key('analysis-metric-hydrodissection')));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
+          .value,
+      allOf(contains('全1件中1件目'), contains('2026年7月19日')),
+    );
+  });
+
   testWidgets('大きな文字でも指標選択と主要情報へアクセスできる', (tester) async {
     await pumpAnalysis(
       tester,
@@ -331,8 +458,9 @@ void main() {
         surgeryRecordId: record.id,
         step: SurgicalStep.totalSurgeryTime,
       );
-      await repository.saveStepReview(
-        total.copyWith(startMilliseconds: 0, endMilliseconds: 60000),
+      await repository.saveStepTiming(
+        review: total.copyWith(startMilliseconds: 0, endMilliseconds: 60000),
+        expectedVideoPath: null,
       );
     });
     await tester.pumpWidget(
@@ -386,8 +514,9 @@ void main() {
         surgeryRecordId: record.id,
         step: SurgicalStep.totalSurgeryTime,
       );
-      await repository.saveStepReview(
-        total.copyWith(startMilliseconds: 0, endMilliseconds: 60000),
+      await repository.saveStepTiming(
+        review: total.copyWith(startMilliseconds: 0, endMilliseconds: 60000),
+        expectedVideoPath: null,
       );
     });
     await tester.pumpWidget(
@@ -417,9 +546,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    await tester.dragUntilVisible(
+      find.text('症例を削除'),
+      find.byType(ListView).last,
+      const Offset(0, -300),
+    );
     await tester.tap(find.text('症例を削除'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, '削除'));
+    await tester.tap(find.widgetWithText(FilledButton, '症例を削除'));
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 50)),
     );

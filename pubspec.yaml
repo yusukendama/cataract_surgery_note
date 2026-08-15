@@ -1,7 +1,7 @@
 name: cataract_surgery_note
-description: "A new Flutter project."
+description: "白内障手術の工程時間、動画レビュー、振り返り、分析を端末内に記録するアプリ。"
 publish_to: 'none'
-version: 1.0.0+14
+version: 1.0.0+15
 
 environment:
   sdk: ^3.10.1
@@ -12,8 +12,10 @@ dependencies:
   file_picker: ^11.0.2
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   flutter_riverpod: ^3.3.2
-  intl: ^0.20.3
+  intl: ^0.20.2
   path: ^1.9.1
   path_provider: ^2.1.6
   uuid: ^4.5.3

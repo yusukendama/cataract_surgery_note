@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:video_player/video_player.dart';
@@ -9,6 +10,8 @@ import 'package:video_player/video_player.dart';
 import '../../data/providers.dart';
 import '../../data/surgery_video_picker.dart';
 import '../../domain/surgery_models.dart';
+import '../../widgets/app_snack_bar.dart';
+import '../../widgets/video_surface.dart';
 import 'record_detail_screen.dart';
 
 class NewRecordScreen extends ConsumerStatefulWidget {
@@ -33,17 +36,21 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
   String? _videoErrorMessage;
   bool _isVideoLoading = true;
   bool _isSaving = false;
+  bool _isShowingDiscardDialog = false;
   bool _allowPop = false;
   bool _videoWasChanged = false;
+  bool _hasAttemptedRegistration = false;
+  String? _validationAnnouncement;
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _dateFieldKey = GlobalKey();
+  final GlobalKey _eyeFieldKey = GlobalKey();
 
-  bool get _canRegister =>
+  bool get _canAttemptRegistration =>
       !_isSaving &&
       !_isVideoLoading &&
       _videoErrorMessage == null &&
       (!widget.enableVideoPreview ||
-          (_videoController?.value.isInitialized ?? false)) &&
-      _surgeryDate != null &&
-      _eyeSide != null;
+          (_videoController?.value.isInitialized ?? false));
 
   @override
   void initState() {
@@ -57,6 +64,7 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
 
   @override
   void dispose() {
+    _scrollController.dispose();
     final controller = _videoController;
     if (controller != null) {
       controller.removeListener(_onVideoStateChanged);
@@ -77,8 +85,15 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
       child: Scaffold(
         appBar: AppBar(title: const Text('新規症例')),
         body: ListView(
+          controller: _scrollController,
           padding: const EdgeInsets.all(16),
           children: [
+            if (_validationAnnouncement case final message?)
+              Semantics(
+                liveRegion: true,
+                label: message,
+                child: const SizedBox.shrink(),
+              ),
             Text('選択した動画', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             _buildVideoPreview(),
@@ -117,60 +132,97 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
               ),
             ],
             const SizedBox(height: 20),
-            Card(
-              child: ListTile(
-                title: const Text('手術日（必須）'),
-                subtitle: Text(
-                  _surgeryDate == null
-                      ? '未選択'
-                      : DateFormat('yyyy/MM/dd').format(_surgeryDate!),
+            Column(
+              key: _dateFieldKey,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Card(
+                  child: ListTile(
+                    title: const Text('手術日（必須）'),
+                    subtitle: Text(
+                      _surgeryDate == null
+                          ? '未選択'
+                          : DateFormat(
+                              'yyyy/MM/dd',
+                              'ja_JP',
+                            ).format(_surgeryDate!),
+                    ),
+                    trailing: const Icon(Icons.calendar_today),
+                    onTap: _isSaving ? null : _pickDate,
+                  ),
                 ),
-                trailing: const Icon(Icons.calendar_today),
-                onTap: _isSaving ? null : _pickDate,
-              ),
+                if (_hasAttemptedRegistration && _surgeryDate == null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '手術日を選択してください',
+                    key: const Key('surgery-date-error'),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ],
+              ],
             ),
             const SizedBox(height: 16),
-            Text('左右眼（必須）', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            SegmentedButton<EyeSide>(
-              segments: EyeSide.values
-                  .map(
-                    (side) => ButtonSegment<EyeSide>(
-                      value: side,
-                      label: Text(side.label),
+            Column(
+              key: _eyeFieldKey,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text('左右眼（必須）', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 8),
+                SegmentedButton<EyeSide>(
+                  segments: EyeSide.values
+                      .map(
+                        (side) => ButtonSegment<EyeSide>(
+                          value: side,
+                          label: Text(side.label),
+                        ),
+                      )
+                      .toList(),
+                  selected: _eyeSide == null ? const {} : {_eyeSide!},
+                  emptySelectionAllowed: true,
+                  onSelectionChanged: _isSaving
+                      ? null
+                      : (selection) {
+                          setState(() {
+                            _eyeSide = selection.isEmpty
+                                ? null
+                                : selection.single;
+                            _validationAnnouncement = _firstValidationMessage();
+                          });
+                        },
+                ),
+                if (_hasAttemptedRegistration && _eyeSide == null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '右眼または左眼を選択してください',
+                    key: const Key('eye-side-error'),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
                     ),
-                  )
-                  .toList(),
-              selected: _eyeSide == null ? const {} : {_eyeSide!},
-              emptySelectionAllowed: true,
-              onSelectionChanged: _isSaving
-                  ? null
-                  : (selection) {
-                      setState(() {
-                        _eyeSide = selection.isEmpty ? null : selection.single;
-                      });
-                    },
+                  ),
+                ],
+              ],
             ),
-            if (_eyeSide == null) ...[
-              const SizedBox(height: 6),
-              Text(
-                '右眼または左眼を選択してください',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ],
             const SizedBox(height: 28),
-            SizedBox(
-              height: 56,
+            ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 56),
               child: FilledButton.icon(
                 key: const Key('register-record-button'),
-                onPressed: _canRegister ? _save : null,
+                onPressed: _canAttemptRegistration ? _save : null,
                 icon: _isSaving
                     ? const SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.save),
-                label: const Text('症例を登録'),
+                label: Text(
+                  _isSaving
+                      ? '登録中…'
+                      : _isVideoLoading
+                      ? '動画を確認中…'
+                      : '症例を登録',
+                ),
               ),
             ),
           ],
@@ -181,77 +233,52 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
 
   Widget _buildVideoPreview() {
     if (!widget.enableVideoPreview) {
-      return const AspectRatio(
-        aspectRatio: 16 / 9,
-        child: ColoredBox(
-          color: Colors.black,
-          child: Center(
-            child: Icon(Icons.video_file, color: Colors.white, size: 48),
-          ),
+      return const VideoSurface(
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Center(child: Icon(Icons.video_file, size: 48)),
         ),
       );
     }
     if (_isVideoLoading) {
-      return const AspectRatio(
-        aspectRatio: 16 / 9,
-        child: ColoredBox(
-          color: Colors.black,
-          child: Center(child: CircularProgressIndicator()),
+      return const VideoSurface(
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 12),
+                Text('動画を確認しています…'),
+              ],
+            ),
+          ),
         ),
       );
     }
     final error = _videoErrorMessage;
     if (error != null) {
-      return AspectRatio(
-        aspectRatio: 16 / 9,
-        child: ColoredBox(
-          color: Colors.black,
+      return VideoSurface(
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
           child: Center(
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(
-                error,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.error_outline, size: 40),
+                  const SizedBox(height: 8),
+                  Text(error, textAlign: TextAlign.center),
+                ],
               ),
             ),
           ),
         ),
       );
     }
-    final controller = _videoController!;
-    final duration = controller.value.duration;
-    final position = controller.value.position;
-    final maxMilliseconds = duration.inMilliseconds > 0
-        ? duration.inMilliseconds.toDouble()
-        : 1.0;
-    return Column(
-      children: [
-        AspectRatio(
-          aspectRatio: controller.value.aspectRatio,
-          child: ColoredBox(
-            color: Colors.black,
-            child: VideoPlayer(controller),
-          ),
-        ),
-        Slider(
-          value: position.inMilliseconds.toDouble().clamp(0, maxMilliseconds),
-          max: maxMilliseconds,
-          onChanged: (value) {
-            controller.seekTo(Duration(milliseconds: value.round()));
-          },
-        ),
-        IconButton.filled(
-          tooltip: controller.value.isPlaying ? '一時停止' : '再生',
-          onPressed: () {
-            controller.value.isPlaying ? controller.pause() : controller.play();
-          },
-          icon: Icon(
-            controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
-          ),
-        ),
-      ],
-    );
+    return _VideoPreview(controller: _videoController!);
   }
 
   Future<void> _loadVideo(SelectedSurgeryVideo selectedVideo) async {
@@ -273,6 +300,10 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
       if (!mounted || _videoController != controller) {
         return;
       }
+      if (controller.value.duration <= Duration.zero ||
+          controller.value.hasError) {
+        throw StateError('再生可能な動画ではありません');
+      }
       setState(() => _isVideoLoading = false);
     } catch (_) {
       if (!mounted || _videoController != controller) {
@@ -290,12 +321,12 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
       return;
     }
     final controller = _videoController;
-    setState(() {
-      if (controller?.value.hasError ?? false) {
+    if ((controller?.value.hasError ?? false) && _videoErrorMessage == null) {
+      setState(() {
         _isVideoLoading = false;
         _videoErrorMessage = '動画を再生できませんでした。動画を変更して、もう一度お試しください。';
-      }
-    });
+      });
+    }
   }
 
   Future<void> _changeVideo() async {
@@ -314,6 +345,8 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
       _surgeryDate = null;
       _eyeSide = null;
       _videoWasChanged = true;
+      _hasAttemptedRegistration = false;
+      _validationAnnouncement = null;
     });
     if (widget.enableVideoPreview) {
       await _loadVideo(selectedVideo);
@@ -328,14 +361,56 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
       lastDate: DateTime.now().add(const Duration(days: 365)),
     );
     if (picked != null && mounted) {
-      setState(() => _surgeryDate = picked);
+      setState(() {
+        _surgeryDate = picked;
+        _validationAnnouncement = _firstValidationMessage();
+      });
     }
+  }
+
+  String? _firstValidationMessage() {
+    if (!_hasAttemptedRegistration) {
+      return null;
+    }
+    if (_surgeryDate == null) {
+      return '手術日を選択してください';
+    }
+    if (_eyeSide == null) {
+      return '右眼または左眼を選択してください';
+    }
+    return null;
   }
 
   Future<void> _save() async {
     final surgeryDate = _surgeryDate;
     final eyeSide = _eyeSide;
-    if (!_canRegister || surgeryDate == null || eyeSide == null) {
+    if (!_canAttemptRegistration) {
+      return;
+    }
+    if (surgeryDate == null || eyeSide == null) {
+      final firstMessage = surgeryDate == null
+          ? '手術日を選択してください'
+          : '右眼または左眼を選択してください';
+      setState(() {
+        _hasAttemptedRegistration = true;
+        _validationAnnouncement = firstMessage;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        final targetContext =
+            (surgeryDate == null ? _dateFieldKey : _eyeFieldKey).currentContext;
+        if (targetContext != null) {
+          unawaited(
+            Scrollable.ensureVisible(
+              targetContext,
+              duration: const Duration(milliseconds: 200),
+              alignment: 0.25,
+            ),
+          );
+        }
+      });
       return;
     }
     setState(() => _isSaving = true);
@@ -349,7 +424,9 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
             originalFileName: _selectedVideo.displayName,
           );
       ref.invalidate(surgeryRecordsProvider);
+      ref.invalidate(surgeryRecordProgressProvider);
       ref.invalidate(surgeryAnalysisProvider);
+      ref.invalidate(videoStorageMaintenanceProvider);
       if (!mounted) {
         return;
       }
@@ -369,6 +446,10 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
   }
 
   String _describeSaveError(Object error) {
+    if (error is PlatformException &&
+        error.code.startsWith('backup_exclusion')) {
+      return '動画のバックアップ除外を確認できませんでした。症例は登録していません。もう一度お試しください。';
+    }
     if (error is ArgumentError) {
       return 'この動画形式は登録できません。MP4、MOV、M4V形式の動画を選択してください。';
     }
@@ -379,9 +460,10 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
   }
 
   Future<void> _confirmDiscard() async {
-    if (_isSaving) {
+    if (_isSaving || _isShowingDiscardDialog) {
       return;
     }
+    _isShowingDiscardDialog = true;
     final discard = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -399,6 +481,7 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
         ],
       ),
     );
+    _isShowingDiscardDialog = false;
     if (discard == true && mounted) {
       setState(() => _allowPop = true);
       Navigator.of(context).pop();
@@ -407,9 +490,111 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
 
   void _showMessage(String message) {
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
+      showAppSnackBar(context, message: message, tone: AppFeedbackTone.failure);
     }
+  }
+}
+
+class _VideoPreview extends StatefulWidget {
+  const _VideoPreview({required this.controller});
+
+  final VideoPlayerController controller;
+
+  @override
+  State<_VideoPreview> createState() => _VideoPreviewState();
+}
+
+class _VideoPreviewState extends State<_VideoPreview> {
+  double? _dragMilliseconds;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<VideoPlayerValue>(
+      valueListenable: widget.controller,
+      builder: (context, value, _) {
+        final durationMilliseconds = value.duration.inMilliseconds;
+        final maximum = durationMilliseconds > 0
+            ? durationMilliseconds.toDouble()
+            : 1.0;
+        final position = (_dragMilliseconds ?? value.position.inMilliseconds)
+            .clamp(0, maximum)
+            .toDouble();
+        final displayPosition = Duration(milliseconds: position.round());
+        final aspectRatio = value.aspectRatio > 0 ? value.aspectRatio : 16 / 9;
+        return VideoSurface(
+          child: Column(
+            children: [
+              AspectRatio(
+                aspectRatio: aspectRatio,
+                child: VideoPlayer(widget.controller),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
+                child: Column(
+                  children: [
+                    Slider(
+                      key: const Key('new-record-video-slider'),
+                      value: position,
+                      max: maximum,
+                      semanticFormatterCallback: (_) =>
+                          '${_formatPosition(displayPosition)} / '
+                          '${_formatPosition(value.duration)}',
+                      onChangeStart: (newValue) {
+                        setState(() => _dragMilliseconds = newValue);
+                      },
+                      onChanged: (newValue) {
+                        setState(() => _dragMilliseconds = newValue);
+                      },
+                      onChangeEnd: (newValue) =>
+                          unawaited(_commitSeek(newValue)),
+                    ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '${_formatPosition(displayPosition)} / '
+                            '${_formatPosition(value.duration)}',
+                            key: const Key('new-record-video-position'),
+                          ),
+                        ),
+                        IconButton.filled(
+                          tooltip: value.isPlaying ? '一時停止' : '再生',
+                          onPressed: () {
+                            value.isPlaying
+                                ? unawaited(widget.controller.pause())
+                                : unawaited(widget.controller.play());
+                          },
+                          icon: Icon(
+                            value.isPlaying ? Icons.pause : Icons.play_arrow,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _commitSeek(double milliseconds) async {
+    final controller = widget.controller;
+    setState(() => _dragMilliseconds = milliseconds);
+    try {
+      await controller.seekTo(Duration(milliseconds: milliseconds.round()));
+    } finally {
+      if (mounted && identical(controller, widget.controller)) {
+        setState(() => _dragMilliseconds = null);
+      }
+    }
+  }
+
+  String _formatPosition(Duration value) {
+    final minutes = value.inMinutes;
+    final seconds = value.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
   }
 }

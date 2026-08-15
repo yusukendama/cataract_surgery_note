@@ -9,6 +9,11 @@ class _NoopBackupExclusionRepository implements BackupExclusionRepository {
   Future<void> excludeFromBackup(String path) async {}
 }
 
+class _NoopPlaybackVerifier implements VideoPlaybackVerifier {
+  @override
+  Future<void> verify(File file) async {}
+}
+
 void main() {
   late Directory tempDirectory;
   late Directory supportDirectory;
@@ -22,6 +27,7 @@ void main() {
     repository = LocalVideoStorageRepository(
       applicationSupportDirectory: supportDirectory,
       backupExclusionRepository: _NoopBackupExclusionRepository(),
+      playbackVerifier: _NoopPlaybackVerifier(),
     );
   });
 

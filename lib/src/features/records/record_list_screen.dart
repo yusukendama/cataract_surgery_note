@@ -2,8 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/providers.dart';
+import '../../data/record_video_service.dart';
+import '../../data/surgery_repository.dart';
 import '../../data/surgery_video_picker.dart';
+import '../../domain/duration_formatters.dart';
 import '../../domain/surgery_models.dart';
+import '../../widgets/app_snack_bar.dart';
+import '../../widgets/app_states.dart';
 import '../analysis/analysis_screen.dart';
 import 'new_record_screen.dart';
 import 'record_detail_screen.dart';
@@ -36,8 +41,14 @@ class RecordListScreen extends ConsumerWidget {
         ],
       ),
       body: records.when(
-        data: (items) => _RecordList(items: items),
-        error: (error, _) => Center(child: Text('読み込みに失敗しました: $error')),
+        data: (items) => _RecordList(
+          items: items,
+          onCreateRecord: () => _startNewRecord(context, ref),
+        ),
+        error: (_, _) => AppErrorState(
+          message: '症例一覧を読み込めませんでした。',
+          onRetry: () => ref.invalidate(surgeryRecordsProvider),
+        ),
         loading: () => const Center(child: CircularProgressIndicator()),
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -54,10 +65,10 @@ class RecordListScreen extends ConsumerWidget {
       selectedVideo = await ref.read(surgeryVideoPickerProvider).pickVideo();
     } catch (_) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('動画を選択できませんでした。写真へのアクセス権限を確認して、もう一度お試しください。'),
-          ),
+        showAppSnackBar(
+          context,
+          message: '動画を選択できませんでした。写真へのアクセス権限を確認して、もう一度お試しください。',
+          tone: AppFeedbackTone.failure,
         );
       }
       return;
@@ -76,27 +87,46 @@ class RecordListScreen extends ConsumerWidget {
   }
 }
 
-class _RecordList extends StatelessWidget {
-  const _RecordList({required this.items});
+class _RecordList extends ConsumerWidget {
+  const _RecordList({required this.items, required this.onCreateRecord});
 
   final List<SurgeryRecord> items;
+  final VoidCallback onCreateRecord;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final groups = groupRecordsByMonth(items);
+    final progress = ref.watch(surgeryRecordProgressProvider);
+    final progressByRecordId = <String, SurgeryRecordProgress>{
+      for (final item
+          in progress.asData?.value ?? const <SurgeryRecordProgress>[])
+        item.record.id: item,
+    };
     final scaledHeaderHeight = MediaQuery.textScalerOf(context).scale(16) + 24;
     final headerHeight = scaledHeaderHeight.clamp(48.0, 80.0);
 
     return CustomScrollView(
       key: const Key('record-list-scroll'),
       slivers: [
-        SliverToBoxAdapter(child: _TotalRecordCount(count: items.length)),
         if (groups.isEmpty)
-          const SliverFillRemaining(
+          SliverFillRemaining(
             hasScrollBody: false,
-            child: Center(child: Text('症例がありません')),
+            child: AppEmptyState(
+              icon: Icons.note_add_outlined,
+              title: 'まだ症例がありません',
+              message: '手術動画を選び、工程時間と振り返りを記録しましょう。',
+              actionLabel: '最初の症例を登録',
+              onAction: onCreateRecord,
+            ),
           )
-        else
+        else ...[
+          SliverToBoxAdapter(child: _TotalRecordCount(count: items.length)),
+          if (progress.hasError)
+            SliverToBoxAdapter(
+              child: _SupportingDataWarning(
+                onRetry: () => ref.invalidate(surgeryRecordProgressProvider),
+              ),
+            ),
           for (final group in groups)
             SliverMainAxisGroup(
               slivers: [
@@ -111,38 +141,209 @@ class _RecordList extends StatelessWidget {
                 SliverList(
                   delegate: SliverChildBuilderDelegate((context, index) {
                     final record = group.records[index];
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        ListTile(
-                          key: Key('record-list-item-${record.id}'),
-                          title: Text(_recordTitle(record)),
-                          subtitle: Text(record.reviewStatus.label),
-                          trailing: const Icon(Icons.chevron_right),
-                          onTap: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute<void>(
-                                builder: (_) =>
-                                    RecordDetailScreen(recordId: record.id),
-                              ),
-                            );
-                          },
-                        ),
-                        if (index < group.records.length - 1)
-                          const Divider(height: 1),
-                      ],
+                    return _RecordListItem(
+                      record: record,
+                      progress: progressByRecordId[record.id],
+                      progressPending: progress.isLoading,
                     );
                   }, childCount: group.records.length),
                 ),
               ],
             ),
+        ],
       ],
     );
   }
+}
 
-  String _recordTitle(SurgeryRecord record) {
-    final date = record.surgeryDate.toLocal();
-    return '${date.month}月${date.day}日 ${record.eyeSide.label}';
+class _RecordListItem extends ConsumerWidget {
+  const _RecordListItem({
+    required this.record,
+    required this.progress,
+    required this.progressPending,
+  });
+
+  final SurgeryRecord record;
+  final SurgeryRecordProgress? progress;
+  final bool progressPending;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final videoState = ref.watch(recordVideoStateProvider(record.id));
+    final progressLabel = _progressLabel;
+    final totalDuration = progress?.totalSurgeryDuration;
+    final videoLabel = videoState.when(
+      data: _videoStateLabel,
+      loading: () => '動画を確認中…',
+      error: (_, _) => '動画を確認できません',
+    );
+    final dateLabel = _dateLabel(record.surgeryDate.toLocal());
+    final semanticsLabel = <String>[
+      dateLabel,
+      record.eyeSide.label,
+      progressLabel,
+      if (totalDuration != null)
+        '総手術時間 ${formatProcedureDuration(totalDuration)}',
+      videoLabel,
+    ].join('、');
+    final colorScheme = Theme.of(context).colorScheme;
+    void openRecord() {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => RecordDetailScreen(recordId: record.id),
+        ),
+      );
+    }
+
+    return Semantics(
+      key: Key('record-list-semantics-${record.id}'),
+      button: true,
+      label: semanticsLabel,
+      onTap: openRecord,
+      child: ExcludeSemantics(
+        child: Card(
+          key: Key('record-list-item-${record.id}'),
+          margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: openRecord,
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          dateLabel,
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          record.eyeSide.label,
+                          style: Theme.of(context).textTheme.bodyLarge,
+                        ),
+                        const SizedBox(height: 8),
+                        _RecordMetadataLine(
+                          icon: Icons.fact_check_outlined,
+                          text: progressLabel,
+                        ),
+                        if (totalDuration != null) ...[
+                          const SizedBox(height: 4),
+                          _RecordMetadataLine(
+                            icon: Icons.timer_outlined,
+                            text:
+                                '総手術時間 ${formatProcedureDuration(totalDuration)}',
+                          ),
+                        ],
+                        const SizedBox(height: 4),
+                        _RecordMetadataLine(
+                          icon: _videoStateIcon(videoState.asData?.value.kind),
+                          text: videoLabel,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Icon(
+                    Icons.chevron_right,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String get _progressLabel {
+    final snapshot = progress;
+    if (snapshot == null) {
+      return progressPending ? '工程を確認中…' : '工程情報を確認できません';
+    }
+    final completed = snapshot.completedStepCount == 0
+        ? '未記録'
+        : '工程 ${snapshot.completedStepCount}/10';
+    final running = snapshot.hasRunningStep ? '・計測中' : '';
+    return '$completed$running';
+  }
+
+  String _dateLabel(DateTime date) {
+    const weekdays = <String>['月', '火', '水', '木', '金', '土', '日'];
+    return '${date.month}月${date.day}日（${weekdays[date.weekday - 1]}）';
+  }
+
+  String _videoStateLabel(RecordVideoState state) => switch (state.kind) {
+    RecordVideoStateKind.unregistered => '動画未登録',
+    RecordVideoStateKind.availableManaged => '動画あり',
+    RecordVideoStateKind.availableLegacy => '旧形式動画あり',
+    RecordVideoStateKind.missing => '動画の実体なし',
+    RecordVideoStateKind.invalidReference => '動画参照エラー',
+    RecordVideoStateKind.checkFailed => '動画を確認できません',
+  };
+
+  IconData _videoStateIcon(RecordVideoStateKind? kind) => switch (kind) {
+    RecordVideoStateKind.availableManaged ||
+    RecordVideoStateKind.availableLegacy => Icons.videocam_outlined,
+    RecordVideoStateKind.missing ||
+    RecordVideoStateKind.invalidReference ||
+    RecordVideoStateKind.checkFailed => Icons.warning_amber_outlined,
+    RecordVideoStateKind.unregistered || null => Icons.videocam_off_outlined,
+  };
+}
+
+class _RecordMetadataLine extends StatelessWidget {
+  const _RecordMetadataLine({required this.icon, required this.text});
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 18, color: color),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            text,
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: color),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SupportingDataWarning extends StatelessWidget {
+  const _SupportingDataWarning({required this.onRetry});
+
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        child: Row(
+          children: [
+            const Icon(Icons.info_outline),
+            const SizedBox(width: 8),
+            const Expanded(child: Text('工程情報を読み込めませんでした。')),
+            TextButton(onPressed: onRetry, child: const Text('再読み込み')),
+          ],
+        ),
+      ),
+    );
   }
 }
 
