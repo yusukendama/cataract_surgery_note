@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -64,6 +65,11 @@ enum _LeaveAction { cancel, discard, save }
 enum _VideoSelectionAction { attach, relink, replace }
 
 typedef SuccessHapticFeedback = Future<void> Function();
+
+const _minimumReviewContentHeight = 96.0;
+const _minimumFallbackReviewContentHeight = 48.0;
+const _minimumPinnedPlayerHeight = 240.0;
+const _maximumVideoHeight = 280.0;
 
 class StepReviewScreen extends ConsumerStatefulWidget {
   const StepReviewScreen({
@@ -133,6 +139,19 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
         !_videoProviderLoading &&
         _videoProviderError == null &&
         _videoBoundReference == _latestRecord?.videoPath;
+  }
+
+  bool get _hasInitializedVideoPlayer {
+    final controller = _videoController;
+    final aspectRatio = controller?.value.aspectRatio;
+    return controller != null &&
+        controller.value.isInitialized &&
+        !controller.value.hasError &&
+        aspectRatio != null &&
+        aspectRatio.isFinite &&
+        aspectRatio > 0 &&
+        _videoErrorMessage == null &&
+        _resolvedVideoFile != null;
   }
 
   int get _currentMilliseconds =>
@@ -356,149 +375,184 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
 
     return GestureDetector(
+      key: const Key('review-body'),
       onTap: () => FocusScope.of(context).unfocus(),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final maximumTopHeight = (constraints.maxHeight - 96).clamp(
-            0.0,
-            360.0,
-          );
-          final topHeight = bottomInset > 0
-              ? 0.0
-              : (constraints.maxHeight * 0.42)
-                    .clamp(0.0, maximumTopHeight)
-                    .toDouble();
+          final tabBar = _buildReviewTabBar(byStep);
+          final reviewNotices = _buildReviewNotices(hasRefreshError);
+          final maximumPinnedPlayerHeight =
+              (constraints.maxHeight -
+                      tabBar.preferredSize.height -
+                      _minimumReviewContentHeight)
+                  .clamp(0.0, double.infinity)
+                  .toDouble();
+          final isPortraitLayout =
+              constraints.maxHeight >= constraints.maxWidth;
+          final pinsInitializedPlayer =
+              bottomInset == 0 &&
+              isPortraitLayout &&
+              _hasInitializedVideoPlayer &&
+              maximumPinnedPlayerHeight >= _minimumPinnedPlayerHeight;
+
+          final Widget videoRegion;
+          if (bottomInset > 0) {
+            videoRegion = const SizedBox.shrink();
+          } else if (pinsInitializedPlayer) {
+            videoRegion = ConstrainedBox(
+              key: const Key('review-video-player-region'),
+              constraints: BoxConstraints(maxHeight: maximumPinnedPlayerHeight),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: _buildVideoSection(record),
+              ),
+            );
+          } else {
+            final maximumTopHeight =
+                (constraints.maxHeight -
+                        tabBar.preferredSize.height -
+                        _minimumFallbackReviewContentHeight)
+                    .clamp(0.0, 360.0);
+            final topHeight = (constraints.maxHeight * 0.42)
+                .clamp(0.0, maximumTopHeight)
+                .toDouble();
+            videoRegion = SizedBox(
+              key: const Key('review-video-fallback-region'),
+              height: topHeight,
+              child: SingleChildScrollView(
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                  child: _buildVideoSection(record),
+                ),
+              ),
+            );
+          }
+
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(
-                height: topHeight,
-                child: SingleChildScrollView(
-                  keyboardDismissBehavior:
-                      ScrollViewKeyboardDismissBehavior.onDrag,
+              videoRegion,
+              tabBar,
+              Expanded(
+                child: SizedBox(
+                  key: const Key('review-content-region'),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      if (_recordWasDeleted) _buildDeletedRecordNotice(),
-                      if (!_recordWasDeleted && hasRefreshError)
-                        _buildRefreshFailureNotice(),
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                        child: _buildVideoSection(record),
+                      if (reviewNotices.isNotEmpty)
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(
+                            maxHeight: _minimumReviewContentHeight,
+                          ),
+                          child: SingleChildScrollView(
+                            key: const Key('review-notice-region'),
+                            child: Column(children: reviewNotices),
+                          ),
+                        ),
+                      Expanded(
+                        child: TabBarView(
+                          controller: _tabController,
+                          children: [
+                            for (final step in surgicalStepsInDisplayOrder)
+                              ListView(
+                                key: ValueKey(
+                                  'review-step-content-${step.name}',
+                                ),
+                                keyboardDismissBehavior:
+                                    ScrollViewKeyboardDismissBehavior.onDrag,
+                                padding: EdgeInsets.fromLTRB(
+                                  16,
+                                  16,
+                                  16,
+                                  16 + bottomInset,
+                                ),
+                                children: [
+                                  ProcedureTimingCard(
+                                    step: step,
+                                    timing: byStep[step]!,
+                                    isSaving: _savingStep == step,
+                                    videoUnavailableReason:
+                                        _timingUnavailableReason(),
+                                    onStart:
+                                        _hasUsableVideoPosition &&
+                                            !_hasPendingWrite
+                                        ? () =>
+                                              _startStep(byStep[step]!, reviews)
+                                        : null,
+                                    onEnd:
+                                        _hasUsableVideoPosition &&
+                                            !_hasPendingWrite
+                                        ? () => _endStep(byStep[step]!)
+                                        : null,
+                                    onReset:
+                                        !_hasPendingWrite && !_recordWasDeleted
+                                        ? () => _resetStep(byStep[step]!)
+                                        : null,
+                                    onTapStart:
+                                        byStep[step]!.startMilliseconds ==
+                                                null ||
+                                            !_hasUsableVideoPosition
+                                        ? null
+                                        : () => _seekToMilliseconds(
+                                            byStep[step]!.startMilliseconds!,
+                                          ),
+                                    onTapEnd:
+                                        byStep[step]!.endMilliseconds == null ||
+                                            !_hasUsableVideoPosition
+                                        ? null
+                                        : () => _seekToMilliseconds(
+                                            byStep[step]!.endMilliseconds!,
+                                          ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  _StepNotesCard(
+                                    rating:
+                                        _ratings[step] ?? StepRating.unreviewed,
+                                    controller: _reflectionControllers[step]!,
+                                    enabled:
+                                        !_isSavingReview && !_recordWasDeleted,
+                                    onRatingChanged: (value) {
+                                      setState(() {
+                                        _ratings[step] = value;
+                                        _recomputeDirty();
+                                      });
+                                    },
+                                  ),
+                                ],
+                              ),
+                            ListView(
+                              key: const Key('review-case-memo-content'),
+                              keyboardDismissBehavior:
+                                  ScrollViewKeyboardDismissBehavior.onDrag,
+                              padding: EdgeInsets.fromLTRB(
+                                16,
+                                16,
+                                16,
+                                16 + bottomInset,
+                              ),
+                              children: [
+                                TextField(
+                                  controller: _caseMemoController,
+                                  readOnly:
+                                      _isSavingReview || _recordWasDeleted,
+                                  minLines: 3,
+                                  maxLines: 8,
+                                  scrollPadding: EdgeInsets.only(
+                                    bottom: bottomInset + 96,
+                                  ),
+                                  decoration: const InputDecoration(
+                                    labelText: '症例全体のメモ',
+                                    border: OutlineInputBorder(),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
-                ),
-              ),
-              TabBar(
-                controller: _tabController,
-                isScrollable: true,
-                tabAlignment: TabAlignment.start,
-                tabs: [
-                  for (final step in surgicalStepsInDisplayOrder)
-                    Tab(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (byStep[step]!.isCompleted) ...[
-                            const Icon(Icons.check, size: 14),
-                            const SizedBox(width: 4),
-                          ] else if (byStep[step]!.isRunning) ...[
-                            const Icon(Icons.timer_outlined, size: 14),
-                            const SizedBox(width: 4),
-                          ],
-                          Text(step.label),
-                        ],
-                      ),
-                    ),
-                  const Tab(text: '症例メモ'),
-                ],
-              ),
-              Expanded(
-                child: TabBarView(
-                  controller: _tabController,
-                  children: [
-                    for (final step in surgicalStepsInDisplayOrder)
-                      ListView(
-                        keyboardDismissBehavior:
-                            ScrollViewKeyboardDismissBehavior.onDrag,
-                        padding: EdgeInsets.fromLTRB(
-                          16,
-                          16,
-                          16,
-                          16 + bottomInset,
-                        ),
-                        children: [
-                          ProcedureTimingCard(
-                            step: step,
-                            timing: byStep[step]!,
-                            isSaving: _savingStep == step,
-                            videoUnavailableReason: _timingUnavailableReason(),
-                            onStart:
-                                _hasUsableVideoPosition && !_hasPendingWrite
-                                ? () => _startStep(byStep[step]!, reviews)
-                                : null,
-                            onEnd: _hasUsableVideoPosition && !_hasPendingWrite
-                                ? () => _endStep(byStep[step]!)
-                                : null,
-                            onReset: !_hasPendingWrite && !_recordWasDeleted
-                                ? () => _resetStep(byStep[step]!)
-                                : null,
-                            onTapStart:
-                                byStep[step]!.startMilliseconds == null ||
-                                    !_hasUsableVideoPosition
-                                ? null
-                                : () => _seekToMilliseconds(
-                                    byStep[step]!.startMilliseconds!,
-                                  ),
-                            onTapEnd:
-                                byStep[step]!.endMilliseconds == null ||
-                                    !_hasUsableVideoPosition
-                                ? null
-                                : () => _seekToMilliseconds(
-                                    byStep[step]!.endMilliseconds!,
-                                  ),
-                          ),
-                          const SizedBox(height: 12),
-                          _StepNotesCard(
-                            rating: _ratings[step] ?? StepRating.unreviewed,
-                            controller: _reflectionControllers[step]!,
-                            enabled: !_isSavingReview && !_recordWasDeleted,
-                            onRatingChanged: (value) {
-                              setState(() {
-                                _ratings[step] = value;
-                                _recomputeDirty();
-                              });
-                            },
-                          ),
-                        ],
-                      ),
-                    ListView(
-                      keyboardDismissBehavior:
-                          ScrollViewKeyboardDismissBehavior.onDrag,
-                      padding: EdgeInsets.fromLTRB(
-                        16,
-                        16,
-                        16,
-                        16 + bottomInset,
-                      ),
-                      children: [
-                        TextField(
-                          controller: _caseMemoController,
-                          readOnly: _isSavingReview || _recordWasDeleted,
-                          minLines: 3,
-                          maxLines: 8,
-                          scrollPadding: EdgeInsets.only(
-                            bottom: bottomInset + 96,
-                          ),
-                          decoration: const InputDecoration(
-                            labelText: '症例全体のメモ',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
                 ),
               ),
             ],
@@ -506,6 +560,48 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
         },
       ),
     );
+  }
+
+  TabBar _buildReviewTabBar(Map<SurgicalStep, SurgicalStepReview> byStep) {
+    return TabBar(
+      controller: _tabController,
+      isScrollable: true,
+      tabAlignment: TabAlignment.start,
+      tabs: [
+        for (final step in surgicalStepsInDisplayOrder)
+          Tab(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (byStep[step]!.isCompleted) ...[
+                  const Icon(Icons.check, size: 14),
+                  const SizedBox(width: 4),
+                ] else if (byStep[step]!.isRunning) ...[
+                  const Icon(Icons.timer_outlined, size: 14),
+                  const SizedBox(width: 4),
+                ],
+                Text(step.label),
+              ],
+            ),
+          ),
+        const Tab(text: '症例メモ'),
+      ],
+    );
+  }
+
+  List<Widget> _buildReviewNotices(bool hasRefreshError) {
+    final notices = <Widget>[
+      if (_recordWasDeleted)
+        _buildDeletedRecordNotice()
+      else if (hasRefreshError)
+        _buildRefreshFailureNotice(),
+      if (_videoProviderError != null && _hasInitializedVideoPlayer)
+        _buildVideoRefreshWarning(),
+    ];
+    if (notices.isEmpty) {
+      return const [];
+    }
+    return notices;
   }
 
   Widget _buildVideoSection(SurgeryRecord record) {
@@ -596,12 +692,17 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
         record: record,
       );
     }
-    return Column(
-      children: [
-        if (_videoProviderError != null) _buildVideoRefreshWarning(),
-        _buildVideoPlayer(controller),
-      ],
-    );
+    final aspectRatio = controller.value.aspectRatio;
+    if (!aspectRatio.isFinite || aspectRatio <= 0) {
+      return _buildVideoNotice(
+        '動画の表示サイズを確認できませんでした。'
+        'レビュー内容はそのまま編集できます。',
+        showPicker: true,
+        showRetry: true,
+        record: record,
+      );
+    }
+    return _buildVideoPlayer(controller);
   }
 
   Widget _buildVideoNotice(
@@ -671,35 +772,49 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   }
 
   Widget _buildVideoPlayer(VideoPlayerController controller) {
-    return Column(
-      children: [
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 280),
-          child: Center(
-            child: AspectRatio(
-              aspectRatio: controller.value.aspectRatio,
-              child: VideoSurface(child: VideoPlayer(controller)),
+    return LayoutBuilder(
+      key: const Key('review-video-player'),
+      builder: (context, constraints) => Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (constraints.hasBoundedHeight)
+            Flexible(
+              fit: FlexFit.loose,
+              child: LayoutBuilder(
+                builder: (context, videoConstraints) => _buildVideoViewport(
+                  controller,
+                  maxWidth: videoConstraints.maxWidth,
+                  maxHeight: videoConstraints.maxHeight,
+                ),
+              ),
+            )
+          else
+            _buildVideoViewport(
+              controller,
+              maxWidth: constraints.maxWidth,
+              maxHeight: _maximumVideoHeight,
             ),
-          ),
-        ),
-        const SizedBox(height: 4),
-        ValueListenableBuilder<VideoPlayerValue>(
-          valueListenable: controller,
-          builder: (context, value, _) {
-            final duration = value.duration;
-            final durationMs = duration.inMilliseconds > 0
-                ? duration.inMilliseconds.toDouble()
-                : 1.0;
-            final positionMs = value.position.inMilliseconds.toDouble().clamp(
-              0.0,
-              durationMs,
-            );
-            return Column(
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Semantics(
+          const SizedBox(height: 4),
+          ValueListenableBuilder<VideoPlayerValue>(
+            valueListenable: controller,
+            builder: (context, value, _) {
+              final duration = value.duration;
+              final durationMs = duration.inMilliseconds > 0
+                  ? duration.inMilliseconds.toDouble()
+                  : 1.0;
+              final positionMs = value.position.inMilliseconds.toDouble().clamp(
+                0.0,
+                durationMs,
+              );
+              return Column(
+                children: [
+                  Wrap(
+                    key: const Key('review-video-timeline-row'),
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    children: [
+                      Semantics(
                         liveRegion: false,
                         label:
                             '再生位置 '
@@ -710,75 +825,107 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
                         child: Text(
                           '${formatTimelineMilliseconds(value.position.inMilliseconds)} / '
                           '${formatTimelineMilliseconds(duration.inMilliseconds)}',
+                          maxLines: 1,
+                          softWrap: false,
                         ),
                       ),
-                    ),
-                    PopupMenuButton<double>(
-                      tooltip: '再生速度を変更',
-                      initialValue: _playbackSpeed,
-                      onSelected: _setPlaybackSpeed,
-                      itemBuilder: (context) => [
-                        for (final speed in const [
-                          0.5,
-                          0.75,
-                          1.0,
-                          1.25,
-                          1.5,
-                          2.0,
-                        ])
-                          PopupMenuItem<double>(
-                            value: speed,
-                            child: Text('${speed}x'),
+                      PopupMenuButton<double>(
+                        tooltip: '再生速度を変更',
+                        initialValue: _playbackSpeed,
+                        onSelected: _setPlaybackSpeed,
+                        itemBuilder: (context) => [
+                          for (final speed in const [
+                            0.5,
+                            0.75,
+                            1.0,
+                            1.25,
+                            1.5,
+                            2.0,
+                          ])
+                            PopupMenuItem<double>(
+                              value: speed,
+                              child: Text('${speed}x'),
+                            ),
+                        ],
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 12,
                           ),
-                      ],
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 12,
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.speed, size: 18),
-                            const SizedBox(width: 4),
-                            Text('速度 ${_playbackSpeed}x'),
-                            const Icon(Icons.arrow_drop_down),
-                          ],
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.speed, size: 18),
+                              const SizedBox(width: 4),
+                              Text('速度 ${_playbackSpeed}x'),
+                              const Icon(Icons.arrow_drop_down),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                  ],
-                ),
-                Slider(
-                  value: positionMs,
-                  max: durationMs,
-                  onChanged: _hasUsableVideoPosition
-                      ? (position) {
-                          _seekToMilliseconds(position.round());
-                        }
-                      : null,
-                ),
-                VideoTransportControls(
-                  isPlaying: value.isPlaying,
-                  onSeekBackward5: _hasUsableVideoPosition
-                      ? () => _seekRelative(const Duration(seconds: -5))
-                      : null,
-                  onSeekForward5: _hasUsableVideoPosition
-                      ? () => _seekRelative(const Duration(seconds: 5))
-                      : null,
-                  onSeekBackward15: _hasUsableVideoPosition
-                      ? () => _seekRelative(const Duration(seconds: -15))
-                      : null,
-                  onSeekForward15: _hasUsableVideoPosition
-                      ? () => _seekRelative(const Duration(seconds: 15))
-                      : null,
-                  onTogglePlayback: _togglePlayback,
-                ),
-              ],
-            );
-          },
-        ),
-      ],
+                    ],
+                  ),
+                  Slider(
+                    key: const Key('review-video-slider'),
+                    value: positionMs,
+                    max: durationMs,
+                    onChanged: _hasUsableVideoPosition
+                        ? (position) {
+                            _seekToMilliseconds(position.round());
+                          }
+                        : null,
+                  ),
+                  VideoTransportControls(
+                    isPlaying: value.isPlaying,
+                    onSeekBackward5: _hasUsableVideoPosition
+                        ? () => _seekRelative(const Duration(seconds: -5))
+                        : null,
+                    onSeekForward5: _hasUsableVideoPosition
+                        ? () => _seekRelative(const Duration(seconds: 5))
+                        : null,
+                    onSeekBackward15: _hasUsableVideoPosition
+                        ? () => _seekRelative(const Duration(seconds: -15))
+                        : null,
+                    onSeekForward15: _hasUsableVideoPosition
+                        ? () => _seekRelative(const Duration(seconds: 15))
+                        : null,
+                    onTogglePlayback: _togglePlayback,
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVideoViewport(
+    VideoPlayerController controller, {
+    required double maxWidth,
+    required double maxHeight,
+  }) {
+    final aspectRatio = controller.value.aspectRatio;
+    final boundedWidth = maxWidth.isFinite ? math.max(0.0, maxWidth) : 0.0;
+    final boundedHeight = math.max(
+      0.0,
+      math.min(
+        _maximumVideoHeight,
+        maxHeight.isFinite ? maxHeight : _maximumVideoHeight,
+      ),
+    );
+    if (boundedWidth == 0 || boundedHeight == 0) {
+      return const SizedBox.shrink(key: Key('review-video-surface'));
+    }
+
+    final widthLimitedHeight = boundedWidth / aspectRatio;
+    final videoHeight = math.min(boundedHeight, widthLimitedHeight);
+    final videoWidth = videoHeight * aspectRatio;
+    return SizedBox(
+      key: const Key('review-video-surface'),
+      width: videoWidth,
+      height: videoHeight,
+      child: VideoSurface(child: VideoPlayer(controller)),
     );
   }
 
