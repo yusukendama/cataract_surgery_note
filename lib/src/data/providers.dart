@@ -82,6 +82,38 @@ final recordVideoStateProvider =
       return ref.watch(recordVideoServiceProvider).inspectVideoState(record);
     });
 
+/// List-specific cache key for lightweight video-reference inspection.
+///
+/// Equality deliberately ignores record metadata that cannot affect video
+/// availability. A changed video reference creates a new family instance even
+/// if an explicit invalidation is missed, while ordinary list rebuilds reuse
+/// the existing file check.
+class RecordVideoStateRequest {
+  const RecordVideoStateRequest(this.record);
+
+  final SurgeryRecord record;
+
+  @override
+  bool operator ==(Object other) {
+    return other is RecordVideoStateRequest &&
+        other.record.id == record.id &&
+        other.record.videoPath == record.videoPath;
+  }
+
+  @override
+  int get hashCode => Object.hash(record.id, record.videoPath);
+}
+
+final recordVideoStateByReferenceProvider =
+    FutureProvider.family<RecordVideoState, RecordVideoStateRequest>((
+      ref,
+      request,
+    ) {
+      return ref
+          .watch(recordVideoServiceProvider)
+          .inspectVideoState(request.record);
+    });
+
 final cccReviewProvider = FutureProvider.family<SurgicalStepReview, String>((
   ref,
   recordId,

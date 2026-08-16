@@ -20,6 +20,10 @@ enum ReviewStatus {
   };
 }
 
+enum StepRecordingStatus { unprocessed, recorded, skipped }
+
+enum CaseTimingReviewStatus { notStarted, inProgress, completed }
+
 enum StepRating {
   unreviewed,
   good,
@@ -100,6 +104,19 @@ const surgicalStepsInDisplayOrder = <SurgicalStep>[
   SurgicalStep.woundClosureAndPressureAdjustment,
 ];
 
+const activeIndividualSurgicalSteps = <SurgicalStep>[
+  SurgicalStep.sidePortCreation,
+  SurgicalStep.ovdInjection,
+  SurgicalStep.capsulorhexis,
+  SurgicalStep.mainPortCreation,
+  SurgicalStep.hydrodissection,
+  SurgicalStep.nucleusRemoval,
+  SurgicalStep.corticalIrrigationAspiration,
+  SurgicalStep.iolInsertion,
+  SurgicalStep.ovdRemovalIrrigationAspiration,
+  SurgicalStep.woundClosureAndPressureAdjustment,
+];
+
 class SurgeryRecord {
   const SurgeryRecord({
     required this.id,
@@ -108,6 +125,7 @@ class SurgeryRecord {
     required this.reviewStatus,
     required this.createdAt,
     required this.updatedAt,
+    this.reviewSchemaVersion,
     this.videoPath,
     this.videoDisplayName,
     this.caseMemo = '',
@@ -117,6 +135,9 @@ class SurgeryRecord {
   final DateTime surgeryDate;
   final EyeSide eyeSide;
   final ReviewStatus reviewStatus;
+
+  /// Null identifies records created before timing-review completion tracking.
+  final int? reviewSchemaVersion;
 
   /// New records store a managed video path relative to Application Support.
   /// Existing absolute paths are treated as legacy external references.
@@ -130,6 +151,7 @@ class SurgeryRecord {
     DateTime? surgeryDate,
     EyeSide? eyeSide,
     ReviewStatus? reviewStatus,
+    int? reviewSchemaVersion,
     String? videoPath,
     String? videoDisplayName,
     bool clearVideo = false,
@@ -141,6 +163,7 @@ class SurgeryRecord {
       surgeryDate: surgeryDate ?? this.surgeryDate,
       eyeSide: eyeSide ?? this.eyeSide,
       reviewStatus: reviewStatus ?? this.reviewStatus,
+      reviewSchemaVersion: reviewSchemaVersion ?? this.reviewSchemaVersion,
       videoPath: clearVideo ? null : videoPath ?? this.videoPath,
       videoDisplayName: clearVideo
           ? null
@@ -163,6 +186,7 @@ class SurgicalStepReview {
     required this.updatedAt,
     this.startMilliseconds,
     this.endMilliseconds,
+    this.isSkipped = false,
   });
 
   final String id;
@@ -170,6 +194,7 @@ class SurgicalStepReview {
   final SurgicalStep step;
   final int? startMilliseconds;
   final int? endMilliseconds;
+  final bool isSkipped;
   final StepRating rating;
   final String reflection;
   final DateTime createdAt;
@@ -179,11 +204,28 @@ class SurgicalStepReview {
     return procedureDurationBetween(startMilliseconds, endMilliseconds);
   }
 
-  bool get isNotStarted => startMilliseconds == null && endMilliseconds == null;
+  bool get isNotStarted =>
+      recordingStatus == StepRecordingStatus.unprocessed &&
+      startMilliseconds == null &&
+      endMilliseconds == null;
 
   bool get isRunning => startMilliseconds != null && endMilliseconds == null;
 
   bool get isCompleted => duration != null;
+
+  bool get isProcessed =>
+      recordingStatus == StepRecordingStatus.recorded ||
+      recordingStatus == StepRecordingStatus.skipped;
+
+  StepRecordingStatus get recordingStatus {
+    if (duration != null) {
+      return StepRecordingStatus.recorded;
+    }
+    if (startMilliseconds == null && endMilliseconds == null && isSkipped) {
+      return StepRecordingStatus.skipped;
+    }
+    return StepRecordingStatus.unprocessed;
+  }
 
   SurgicalStepReview copyWith({
     int? startMilliseconds,
@@ -193,6 +235,7 @@ class SurgicalStepReview {
     DateTime? updatedAt,
     bool clearStart = false,
     bool clearEnd = false,
+    bool? isSkipped,
   }) {
     return SurgicalStepReview(
       id: id,
@@ -204,6 +247,7 @@ class SurgicalStepReview {
       endMilliseconds: clearEnd
           ? null
           : endMilliseconds ?? this.endMilliseconds,
+      isSkipped: isSkipped ?? this.isSkipped,
       rating: rating ?? this.rating,
       reflection: reflection ?? this.reflection,
       createdAt: createdAt,

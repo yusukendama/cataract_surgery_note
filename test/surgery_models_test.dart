@@ -2,13 +2,14 @@ import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  SurgicalStepReview review({int? start, int? end}) {
+  SurgicalStepReview review({int? start, int? end, bool isSkipped = false}) {
     return SurgicalStepReview(
       id: 'review',
       surgeryRecordId: 'record',
       step: SurgicalStep.nucleusRemoval,
       startMilliseconds: start,
       endMilliseconds: end,
+      isSkipped: isSkipped,
       rating: StepRating.unreviewed,
       reflection: '',
       createdAt: DateTime(2026),
@@ -35,6 +36,16 @@ void main() {
     expect(
       SurgicalStep.corticalIrrigationAspiration.storageId,
       isNot(SurgicalStep.ovdRemovalIrrigationAspiration.storageId),
+    );
+  });
+
+  test('現行10工程は表示順から総手術時間だけを除いた定義と一致する', () {
+    expect(activeIndividualSurgicalSteps, hasLength(10));
+    expect(
+      activeIndividualSurgicalSteps,
+      surgicalStepsInDisplayOrder
+          .where((step) => !step.isTotalSurgeryTime)
+          .toList(),
     );
   });
 
@@ -89,6 +100,32 @@ void main() {
     expect(review(start: null, end: 1000).duration, isNull);
     expect(review(start: 1000, end: null).duration, isNull);
     expect(review(start: 2000, end: 1000).duration, isNull);
+  });
+
+  test('工程記録状態は有効時刻、明示skip、未処理の優先順で判定する', () {
+    expect(review().recordingStatus, StepRecordingStatus.unprocessed);
+    expect(
+      review(isSkipped: true).recordingStatus,
+      StepRecordingStatus.skipped,
+    );
+    expect(review(isSkipped: true).isProcessed, isTrue);
+    expect(review(isSkipped: true).isNotStarted, isFalse);
+    expect(
+      review(start: 1000, end: 4500, isSkipped: true).recordingStatus,
+      StepRecordingStatus.recorded,
+    );
+    expect(
+      review(start: 1000, isSkipped: true).recordingStatus,
+      StepRecordingStatus.unprocessed,
+    );
+    expect(
+      review(start: 1000, end: 1000, isSkipped: true).recordingStatus,
+      StepRecordingStatus.unprocessed,
+    );
+    expect(
+      review(start: 2000, end: 1000, isSkipped: true).recordingStatus,
+      StepRecordingStatus.unprocessed,
+    );
   });
 
   SurgeryRecord record({

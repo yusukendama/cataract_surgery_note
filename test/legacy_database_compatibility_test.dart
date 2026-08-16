@@ -70,23 +70,41 @@ void main() {
     );
     expect(right.eyeSide, EyeSide.right);
     expect(right.reviewStatus, ReviewStatus.reviewed);
+    expect(right.reviewSchemaVersion, isNull);
     expect(right.videoPath, isNull);
     expect(right.caseMemo, isEmpty);
     expect(left.eyeSide, EyeSide.left);
     expect(left.reviewStatus, ReviewStatus.draft);
+    expect(left.reviewSchemaVersion, isNull);
 
     final columns = await database
         .customSelect('PRAGMA table_info(surgery_records)')
         .get();
     expect(
       columns.map((row) => row.data['name']),
-      containsAll(<String>['video_path', 'video_display_name', 'case_memo']),
+      containsAll(<String>[
+        'video_path',
+        'video_display_name',
+        'case_memo',
+        'review_schema_version',
+      ]),
+    );
+    final reviewColumns = await database
+        .customSelect('PRAGMA table_info(surgical_step_reviews)')
+        .get();
+    expect(
+      reviewColumns.map((row) => row.data['name']),
+      contains('is_skipped'),
     );
     final rowsBeforeReviewEntry = await _tableSnapshot(
       database,
       'surgical_step_reviews',
     );
     expect(rowsBeforeReviewEntry, hasLength(3));
+    expect(
+      rowsBeforeReviewEntry.every((row) => row['is_skipped'] == 0),
+      isTrue,
+    );
     expect(
       rowsBeforeReviewEntry.singleWhere(
         (row) => row['id'] == 'build1-ccc-complete',
@@ -102,6 +120,7 @@ void main() {
     expect(preservedCcc.id, 'build1-ccc-complete');
     expect(preservedCcc.startMilliseconds, 1000);
     expect(preservedCcc.endMilliseconds, 5500);
+    expect(preservedCcc.isSkipped, isFalse);
     expect(preservedCcc.rating, StepRating.good);
     expect(preservedCcc.reflection, '円形を保てた。');
     final legacyRows = await database
@@ -117,6 +136,11 @@ WHERE surgery_record_id = ? AND step = ?
         )
         .get();
     expect(legacyRows.single.data['id'], 'build1-legacy-complete');
+    expect(
+      (await repository.getRecord(build1RightRecordId))!.reviewSchemaVersion,
+      isNull,
+      reason: '工程行の補完だけで旧症例を移行しない',
+    );
 
     await repository.close();
     database = openFixtureWithCurrentCompatibility(fixture);
@@ -137,6 +161,17 @@ WHERE surgery_record_id = ? AND step = ?
       await _countRows(database, 'surgical_step_reviews', build1RightRecordId),
       12,
       reason: '11表示項目＋保持した旧工程',
+    );
+    expect(
+      (await repository.getRecord(build1RightRecordId))!.reviewSchemaVersion,
+      isNull,
+    );
+    expect(
+      (await repository.getStepReview(
+        surgeryRecordId: build1RightRecordId,
+        step: SurgicalStep.capsulorhexis,
+      ))!.isSkipped,
+      isFalse,
     );
     await repository.close();
   });
@@ -228,6 +263,313 @@ WHERE surgery_record_id = ? AND step = ?
       1,
       reason: '一覧/状態確認は動画をcopyしない',
     );
+    await repository.close();
+  });
+
+  test('旧fixtureは参照・補完・評価で移行せず明示的な時刻/skipでversion 1を保持する', () async {
+    final fixture = File(
+      p.join(temporaryDirectory.path, 'review-version.sqlite'),
+    );
+    await createBuild14Fixture(fixture);
+
+    var database = openFixtureWithCurrentCompatibility(fixture);
+    var repository = SurgeryRepository(database);
+    expect(await _integrityCheck(database), 'ok');
+
+    final recordColumns = await database
+        .customSelect('PRAGMA table_info(surgery_records)')
+        .get();
+    final reviewColumns = await database
+        .customSelect('PRAGMA table_info(surgical_step_reviews)')
+        .get();
+    expect(
+      recordColumns.map((row) => row.data['name']),
+      contains('review_schema_version'),
+    );
+    expect(
+      reviewColumns.map((row) => row.data['name']),
+      contains('is_skipped'),
+    );
+
+    final recordsBefore = await _tableSnapshot(database, 'surgery_records');
+    final reviewsBefore = await _tableSnapshot(
+      database,
+      'surgical_step_reviews',
+    );
+    expect(
+      recordsBefore.every((row) => row['review_schema_version'] == null),
+      isTrue,
+      reason: '旧症例はスキーマ補完だけでversion 1にしない',
+    );
+    expect(
+      reviewsBefore.every((row) => row['is_skipped'] == 0),
+      isTrue,
+      reason: '旧行の追加列は非skipとして読む',
+    );
+
+    final records = await repository.watchableListSnapshot();
+    final progress = await repository.fetchRecordProgressSnapshots();
+    final analysis = await repository.fetchAnalysisSnapshot();
+    expect(records, hasLength(3));
+    expect(
+      records.every((record) => record.reviewSchemaVersion == null),
+      isTrue,
+    );
+    expect(
+      progress.every(
+        (snapshot) =>
+            snapshot.record.reviewSchemaVersion == null &&
+            snapshot.timingReviewStatus == null,
+      ),
+      isTrue,
+    );
+    expect(analysis.recordCount, 3);
+
+    final ensured = await repository.ensureStepReviews(build14ManagedRecordId);
+    expect(ensured, hasLength(11));
+    expect(ensured.every((review) => review.isSkipped == false), isTrue);
+    expect(
+      await _tableSnapshot(database, 'surgery_records'),
+      recordsBefore,
+      reason: '読み取りと工程補完は旧症例の列を更新しない',
+    );
+    expect(
+      await _tableSnapshot(database, 'surgical_step_reviews'),
+      reviewsBefore,
+      reason: '既に現行工程が揃うfixtureへのensureは既存値を変えない',
+    );
+
+    final managedCcc = ensured.singleWhere(
+      (review) => review.step == SurgicalStep.capsulorhexis,
+    );
+    final contentResult = await repository.saveReviewContent(
+      surgeryRecordId: build14ManagedRecordId,
+      reviews: <SurgicalStepReview>[
+        managedCcc.copyWith(
+          rating: StepRating.needsImprovement,
+          reflection: '評価と反省点だけ更新。',
+        ),
+      ],
+      caseMemo: '症例メモだけ更新。',
+    );
+    expect(contentResult.record.reviewSchemaVersion, isNull);
+    final managedAfterContent = (await repository.getRecord(
+      build14ManagedRecordId,
+    ))!;
+    expect(managedAfterContent.reviewSchemaVersion, isNull);
+    expect(managedAfterContent.caseMemo, '症例メモだけ更新。');
+    final managedCccAfterContent = (await repository.getStepReview(
+      surgeryRecordId: build14ManagedRecordId,
+      step: SurgicalStep.capsulorhexis,
+    ))!;
+    expect(managedCccAfterContent.startMilliseconds, 3000);
+    expect(managedCccAfterContent.endMilliseconds, 3600);
+    expect(managedCccAfterContent.isSkipped, isFalse);
+    expect(managedCccAfterContent.rating, StepRating.needsImprovement);
+    expect(managedCccAfterContent.reflection, '評価と反省点だけ更新。');
+
+    final legacyCcc = (await repository.getStepReview(
+      surgeryRecordId: build14LegacyRecordId,
+      step: SurgicalStep.capsulorhexis,
+    ))!;
+    final savedTiming = await repository.saveStepTiming(
+      review: legacyCcc.copyWith(
+        startMilliseconds: 3500,
+        endMilliseconds: 7500,
+      ),
+      expectedVideoPath: build14LegacyVideoPath,
+    );
+    expect(savedTiming.startMilliseconds, 3500);
+    expect(savedTiming.endMilliseconds, 7500);
+    expect(savedTiming.isSkipped, isFalse);
+    expect(savedTiming.rating, StepRating.fair);
+    expect(savedTiming.reflection, '旧動画のCCC。');
+    expect(
+      (await repository.getRecord(build14LegacyRecordId))!.reviewSchemaVersion,
+      1,
+    );
+
+    final missingCcc = (await repository.getStepReview(
+      surgeryRecordId: build14MissingRecordId,
+      step: SurgicalStep.capsulorhexis,
+    ))!;
+    final savedSkip = await repository.saveStepSkipped(
+      review: missingCcc,
+      isSkipped: true,
+      expectedVideoPath: 'videos/$build14MissingRecordId/missing.mp4',
+    );
+    expect(savedSkip.startMilliseconds, isNull);
+    expect(savedSkip.endMilliseconds, isNull);
+    expect(savedSkip.isSkipped, isTrue);
+    expect(savedSkip.rating, StepRating.good);
+    expect(savedSkip.reflection, '動画がなくても読み込む。');
+    expect(
+      (await repository.getRecord(build14MissingRecordId))!.reviewSchemaVersion,
+      1,
+    );
+    expect(
+      (await repository.getRecord(build14ManagedRecordId))!.reviewSchemaVersion,
+      isNull,
+      reason: '評価・反省点・メモのみを更新した症例は非移行',
+    );
+
+    await repository.close();
+    database = openFixtureWithCurrentCompatibility(fixture);
+    repository = SurgeryRepository(database);
+    expect(await _integrityCheck(database), 'ok');
+
+    final reopenedRecords = await _tableSnapshot(database, 'surgery_records');
+    final reopenedReviews = await _tableSnapshot(
+      database,
+      'surgical_step_reviews',
+    );
+    final managedRecordRowBefore = _rowWithId(
+      recordsBefore,
+      build14ManagedRecordId,
+    );
+    final legacyRecordRowBefore = _rowWithId(
+      recordsBefore,
+      build14LegacyRecordId,
+    );
+    final missingRecordRowBefore = _rowWithId(
+      recordsBefore,
+      build14MissingRecordId,
+    );
+    final managedRecordRowAfter = _rowWithId(
+      reopenedRecords,
+      build14ManagedRecordId,
+    );
+    final legacyRecordRowAfter = _rowWithId(
+      reopenedRecords,
+      build14LegacyRecordId,
+    );
+    final missingRecordRowAfter = _rowWithId(
+      reopenedRecords,
+      build14MissingRecordId,
+    );
+    expect(managedRecordRowAfter['review_schema_version'], isNull);
+    expect(legacyRecordRowAfter['review_schema_version'], 1);
+    expect(missingRecordRowAfter['review_schema_version'], 1);
+    expect(
+      _withoutKeys(managedRecordRowAfter, const <String>{
+        'case_memo',
+        'updated_at',
+      }),
+      _withoutKeys(managedRecordRowBefore, const <String>{
+        'case_memo',
+        'updated_at',
+      }),
+    );
+    expect(
+      _withoutKeys(legacyRecordRowAfter, const <String>{
+        'review_status',
+        'review_schema_version',
+        'updated_at',
+      }),
+      _withoutKeys(legacyRecordRowBefore, const <String>{
+        'review_status',
+        'review_schema_version',
+        'updated_at',
+      }),
+    );
+    expect(
+      _withoutKeys(missingRecordRowAfter, const <String>{
+        'review_schema_version',
+        'updated_at',
+      }),
+      _withoutKeys(missingRecordRowBefore, const <String>{
+        'review_schema_version',
+        'updated_at',
+      }),
+    );
+
+    final managedReviewRowBefore = _rowWithId(reviewsBefore, 'b14-display-2');
+    final legacyReviewRowBefore = _rowWithId(
+      reviewsBefore,
+      'b14-legacy-record-ccc',
+    );
+    final missingReviewRowBefore = _rowWithId(
+      reviewsBefore,
+      'b14-missing-record-ccc',
+    );
+    final managedReviewRowAfter = _rowWithId(reopenedReviews, 'b14-display-2');
+    final legacyReviewRowAfter = _rowWithId(
+      reopenedReviews,
+      'b14-legacy-record-ccc',
+    );
+    final missingReviewRowAfter = _rowWithId(
+      reopenedReviews,
+      'b14-missing-record-ccc',
+    );
+    expect(
+      _withoutKeys(managedReviewRowAfter, const <String>{
+        'rating',
+        'reflection',
+        'updated_at',
+      }),
+      _withoutKeys(managedReviewRowBefore, const <String>{
+        'rating',
+        'reflection',
+        'updated_at',
+      }),
+    );
+    expect(legacyReviewRowAfter['start_milliseconds'], 3500);
+    expect(legacyReviewRowAfter['end_milliseconds'], 7500);
+    expect(legacyReviewRowAfter['is_skipped'], 0);
+    expect(
+      _withoutKeys(legacyReviewRowAfter, const <String>{
+        'start_milliseconds',
+        'end_milliseconds',
+        'updated_at',
+      }),
+      _withoutKeys(legacyReviewRowBefore, const <String>{
+        'start_milliseconds',
+        'end_milliseconds',
+        'updated_at',
+      }),
+    );
+    expect(missingReviewRowAfter['start_milliseconds'], isNull);
+    expect(missingReviewRowAfter['end_milliseconds'], isNull);
+    expect(missingReviewRowAfter['is_skipped'], 1);
+    expect(
+      _withoutKeys(missingReviewRowAfter, const <String>{
+        'start_milliseconds',
+        'end_milliseconds',
+        'is_skipped',
+        'updated_at',
+      }),
+      _withoutKeys(missingReviewRowBefore, const <String>{
+        'start_milliseconds',
+        'end_milliseconds',
+        'is_skipped',
+        'updated_at',
+      }),
+    );
+    expect(
+      _rowWithId(reopenedReviews, 'b14-unknown'),
+      _rowWithId(reviewsBefore, 'b14-unknown'),
+      reason: '未知工程の既存値は一切変更しない',
+    );
+
+    final reopenedManaged = (await repository.getRecord(
+      build14ManagedRecordId,
+    ))!;
+    final reopenedLegacy = (await repository.getStepReview(
+      surgeryRecordId: build14LegacyRecordId,
+      step: SurgicalStep.capsulorhexis,
+    ))!;
+    final reopenedMissing = (await repository.getStepReview(
+      surgeryRecordId: build14MissingRecordId,
+      step: SurgicalStep.capsulorhexis,
+    ))!;
+    expect(reopenedManaged.reviewSchemaVersion, isNull);
+    expect(reopenedManaged.caseMemo, '症例メモだけ更新。');
+    expect(reopenedLegacy.startMilliseconds, 3500);
+    expect(reopenedLegacy.endMilliseconds, 7500);
+    expect(reopenedLegacy.isSkipped, isFalse);
+    expect(reopenedMissing.startMilliseconds, isNull);
+    expect(reopenedMissing.endMilliseconds, isNull);
+    expect(reopenedMissing.isSkipped, isTrue);
     await repository.close();
   });
 
@@ -325,6 +667,19 @@ Future<int> _countRows(dynamic database, String table, String recordId) async {
       )
       .getSingle();
   return row.data['count']! as int;
+}
+
+Map<String, Object?> _rowWithId(List<Map<String, Object?>> rows, String id) {
+  return rows.singleWhere((row) => row['id'] == id);
+}
+
+Map<String, Object?> _withoutKeys(
+  Map<String, Object?> row,
+  Set<String> excludedKeys,
+) {
+  return Map<String, Object?>.fromEntries(
+    row.entries.where((entry) => !excludedKeys.contains(entry.key)),
+  );
 }
 
 List<int> _videoBytes(int salt) {

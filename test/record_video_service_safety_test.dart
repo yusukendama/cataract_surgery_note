@@ -122,9 +122,12 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
     expect(await source.exists(), isTrue);
   });
 
-  test('旧絶対path移行は動画参照以外の全記録を保持する', () async {
+  test('旧schema症例の旧絶対path移行は時刻・skip・schema未移行を保持する', () async {
     final source = await _source(temporaryDirectory, 'legacy.mp4');
-    final record = await _recordWithReview(surgeryRepository);
+    final record = await _legacyRecordWithTimingAndSkipped(
+      surgeryRepository,
+      database,
+    );
     await surgeryRepository.updateVideoReference(
       surgeryRecordId: record.id,
       videoPath: source.path,
@@ -132,6 +135,7 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
     );
     final beforeRecord = (await surgeryRepository.getRecord(record.id))!;
     final beforeRows = await _stepRows(database, record.id);
+    expect(beforeRecord.reviewSchemaVersion, isNull);
 
     final migrated = await service.migrateLegacyVideoForRecord(beforeRecord);
 
@@ -148,6 +152,8 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
     expect(migrated.eyeSide, beforeRecord.eyeSide);
     expect(migrated.caseMemo, beforeRecord.caseMemo);
     expect(migrated.reviewStatus, beforeRecord.reviewStatus);
+    expect(migrated.reviewSchemaVersion, isNull);
+    await _expectLegacyTimingAndSkipPreserved(surgeryRepository, record.id);
 
     final review = await surgeryRepository.getStepReview(
       surgeryRecordId: record.id,
@@ -219,18 +225,40 @@ BEGIN SELECT RAISE(ABORT, 'injected migration DB failure'); END
     expect(await _managedFiles(supportDirectory), isEmpty);
   });
 
-  test('初回添付と同一動画再登録は時刻・評価・メモを保持する', () async {
-    final firstSource = await _source(temporaryDirectory, 'first.mp4');
-    final sameSource = await _source(temporaryDirectory, 'same.mp4');
-    final record = await _recordWithReview(surgeryRepository);
+  test('旧schema症例の初回添付は時刻・skip・schema未移行を保持する', () async {
+    final source = await _source(temporaryDirectory, 'first.mp4');
+    final record = await _legacyRecordWithTimingAndSkipped(
+      surgeryRepository,
+      database,
+    );
     final beforeRows = await _stepRows(database, record.id);
 
+    final attached = await service.attachVideoToRecord(
+      surgeryRecordId: record.id,
+      sourcePath: source.path,
+      originalFileName: 'first.mp4',
+    );
+
+    expect(await _stepRows(database, record.id), beforeRows);
+    expect(attached.reviewSchemaVersion, isNull);
+    expect(attached.caseMemo, record.caseMemo);
+    expect(attached.reviewStatus, record.reviewStatus);
+    await _expectLegacyTimingAndSkipPreserved(surgeryRepository, record.id);
+  });
+
+  test('旧schema症例の同一動画再登録は時刻・skip・schema未移行を保持する', () async {
+    final firstSource = await _source(temporaryDirectory, 'first.mp4');
+    final sameSource = await _source(temporaryDirectory, 'same.mp4');
+    final record = await _legacyRecordWithTimingAndSkipped(
+      surgeryRepository,
+      database,
+    );
     final attached = await service.attachVideoToRecord(
       surgeryRecordId: record.id,
       sourcePath: firstSource.path,
       originalFileName: 'first.mp4',
     );
-    expect(await _stepRows(database, record.id), beforeRows);
+    final beforeRows = await _stepRows(database, record.id);
 
     final relinked = await service.relinkSameVideo(
       surgeryRecordId: record.id,
@@ -241,8 +269,10 @@ BEGIN SELECT RAISE(ABORT, 'injected migration DB failure'); END
 
     expect(relinked.videoPath, isNot(attached.videoPath));
     expect(await _stepRows(database, record.id), beforeRows);
+    expect(relinked.reviewSchemaVersion, isNull);
     expect(relinked.caseMemo, record.caseMemo);
     expect(relinked.reviewStatus, record.reviewStatus);
+    await _expectLegacyTimingAndSkipPreserved(surgeryRepository, record.id);
   });
 
   test('同一動画再登録のDB失敗は旧参照・記録・旧動画だけを保持する', () async {
@@ -1014,6 +1044,57 @@ Future<SurgeryRecord> _recordWithReview(SurgeryRepository repository) async {
   return (await repository.getRecord(record.id))!;
 }
 
+Future<SurgeryRecord> _legacyRecordWithTimingAndSkipped(
+  SurgeryRepository repository,
+  AppDatabase database,
+) async {
+  final record = await _recordWithReview(repository);
+  final skippedReview = await repository.ensureStepReview(
+    surgeryRecordId: record.id,
+    step: SurgicalStep.sidePortCreation,
+  );
+  await repository.saveStepSkipped(
+    review: skippedReview,
+    isSkipped: true,
+    expectedVideoPath: null,
+  );
+  await database.customStatement(
+    '''
+UPDATE surgery_records
+SET review_schema_version = NULL
+WHERE id = ?
+''',
+    <Object?>[record.id],
+  );
+  return (await repository.getRecord(record.id))!;
+}
+
+Future<void> _expectLegacyTimingAndSkipPreserved(
+  SurgeryRepository repository,
+  String recordId,
+) async {
+  final persistedRecord = await repository.getRecord(recordId);
+  final timedReview = await repository.getStepReview(
+    surgeryRecordId: recordId,
+    step: SurgicalStep.capsulorhexis,
+  );
+  final skippedReview = await repository.getStepReview(
+    surgeryRecordId: recordId,
+    step: SurgicalStep.sidePortCreation,
+  );
+
+  expect(persistedRecord, isNotNull);
+  expect(persistedRecord!.reviewSchemaVersion, isNull);
+  expect(timedReview, isNotNull);
+  expect(timedReview!.startMilliseconds, 100);
+  expect(timedReview.endMilliseconds, 900);
+  expect(timedReview.isSkipped, isFalse);
+  expect(skippedReview, isNotNull);
+  expect(skippedReview!.startMilliseconds, isNull);
+  expect(skippedReview.endMilliseconds, isNull);
+  expect(skippedReview.isSkipped, isTrue);
+}
+
 Future<File> _source(Directory directory, String name) async {
   final file = File(p.join(directory.path, name));
   await file.writeAsBytes(
@@ -1030,7 +1111,7 @@ Future<List<Map<String, Object?>>> _stepRows(
       .customSelect(
         '''
 SELECT id, step, start_milliseconds, end_milliseconds, rating, reflection,
-       created_at, updated_at
+       is_skipped, created_at, updated_at
 FROM surgical_step_reviews
 WHERE surgery_record_id = ?
 ORDER BY id

@@ -246,6 +246,7 @@ class RecordVideoService {
           before: record,
           videoPath: storedVideo.relativePath,
           videoDisplayName: storedVideo.originalFileName,
+          reviewSchemaVersion: 1,
         );
       }),
     );
@@ -415,6 +416,7 @@ class RecordVideoService {
           videoPath: null,
           videoDisplayName: null,
           clearVideo: true,
+          reviewSchemaVersion: 1,
         );
       }),
     );
@@ -471,6 +473,7 @@ class RecordVideoService {
     required String? videoPath,
     required String? videoDisplayName,
     bool clearVideo = false,
+    int? reviewSchemaVersion,
   }) async {
     try {
       final updated = await _surgeryRepository.getRecord(before.id);
@@ -485,6 +488,7 @@ class RecordVideoService {
       videoPath: videoPath,
       videoDisplayName: videoDisplayName,
       clearVideo: clearVideo,
+      reviewSchemaVersion: reviewSchemaVersion,
       updatedAt: DateTime.now(),
     );
   }
