@@ -1,7 +1,4 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
@@ -9,13 +6,17 @@ import '../../data/providers.dart';
 import '../../data/record_mutation_coordinator.dart';
 import '../../data/record_video_service.dart';
 import '../../data/surgery_repository.dart';
-import '../../data/surgery_video_picker.dart';
+import '../../data/video_import_models.dart';
 import '../../domain/duration_formatters.dart';
 import '../../domain/surgery_models.dart';
 import '../../widgets/app_confirm_dialog.dart';
 import '../../widgets/app_snack_bar.dart';
 import '../../widgets/app_states.dart';
 import '../review/step_review_screen.dart';
+import '../video_import/video_import_dialogs.dart';
+import '../video_import/video_import_screen_flow.dart';
+import '../video_import/video_import_ui_flow.dart';
+import '../video_import/video_timeline_identity_dialog.dart';
 
 enum _VideoMutation { attach, relink, replace }
 
@@ -29,7 +30,10 @@ class RecordDetailScreen extends ConsumerWidget {
     final record = ref.watch(surgeryRecordProvider(recordId));
 
     return Scaffold(
-      appBar: AppBar(title: const Text('症例詳細')),
+      appBar: AppBar(
+        title: const Text('症例詳細'),
+        actions: const [VideoRegistrationHelpButton()],
+      ),
       body: record.when(
         data: (item) {
           if (item == null) {
@@ -61,12 +65,34 @@ class _RecordDetailBody extends ConsumerStatefulWidget {
 }
 
 class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
+  late final VideoImportUiFlow _videoImportFlow;
+  final VideoImportOperationController _videoImportOperationController =
+      VideoImportOperationController();
+
   bool _isDeleting = false;
   bool _isUpdatingVideo = false;
   bool _isUpdatingDetails = false;
+  VideoImportException? _lastVideoImportError;
+  _VideoMutation? _lastVideoMutation;
 
   bool get _hasPendingMutation =>
       _isDeleting || _isUpdatingVideo || _isUpdatingDetails;
+
+  @override
+  void initState() {
+    super.initState();
+    _videoImportFlow = VideoImportUiFlow(
+      picker: ref.read(surgeryVideoPickerProvider),
+      preflight: ref.read(videoImportPreflightProvider),
+    );
+  }
+
+  @override
+  void dispose() {
+    _videoImportFlow.dispose();
+    _videoImportOperationController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -117,6 +143,20 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
           const SizedBox(height: 24),
           const _SectionTitle('動画'),
           const SizedBox(height: 8),
+          if (_lastVideoImportError case final error?) ...[
+            VideoImportPersistentErrorNotice(
+              error: error,
+              onReselect: _hasPendingMutation
+                  ? null
+                  : () => _pickVideo(
+                      _lastVideoMutation ??
+                          (record.videoPath == null
+                              ? _VideoMutation.attach
+                              : _VideoMutation.replace),
+                    ),
+            ),
+            const SizedBox(height: 8),
+          ],
           ..._buildVideoSection(record, videoState),
           const SizedBox(height: 24),
           const _SectionTitle('工程記録'),
@@ -358,120 +398,315 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
   }
 
   Future<void> _pickVideo(_VideoMutation mutation) async {
+    _lastVideoMutation = mutation;
     final record = widget.record;
     final expectedVideoPath = record.videoPath;
     if (mutation != _VideoMutation.attach && expectedVideoPath == null) {
       _invalidateRecordProviders();
       return;
     }
-    final preselectionConfirmed = await showAppConfirmDialog(
-      context: context,
-      title: switch (mutation) {
-        _VideoMutation.attach => '記録に対応する動画を選択',
-        _VideoMutation.relink => '同じ動画を再登録',
-        _VideoMutation.replace => '別の動画に差し替え',
-      },
-      message: switch (mutation) {
-        _VideoMutation.attach => '記録済みの工程位置を保持するため、対応する同じ手術動画を選んでください。',
-        _VideoMutation.relink => '記録済みの位置は保持されます。必ず同じ手術動画を選んでください。',
-        _VideoMutation.replace =>
-          '総手術時間を含む全工程の開始・終了位置が削除されます。自己評価、反省点、症例メモは残ります。',
-      },
-      confirmLabel: '動画を選ぶ',
-      isDestructive: mutation == _VideoMutation.replace,
-    );
-    if (!preselectionConfirmed || !mounted) {
-      return;
-    }
-
-    final SelectedSurgeryVideo? selectedVideo;
-    try {
-      selectedVideo = await ref.read(surgeryVideoPickerProvider).pickVideo();
-    } catch (_) {
-      _showMessage(
-        '動画を選択できませんでした。写真へのアクセス権限を確認してください。',
-        tone: AppFeedbackTone.failure,
-      );
-      return;
-    }
-    if (selectedVideo == null || !mounted) {
-      return;
-    }
-    final path = selectedVideo.path;
-    final fileName = selectedVideo.displayName;
-    final finalConfirmed = await showAppConfirmDialog(
-      context: context,
-      title: switch (mutation) {
-        _VideoMutation.attach => 'この動画を登録しますか？',
-        _VideoMutation.relink => '同じ動画ですか？',
-        _VideoMutation.replace => 'この動画に差し替えますか？',
-      },
-      message: switch (mutation) {
-        _VideoMutation.attach => '$fileName\n\n記録済みの全工程位置とレビューは保持されます。',
-        _VideoMutation.relink =>
-          '$fileName\n\n記録時と同じ手術動画であることを確認してください。全工程位置は保持されます。',
-        _VideoMutation.replace =>
-          '$fileName\n\n総手術時間を含む全工程の開始・終了位置を削除します。自己評価、反省点、症例メモは残ります。',
-      },
-      confirmLabel: switch (mutation) {
-        _VideoMutation.attach => '登録',
-        _VideoMutation.relink => '同じ動画として登録',
-        _VideoMutation.replace => '差し替え',
-      },
-      isDestructive: mutation == _VideoMutation.replace,
-    );
-    if (!finalConfirmed || !mounted) {
-      return;
-    }
-
     setState(() => _isUpdatingVideo = true);
     try {
-      final service = ref.read(recordVideoServiceProvider);
-      switch (mutation) {
-        case _VideoMutation.attach:
-          await service.attachVideoToRecord(
-            surgeryRecordId: record.id,
-            sourcePath: path,
-            originalFileName: fileName,
-          );
-          break;
-        case _VideoMutation.relink:
-          await service.relinkSameVideo(
-            surgeryRecordId: record.id,
-            expectedVideoPath: expectedVideoPath!,
-            sourcePath: path,
-            originalFileName: fileName,
-          );
-          break;
-        case _VideoMutation.replace:
-          await service.replaceVideoForRecord(
-            surgeryRecordId: record.id,
-            expectedVideoPath: expectedVideoPath!,
-            sourcePath: path,
-            originalFileName: fileName,
-          );
-          break;
-      }
-      _invalidateRecordProviders();
-      if (service.hasPendingCleanup) {
-        _showMessage(
-          '動画の保存は完了しました。動画ファイルの後処理は次回起動時に再試行します。',
-          tone: AppFeedbackTone.warning,
+      selectionLoop:
+      while (mounted) {
+        final candidate = await selectVerifiedVideoForScreen(
+          context: context,
+          flow: _videoImportFlow,
+          entryPoint: mutation == _VideoMutation.attach
+              ? VideoImportEntryPoint.attach
+              : mutation == _VideoMutation.relink
+              ? VideoImportEntryPoint.relink
+              : VideoImportEntryPoint.replace,
+          onPersistentFailure: _rememberVideoImportFailure,
+          dataInvariantSuffix:
+              VideoImportDataInvariantSuffix.existingRecordUnchanged,
         );
-      } else {
-        _showMessage(
-          mutation == _VideoMutation.replace
-              ? '動画を差し替え、工程位置を削除しました'
-              : '動画を登録し、記録済みの内容を保持しました',
-          tone: AppFeedbackTone.success,
+        if (candidate == null || !mounted) {
+          return;
+        }
+
+        var hasRecordedTimings = false;
+        if (mutation != _VideoMutation.replace) {
+          final timingState = await _readHasRecordedTimings(mutation);
+          if (timingState == null || !mounted) {
+            return;
+          }
+          hasRecordedTimings = timingState;
+        }
+
+        var clearsTimings = mutation == _VideoMutation.replace;
+        if (hasRecordedTimings && mutation != _VideoMutation.replace) {
+          final decision = await showVideoTimelineIdentityDialog(
+            context: context,
+          );
+          if (decision == null || !mounted) {
+            return;
+          }
+          clearsTimings =
+              decision == VideoTimelineIdentityDecision.changedOrUnknown;
+        }
+
+        final confirmed = await _confirmSelectedVideo(
+          mutation,
+          clearsTimings: clearsTimings,
+          hasRecordedTimings: hasRecordedTimings,
+          hasExistingVideo: expectedVideoPath != null,
         );
+        if (!confirmed || !mounted) {
+          return;
+        }
+
+        while (mounted) {
+          final result = await _runSelectedVideoMutation(
+            candidate: candidate,
+            mutation: mutation,
+            expectedVideoPath: expectedVideoPath,
+            clearsTimings: clearsTimings,
+            hadRecordedTimingsAtConfirmation: hasRecordedTimings,
+          );
+          if (!mounted) {
+            return;
+          }
+          if (result case VideoImportScreenOperationSuccess<
+            VideoImportOutcome<SurgeryRecord>
+          >(
+            :final value,
+          )) {
+            _applyCommittedVideoOutcome(
+              value,
+              clearsTimings: clearsTimings,
+              hadExistingVideo: expectedVideoPath != null,
+            );
+            return;
+          }
+          if (result
+              is VideoImportScreenOperationCancelled<
+                VideoImportOutcome<SurgeryRecord>
+              >) {
+            return;
+          }
+          final failure =
+              result
+                  as VideoImportScreenOperationFailure<
+                    VideoImportOutcome<SurgeryRecord>
+                  >;
+          final resetRequested =
+              !clearsTimings &&
+              failure.error.code == VideoImportErrorCode.durationConflict &&
+              (failure.recoveryAction ==
+                      VideoImportRecoveryAction.resetTimingsAndAttach ||
+                  failure.recoveryAction ==
+                      VideoImportRecoveryAction.resetTimingsAndReplace);
+          if (resetRequested) {
+            final resetConfirmed = await _confirmSelectedVideo(
+              mutation,
+              clearsTimings: true,
+              hasRecordedTimings: hasRecordedTimings,
+              hasExistingVideo: expectedVideoPath != null,
+            );
+            if (!resetConfirmed || !mounted) {
+              return;
+            }
+            clearsTimings = true;
+            continue;
+          }
+          if (videoImportRecoveryRequestsReselection(failure.recoveryAction)) {
+            continue selectionLoop;
+          }
+          if (videoImportRecoveryRequestsRetry(failure.recoveryAction)) {
+            continue;
+          }
+          if (failure.recoveryAction ==
+              VideoImportRecoveryAction.reloadRecord) {
+            _invalidateRecordProviders();
+          }
+          return;
+        }
       }
-    } catch (error) {
-      _recoverFromVideoError(error);
     } finally {
       if (mounted) {
         setState(() => _isUpdatingVideo = false);
       }
+    }
+  }
+
+  Future<bool?> _readHasRecordedTimings(_VideoMutation mutation) async {
+    while (mounted) {
+      try {
+        return await ref
+            .read(surgeryRepositoryProvider)
+            .hasRecordedTimings(widget.record.id);
+      } on Object {
+        if (!mounted) {
+          return null;
+        }
+        final action = await showVideoImportExceptionDialog(
+          context: context,
+          error: VideoImportException(
+            code: VideoImportErrorCode.unknown,
+            entryPoint: mutation == _VideoMutation.attach
+                ? VideoImportEntryPoint.attach
+                : VideoImportEntryPoint.relink,
+            phase: VideoImportPhase.databaseCommit,
+            internalReason: VideoImportInternalReasonV1.unexpected,
+            primaryRecoveryAction: VideoImportRecoveryAction.retry,
+            dataInvariantSuffix:
+                VideoImportDataInvariantSuffix.existingRecordUnchanged,
+          ),
+        );
+        if (action != VideoImportRecoveryAction.retry &&
+            action != VideoImportRecoveryAction.unlockAndRetry) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  Future<bool> _confirmSelectedVideo(
+    _VideoMutation mutation, {
+    required bool clearsTimings,
+    required bool hasRecordedTimings,
+    required bool hasExistingVideo,
+  }) {
+    if (clearsTimings) {
+      return showAppConfirmDialog(
+        context: context,
+        title: hasExistingVideo ? '工程位置を消去して動画を差し替え' : '工程位置を消去して動画を登録',
+        message:
+            '総手術時間を含む全工程の開始・終了位置が削除されます。'
+            '自己評価、反省点、症例メモは残ります。',
+        confirmLabel: hasExistingVideo ? '差し替え' : '登録',
+        isDestructive: true,
+      );
+    }
+    return switch (mutation) {
+      _VideoMutation.attach when hasRecordedTimings => showAppConfirmDialog(
+        context: context,
+        title: '記録済み位置を保持して動画を登録',
+        message:
+            '工程の開始・終了位置は保持されます。'
+            '記録に対応する同じ手術動画を選択したことを確認してください。',
+        confirmLabel: 'この動画を登録',
+      ),
+      _VideoMutation.attach => Future<bool>.value(true),
+      _VideoMutation.relink => showAppConfirmDialog(
+        context: context,
+        title: '同じ動画を再登録',
+        message:
+            '選択したファイルが、この症例で使っていた同じ手術動画であることを'
+            '確認してください。全工程の時刻とレビューは保持されます。',
+        confirmLabel: '同じ動画として再登録',
+      ),
+      _VideoMutation.replace => showAppConfirmDialog(
+        context: context,
+        title: '工程位置を消去して動画を差し替え',
+        message:
+            '総手術時間を含む全工程の開始・終了位置が削除されます。'
+            '自己評価、反省点、症例メモは残ります。',
+        confirmLabel: '差し替え',
+        isDestructive: true,
+      ),
+    };
+  }
+
+  Future<VideoImportScreenOperationResult<VideoImportOutcome<SurgeryRecord>>>
+  _runSelectedVideoMutation({
+    required VerifiedVideoCandidate candidate,
+    required _VideoMutation mutation,
+    required String? expectedVideoPath,
+    required bool clearsTimings,
+    required bool hadRecordedTimingsAtConfirmation,
+  }) {
+    final service = ref.read(recordVideoServiceProvider);
+    return runVideoImportOperationForScreen<VideoImportOutcome<SurgeryRecord>>(
+      context: context,
+      dataInvariantSuffix:
+          VideoImportDataInvariantSuffix.existingRecordUnchanged,
+      entryPoint: clearsTimings
+          ? expectedVideoPath == null
+                ? VideoImportEntryPoint.attachWithTimingReset
+                : VideoImportEntryPoint.replace
+          : mutation == _VideoMutation.attach
+          ? VideoImportEntryPoint.attach
+          : VideoImportEntryPoint.relink,
+      operationController: _videoImportOperationController,
+      onPersistentFailure: _rememberVideoImportFailure,
+      operation: (cancellationToken, onProgress) {
+        if (clearsTimings) {
+          if (expectedVideoPath == null) {
+            return service.attachWithTimingReset(
+              surgeryRecordId: widget.record.id,
+              candidate: candidate,
+              cancellationToken: cancellationToken,
+              onProgress: onProgress,
+            );
+          }
+          return service.replaceVideoForRecord(
+            surgeryRecordId: widget.record.id,
+            expectedVideoPath: expectedVideoPath,
+            candidate: candidate,
+            cancellationToken: cancellationToken,
+            onProgress: onProgress,
+          );
+        }
+        return switch (mutation) {
+          _VideoMutation.attach => service.attachVideoToRecord(
+            surgeryRecordId: widget.record.id,
+            candidate: candidate,
+            timelineIdentityDeclaration: hadRecordedTimingsAtConfirmation
+                ? VideoTimelineIdentityDeclaration.sameUnchanged
+                : VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+            cancellationToken: cancellationToken,
+            onProgress: onProgress,
+          ),
+          _VideoMutation.relink => service.relinkSameVideo(
+            surgeryRecordId: widget.record.id,
+            expectedVideoPath: expectedVideoPath!,
+            candidate: candidate,
+            timelineIdentityDeclaration: hadRecordedTimingsAtConfirmation
+                ? VideoTimelineIdentityDeclaration.sameUnchanged
+                : VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+            cancellationToken: cancellationToken,
+            onProgress: onProgress,
+          ),
+          _VideoMutation.replace => throw StateError(
+            'replace must clear timings',
+          ),
+        };
+      },
+    );
+  }
+
+  void _applyCommittedVideoOutcome(
+    VideoImportOutcome<SurgeryRecord> outcome, {
+    required bool clearsTimings,
+    required bool hadExistingVideo,
+  }) {
+    if (mounted) {
+      setState(() => _lastVideoImportError = null);
+    }
+    _invalidateRecordProviders();
+    if (outcome.maintenanceOutcome == VideoMaintenanceOutcome.pending) {
+      _showMessage(
+        '保存は完了しました。動画の後処理は次回起動時に再試行します。',
+        tone: AppFeedbackTone.warning,
+      );
+      return;
+    }
+    _showMessage(
+      clearsTimings
+          ? hadExistingVideo
+                ? '動画を差し替え、工程位置を削除しました'
+                : '動画を登録し、工程位置を削除しました'
+          : '動画を登録し、記録済みの内容を保持しました',
+      tone: AppFeedbackTone.success,
+    );
+  }
+
+  void _rememberVideoImportFailure(VideoImportException error) {
+    if (mounted) {
+      setState(() => _lastVideoImportError = error);
     }
   }
 
@@ -567,20 +802,6 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     ref.invalidate(surgeryAnalysisProvider);
   }
 
-  String _videoErrorMessage(Object error) {
-    if (error is PlatformException &&
-        error.code.startsWith('backup_exclusion')) {
-      return '動画のバックアップ除外を確認できなかったため保存していません。もう一度お試しください。';
-    }
-    if (error is ArgumentError) {
-      return 'この動画形式は再生できません。MP4形式などに変換してから、もう一度選択してください。';
-    }
-    if (error is FileSystemException) {
-      return '動画を保存できませんでした。ストレージの空き容量をご確認ください。';
-    }
-    return '動画を保存できませんでした。もう一度お試しください。';
-  }
-
   void _recoverFromVideoError(Object error, {String? fallback}) {
     if (error is VideoReferenceConflictException) {
       _invalidateRecordProviders();
@@ -596,7 +817,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
       return;
     }
     _showMessage(
-      fallback ?? _videoErrorMessage(error),
+      fallback ?? '操作を完了できませんでした。もう一度お試しください。',
       tone: AppFeedbackTone.failure,
     );
   }

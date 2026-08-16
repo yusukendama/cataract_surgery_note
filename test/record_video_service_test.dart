@@ -3,10 +3,13 @@ import 'dart:io';
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+
+import 'support/video_import_test_support.dart';
 
 class _NoopBackupExclusionRepository implements BackupExclusionRepository {
   @override
@@ -15,7 +18,31 @@ class _NoopBackupExclusionRepository implements BackupExclusionRepository {
 
 class _NoopPlaybackVerifier implements VideoPlaybackVerifier {
   @override
-  Future<void> verify(File file) async {}
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) async => testVideoPlaybackEvidence;
+}
+
+class _RejectingImportPreflight extends PassThroughVideoImportPreflight {
+  bool revalidationCalled = false;
+
+  @override
+  Future<T> withRevalidatedImport<T>(
+    VerifiedVideoCandidate candidate, {
+    required Future<T> Function(VerifiedVideoCandidate admittedCandidate)
+    operation,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    revalidationCalled = true;
+    throw const VideoImportException(
+      code: VideoImportErrorCode.nonCandidateExtension,
+      phase: VideoImportPhase.selectionPolicy,
+      internalReason: VideoImportInternalReasonV1.guidanceOnlyExtension,
+      primaryRecoveryAction: VideoImportRecoveryAction.reselect,
+    );
+  }
 }
 
 void main() {
@@ -37,6 +64,7 @@ void main() {
     service = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: videoStorageRepository,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
   });
 
@@ -50,13 +78,14 @@ void main() {
   test('動画と症例情報を一連の処理で新規登録できる', () async {
     final source = await _writeSourceVideo(tempDirectory, 'surgery.mp4', 512);
 
-    final record = await service.createRecordWithVideo(
+    final outcome = await service.createRecordWithVideo(
       surgeryDate: DateTime(2026, 7, 19, 14, 30),
       eyeSide: EyeSide.left,
-      sourcePath: source.path,
-      originalFileName: 'surgery.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
+    final record = outcome.value;
 
+    expect(outcome.maintenanceOutcome, VideoMaintenanceOutcome.complete);
     expect(record.surgeryDate, DateTime(2026, 7, 19));
     expect(record.eyeSide, EyeSide.left);
     expect(record.videoDisplayName, 'surgery.mp4');
@@ -69,33 +98,56 @@ void main() {
   });
 
   test('新規登録時の動画コピー失敗で空の症例を残さない', () async {
+    final source = await _writeSourceVideo(tempDirectory, 'missing.mp4', 512);
+    final candidate = await verifiedVideoCandidateForFile(source);
+    await source.delete();
+
     await expectLater(
       () => service.createRecordWithVideo(
         surgeryDate: DateTime(2026, 7, 19),
         eyeSide: EyeSide.right,
-        sourcePath: p.join(tempDirectory.path, 'missing.mp4'),
-        originalFileName: 'missing.mp4',
+        candidate: candidate,
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.sourceChanged,
+        ),
+      ),
     );
 
     expect(await surgeryRepository.watchableListSnapshot(), isEmpty);
   });
 
-  test('新規登録時の非対応形式エラーで空の症例を残さない', () async {
+  test('public candidate入口でも登録時preflightを迂回できない', () async {
     final source = await _writeSourceVideo(tempDirectory, 'surgery.avi', 512);
-
-    await expectLater(
-      () => service.createRecordWithVideo(
-        surgeryDate: DateTime(2026, 7, 19),
-        eyeSide: EyeSide.right,
-        sourcePath: source.path,
-        originalFileName: 'surgery.avi',
-      ),
-      throwsA(isA<ArgumentError>()),
+    final candidate = await verifiedVideoCandidateForFile(source);
+    final preflight = _RejectingImportPreflight();
+    final guardedService = RecordVideoService(
+      surgeryRepository: surgeryRepository,
+      videoStorageRepository: videoStorageRepository,
+      videoImportPreflight: preflight,
     );
 
+    await expectLater(
+      () => guardedService.createRecordWithVideo(
+        surgeryDate: DateTime(2026, 7, 19),
+        eyeSide: EyeSide.right,
+        candidate: candidate,
+      ),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.nonCandidateExtension,
+        ),
+      ),
+    );
+
+    expect(preflight.revalidationCalled, isTrue);
     expect(await surgeryRepository.watchableListSnapshot(), isEmpty);
+    expect(await supportDirectory.exists(), isFalse);
   });
 
   test('コピー失敗時に既存パスが維持される', () async {
@@ -104,20 +156,32 @@ void main() {
       eyeSide: EyeSide.right,
     );
     final source = await _writeSourceVideo(tempDirectory, 'first.mp4', 512);
-    final first = await service.importVideoForRecord(
+    final first = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
     final oldPath = first.videoPath;
+    final missingSource = await _writeSourceVideo(
+      tempDirectory,
+      'missing.mp4',
+      512,
+    );
+    final missingCandidate = await verifiedVideoCandidateForFile(missingSource);
+    await missingSource.delete();
 
     await expectLater(
-      () => service.importVideoForRecord(
+      () => service.replaceVideoForRecord(
         surgeryRecordId: record.id,
-        sourcePath: p.join(tempDirectory.path, 'missing.mp4'),
-        originalFileName: 'missing.mp4',
+        expectedVideoPath: oldPath!,
+        candidate: missingCandidate,
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.sourceChanged,
+        ),
+      ),
     );
     final restored = await surgeryRepository.getRecord(record.id);
 
@@ -140,18 +204,17 @@ void main() {
       'second.mov',
       1024,
     );
-    final first = await service.importVideoForRecord(
+    final first = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
     final oldPath = first.videoPath!;
 
-    final second = await service.importVideoForRecord(
+    final second = (await service.replaceVideoForRecord(
       surgeryRecordId: record.id,
-      sourcePath: secondSource.path,
-      originalFileName: 'second.mov',
-    );
+      expectedVideoPath: oldPath,
+      candidate: await verifiedVideoCandidateForFile(secondSource),
+    )).value;
 
     expect(second.videoPath, isNot(oldPath));
     expect(await videoStorageRepository.resolveVideo(oldPath), isNull);
@@ -167,19 +230,34 @@ void main() {
       eyeSide: EyeSide.right,
     );
     final source = await _writeSourceVideo(tempDirectory, 'first.mp4', 512);
-    final first = await service.importVideoForRecord(
+    final first = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'first.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
+    final invalidCandidate = await verifiedVideoCandidateForFile(
+      source,
+      displayName: 'invalid.avi',
+    );
+    final preflight = _RejectingImportPreflight();
+    final guardedService = RecordVideoService(
+      surgeryRepository: surgeryRepository,
+      videoStorageRepository: videoStorageRepository,
+      videoImportPreflight: preflight,
     );
 
     await expectLater(
-      () => service.importVideoForRecord(
+      () => guardedService.replaceVideoForRecord(
         surgeryRecordId: record.id,
-        sourcePath: source.path,
-        originalFileName: 'invalid.avi',
+        expectedVideoPath: first.videoPath!,
+        candidate: invalidCandidate,
       ),
-      throwsA(isA<ArgumentError>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.nonCandidateExtension,
+        ),
+      ),
     );
 
     expect(
@@ -194,11 +272,10 @@ void main() {
       eyeSide: EyeSide.left,
     );
     final source = await _writeSourceVideo(tempDirectory, 'first.mp4', 512);
-    final imported = await service.importVideoForRecord(
+    final imported = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
 
     await service.deleteRecordAndManagedVideos(record.id);
 
@@ -237,17 +314,16 @@ void main() {
       1024,
     );
 
-    await service.importVideoForRecord(
+    final first = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
     // Replacing an already-registered video invalidates prior timings,
     // since they were measured against the old video's timeline.
-    await service.importVideoForRecord(
+    await service.replaceVideoForRecord(
       surgeryRecordId: record.id,
-      sourcePath: secondSource.path,
-      originalFileName: 'second.mp4',
+      expectedVideoPath: first.videoPath!,
+      candidate: await verifiedVideoCandidateForFile(secondSource),
     );
     final restored = await surgeryRepository.getStepReview(
       surgeryRecordId: record.id,
@@ -278,11 +354,10 @@ void main() {
       ),
     );
     final source = await _writeSourceVideo(tempDirectory, 'first.mp4', 512);
-    final imported = await service.importVideoForRecord(
+    final imported = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
     final videoPath = imported.videoPath!;
 
     final updated = await service.removeVideoForRecord(

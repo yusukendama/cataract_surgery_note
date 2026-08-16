@@ -2,16 +2,16 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:video_player/video_player.dart';
 
 import '../../data/providers.dart';
-import '../../data/surgery_video_picker.dart';
+import '../../data/video_import_models.dart';
 import '../../domain/surgery_models.dart';
-import '../../widgets/app_snack_bar.dart';
 import '../../widgets/video_surface.dart';
+import '../video_import/video_import_screen_flow.dart';
+import '../video_import/video_import_ui_flow.dart';
 import 'record_detail_screen.dart';
 
 class NewRecordScreen extends ConsumerStatefulWidget {
@@ -21,7 +21,7 @@ class NewRecordScreen extends ConsumerStatefulWidget {
     super.key,
   });
 
-  final SelectedSurgeryVideo initialVideo;
+  final VerifiedVideoCandidate initialVideo;
   final bool enableVideoPreview;
 
   @override
@@ -29,12 +29,21 @@ class NewRecordScreen extends ConsumerStatefulWidget {
 }
 
 class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
-  late SelectedSurgeryVideo _selectedVideo = widget.initialVideo;
+  static const _previewInitializationTimeout = Duration(seconds: 10);
+  static const _previewDisposalTimeout = Duration(seconds: 2);
+
+  late VerifiedVideoCandidate _selectedVideo = widget.initialVideo;
+  late final VideoImportUiFlow _videoImportFlow;
+  final VideoImportOperationController _videoImportOperationController =
+      VideoImportOperationController();
   DateTime? _surgeryDate;
   EyeSide? _eyeSide;
   VideoPlayerController? _videoController;
+  VideoImportCancellationToken? _pendingPreviewCancellation;
   String? _videoErrorMessage;
+  VideoImportException? _lastVideoImportError;
   bool _isVideoLoading = true;
+  bool _isSelectingVideo = false;
   bool _isSaving = false;
   bool _isShowingDiscardDialog = false;
   bool _allowPop = false;
@@ -45,18 +54,19 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
   final GlobalKey _dateFieldKey = GlobalKey();
   final GlobalKey _eyeFieldKey = GlobalKey();
 
-  bool get _canAttemptRegistration =>
-      !_isSaving &&
-      !_isVideoLoading &&
-      _videoErrorMessage == null &&
-      (!widget.enableVideoPreview ||
-          (_videoController?.value.isInitialized ?? false));
+  bool get _canAttemptRegistration => !_isSaving && !_isSelectingVideo;
 
   @override
   void initState() {
     super.initState();
+    _videoImportFlow = VideoImportUiFlow(
+      picker: ref.read(surgeryVideoPickerProvider),
+      preflight: ref.read(videoImportPreflightProvider),
+    );
     if (widget.enableVideoPreview) {
-      unawaited(_loadVideo(_selectedVideo));
+      final cancellationToken = VideoImportCancellationToken();
+      _pendingPreviewCancellation = cancellationToken;
+      unawaited(_loadInitialVideo(_selectedVideo, cancellationToken));
     } else {
       _isVideoLoading = false;
     }
@@ -64,6 +74,9 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
 
   @override
   void dispose() {
+    _videoImportFlow.dispose();
+    _videoImportOperationController.dispose();
+    _pendingPreviewCancellation?.cancel();
     _scrollController.dispose();
     final controller = _videoController;
     if (controller != null) {
@@ -83,7 +96,10 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
         }
       },
       child: Scaffold(
-        appBar: AppBar(title: const Text('新規症例')),
+        appBar: AppBar(
+          title: const Text('新規症例'),
+          actions: const [VideoRegistrationHelpButton()],
+        ),
         body: ListView(
           controller: _scrollController,
           padding: const EdgeInsets.all(16),
@@ -97,6 +113,13 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
             Text('選択した動画', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
             _buildVideoPreview(),
+            if (_videoErrorMessage != null) ...[
+              const SizedBox(height: 8),
+              const Text(
+                'プレビューのみ失敗しました。登録時には動画を再検証します。'
+                '必要に応じて動画を変更してください。',
+              ),
+            ],
             const SizedBox(height: 8),
             Row(
               children: [
@@ -109,12 +132,23 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
                 ),
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
-                  onPressed: _isSaving ? null : _changeVideo,
+                  onPressed: _isSaving || _isSelectingVideo
+                      ? null
+                      : _changeVideo,
                   icon: const Icon(Icons.video_file_outlined),
                   label: const Text('動画を変更'),
                 ),
               ],
             ),
+            if (_lastVideoImportError case final error?) ...[
+              const SizedBox(height: 8),
+              VideoImportPersistentErrorNotice(
+                error: error,
+                onReselect: _isSaving || _isSelectingVideo
+                    ? null
+                    : _changeVideo,
+              ),
+            ],
             if (_videoWasChanged &&
                 (_surgeryDate == null || _eyeSide == null)) ...[
               const SizedBox(height: 12),
@@ -148,7 +182,7 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
                             ).format(_surgeryDate!),
                     ),
                     trailing: const Icon(Icons.calendar_today),
-                    onTap: _isSaving ? null : _pickDate,
+                    onTap: _isSaving || _isSelectingVideo ? null : _pickDate,
                   ),
                 ),
                 if (_hasAttemptedRegistration && _surgeryDate == null) ...[
@@ -181,7 +215,7 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
                       .toList(),
                   selected: _eyeSide == null ? const {} : {_eyeSide!},
                   emptySelectionAllowed: true,
-                  onSelectionChanged: _isSaving
+                  onSelectionChanged: _isSaving || _isSelectingVideo
                       ? null
                       : (selection) {
                           setState(() {
@@ -219,7 +253,7 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
                 label: Text(
                   _isSaving
                       ? '登録中…'
-                      : _isVideoLoading
+                      : _isSelectingVideo
                       ? '動画を確認中…'
                       : '症例を登録',
                 ),
@@ -270,7 +304,7 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
                 children: [
                   const Icon(Icons.error_outline, size: 40),
                   const SizedBox(height: 8),
-                  Text(error, textAlign: TextAlign.center),
+                  const Text('プレビューできません'),
                 ],
               ),
             ),
@@ -278,41 +312,49 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
         ),
       );
     }
-    return _VideoPreview(controller: _videoController!);
+    final controller = _videoController;
+    if (controller == null) {
+      return const VideoSurface(
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Center(child: Text('プレビューを準備しています…')),
+        ),
+      );
+    }
+    return _VideoPreview(controller: controller);
   }
 
-  Future<void> _loadVideo(SelectedSurgeryVideo selectedVideo) async {
-    final previous = _videoController;
-    if (previous != null) {
-      previous.removeListener(_onVideoStateChanged);
-      await previous.dispose();
-    }
-    final controller = VideoPlayerController.file(File(selectedVideo.path));
-    _videoController = controller;
-    _videoErrorMessage = null;
-    _isVideoLoading = true;
-    controller.addListener(_onVideoStateChanged);
-    if (mounted) {
-      setState(() {});
-    }
+  Future<void> _loadInitialVideo(
+    VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken cancellationToken,
+  ) async {
     try {
-      await controller.initialize();
-      if (!mounted || _videoController != controller) {
+      final controller = await _initializePreviewController(
+        candidate,
+        cancellationToken: cancellationToken,
+      );
+      if (!mounted) {
+        await _disposeVideoController(controller);
         return;
       }
-      if (controller.value.duration <= Duration.zero ||
-          controller.value.hasError) {
-        throw StateError('再生可能な動画ではありません');
-      }
-      setState(() => _isVideoLoading = false);
-    } catch (_) {
-      if (!mounted || _videoController != controller) {
+      controller.addListener(_onVideoStateChanged);
+      setState(() {
+        _videoController = controller;
+        _videoErrorMessage = null;
+        _isVideoLoading = false;
+      });
+    } on Object {
+      if (!mounted) {
         return;
       }
       setState(() {
         _isVideoLoading = false;
-        _videoErrorMessage = '動画を再生できませんでした。動画を変更して、もう一度お試しください。';
+        _videoErrorMessage = 'プレビューできません';
       });
+    } finally {
+      if (identical(_pendingPreviewCancellation, cancellationToken)) {
+        _pendingPreviewCancellation = null;
+      }
     }
   }
 
@@ -324,33 +366,153 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
     if ((controller?.value.hasError ?? false) && _videoErrorMessage == null) {
       setState(() {
         _isVideoLoading = false;
-        _videoErrorMessage = '動画を再生できませんでした。動画を変更して、もう一度お試しください。';
+        _videoErrorMessage = 'プレビューできません';
       });
     }
   }
 
   Future<void> _changeVideo() async {
-    final SelectedSurgeryVideo? selectedVideo;
+    if (_isSaving || _isSelectingVideo || _videoImportFlow.isActive) {
+      return;
+    }
+    setState(() => _isSelectingVideo = true);
+    _pendingPreviewCancellation?.cancel();
+    final currentController = _videoController;
     try {
-      selectedVideo = await ref.read(surgeryVideoPickerProvider).pickVideo();
-    } catch (_) {
-      _showMessage('動画を選択できませんでした。写真へのアクセス権限を確認してください。');
+      if (currentController?.value.isPlaying ?? false) {
+        try {
+          await currentController!.pause();
+        } on Object {
+          // Selection can continue even if the old platform player has ended.
+        }
+      }
+
+      while (true) {
+        if (!mounted) {
+          return;
+        }
+        final candidate = await selectVerifiedVideoForScreen(
+          context: context,
+          flow: _videoImportFlow,
+          entryPoint: VideoImportEntryPoint.create,
+          onPersistentFailure: _rememberVideoImportFailure,
+          dataInvariantSuffix:
+              VideoImportDataInvariantSuffix.createNotRegistered,
+        );
+        if (candidate == null || !mounted) {
+          return;
+        }
+
+        await _commitVideoChange(
+          candidate,
+          null,
+          isPreviewLoading: widget.enableVideoPreview,
+        );
+        if (!mounted || !widget.enableVideoPreview) {
+          return;
+        }
+        final cancellationToken = VideoImportCancellationToken();
+        _pendingPreviewCancellation = cancellationToken;
+        unawaited(_loadInitialVideo(candidate, cancellationToken));
+        return;
+      }
+    } finally {
+      _pendingPreviewCancellation = null;
+      if (mounted) {
+        setState(() => _isSelectingVideo = false);
+      }
+    }
+  }
+
+  Future<VideoPlayerController> _initializePreviewController(
+    VerifiedVideoCandidate candidate, {
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    cancellationToken?.throwIfCancelled(VideoImportPhase.sourcePlayback);
+    onProgress?.call(
+      const VideoImportProgress(phase: VideoImportPhase.sourcePlayback),
+    );
+    final controller = VideoPlayerController.file(File(candidate.path));
+    try {
+      await Future.any<void>([
+        controller.initialize(),
+        if (cancellationToken != null)
+          cancellationToken.whenCancelled.then<void>((_) {
+            cancellationToken.throwIfCancelled(VideoImportPhase.sourcePlayback);
+          }),
+      ]).timeout(
+        _previewInitializationTimeout,
+        onTimeout: () =>
+            throw _previewFailure(VideoImportInternalReasonV1.stageTimeout),
+      );
+      cancellationToken?.throwIfCancelled(VideoImportPhase.sourcePlayback);
+      if (!controller.value.isInitialized || controller.value.hasError) {
+        throw _previewFailure(VideoImportInternalReasonV1.playerInitFailed);
+      }
+      if (controller.value.duration <= Duration.zero) {
+        throw _previewFailure(
+          VideoImportInternalReasonV1.playerInvalidDuration,
+        );
+      }
+      return controller;
+    } on VideoImportException {
+      await _disposeVideoController(controller);
+      rethrow;
+    } on Object {
+      await _disposeVideoController(controller);
+      throw _previewFailure(VideoImportInternalReasonV1.playerInitFailed);
+    }
+  }
+
+  Future<void> _commitVideoChange(
+    VerifiedVideoCandidate candidate,
+    VideoPlayerController? controller, {
+    bool isPreviewLoading = false,
+  }) async {
+    if (!mounted) {
+      if (controller != null) {
+        await _disposeVideoController(controller);
+      }
       return;
     }
-    if (selectedVideo == null || !mounted) {
-      return;
-    }
+    final previous = _videoController;
+    previous?.removeListener(_onVideoStateChanged);
+    controller?.addListener(_onVideoStateChanged);
     setState(() {
-      _selectedVideo = selectedVideo!;
+      _selectedVideo = candidate;
+      _videoController = controller;
+      _videoErrorMessage = null;
+      _lastVideoImportError = null;
+      _isVideoLoading = isPreviewLoading;
       _surgeryDate = null;
       _eyeSide = null;
       _videoWasChanged = true;
       _hasAttemptedRegistration = false;
       _validationAnnouncement = null;
     });
-    if (widget.enableVideoPreview) {
-      await _loadVideo(selectedVideo);
+    if (previous != null) {
+      await _disposeVideoController(previous);
     }
+  }
+
+  Future<void> _disposeVideoController(VideoPlayerController controller) async {
+    try {
+      await controller.dispose().timeout(_previewDisposalTimeout);
+    } on Object {
+      // Disposal is best-effort after the controller has left visible state.
+    }
+  }
+
+  VideoImportException _previewFailure(VideoImportInternalReasonV1 reason) {
+    return VideoImportException(
+      code: VideoImportErrorCode.unplayableMedia,
+      entryPoint: VideoImportEntryPoint.create,
+      phase: VideoImportPhase.sourcePlayback,
+      internalReason: reason,
+      primaryRecoveryAction: VideoImportRecoveryAction.checkSourceAndReselect,
+      dataInvariantSuffix: VideoImportDataInvariantSuffix.createNotRegistered,
+    );
   }
 
   Future<void> _pickDate() async {
@@ -414,53 +576,100 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
       return;
     }
     setState(() => _isSaving = true);
+    var shouldReselectVideo = false;
     try {
-      final record = await ref
-          .read(recordVideoServiceProvider)
-          .createRecordWithVideo(
-            surgeryDate: surgeryDate,
-            eyeSide: eyeSide,
-            sourcePath: _selectedVideo.path,
-            originalFileName: _selectedVideo.displayName,
-          );
-      ref.invalidate(surgeryRecordsProvider);
-      ref.invalidate(surgeryRecordProgressProvider);
-      ref.invalidate(surgeryAnalysisProvider);
-      ref.invalidate(videoStorageMaintenanceProvider);
-      if (!mounted) {
-        return;
+      while (true) {
+        if (!mounted) {
+          return;
+        }
+        final result =
+            await runVideoImportOperationForScreen<
+              VideoImportOutcome<SurgeryRecord>
+            >(
+              context: context,
+              entryPoint: VideoImportEntryPoint.create,
+              dataInvariantSuffix:
+                  VideoImportDataInvariantSuffix.createNotRegistered,
+              operationController: _videoImportOperationController,
+              onPersistentFailure: _rememberVideoImportFailure,
+              operation: (cancellationToken, onProgress) {
+                return ref
+                    .read(recordVideoServiceProvider)
+                    .createRecordWithVideo(
+                      surgeryDate: surgeryDate,
+                      eyeSide: eyeSide,
+                      candidate: _selectedVideo,
+                      cancellationToken: cancellationToken,
+                      onProgress: onProgress,
+                    );
+              },
+            );
+        switch (result) {
+          case VideoImportScreenOperationSuccess(:final value):
+            final record = value.value;
+            ref.invalidate(surgeryRecordsProvider);
+            ref.invalidate(surgeryRecordProgressProvider);
+            ref.invalidate(surgeryAnalysisProvider);
+            ref.invalidate(videoStorageMaintenanceProvider);
+            if (!mounted) {
+              return;
+            }
+            if (value.maintenanceOutcome == VideoMaintenanceOutcome.pending) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('症例の登録は完了しました。動画の後処理は次回起動時に再試行します。'),
+                ),
+              );
+            }
+            setState(() => _allowPop = true);
+            unawaited(
+              Navigator.of(context).pushReplacement<void, void>(
+                MaterialPageRoute<void>(
+                  builder: (_) => RecordDetailScreen(recordId: record.id),
+                ),
+              ),
+            );
+            return;
+          case VideoImportScreenOperationCancelled():
+            return;
+          case VideoImportScreenOperationFailure(:final recoveryAction):
+            shouldReselectVideo = videoImportRecoveryRequestsReselection(
+              recoveryAction,
+            );
+            if (shouldReselectVideo) {
+              break;
+            }
+            if (_retriesImport(recoveryAction)) {
+              continue;
+            }
+            return;
+        }
+        break;
       }
-      setState(() => _allowPop = true);
-      await Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(
-          builder: (_) => RecordDetailScreen(recordId: record.id),
-        ),
-      );
-    } catch (error) {
-      _showMessage(_describeSaveError(error));
     } finally {
       if (mounted) {
         setState(() => _isSaving = false);
       }
     }
+    if (shouldReselectVideo && mounted) {
+      await _changeVideo();
+    }
   }
 
-  String _describeSaveError(Object error) {
-    if (error is PlatformException &&
-        error.code.startsWith('backup_exclusion')) {
-      return '動画のバックアップ除外を確認できませんでした。症例は登録していません。もう一度お試しください。';
+  bool _retriesImport(VideoImportRecoveryAction action) {
+    return action == VideoImportRecoveryAction.retry ||
+        action == VideoImportRecoveryAction.unlockAndRetry ||
+        action == VideoImportRecoveryAction.freeStorageAndRetry;
+  }
+
+  void _rememberVideoImportFailure(VideoImportException error) {
+    if (mounted) {
+      setState(() => _lastVideoImportError = error);
     }
-    if (error is ArgumentError) {
-      return 'この動画形式は登録できません。MP4、MOV、M4V形式の動画を選択してください。';
-    }
-    if (error is FileSystemException) {
-      return '動画を保存できませんでした。ストレージの空き容量と動画ファイルを確認してください。';
-    }
-    return '症例を登録できませんでした。入力内容は保持されています。もう一度お試しください。';
   }
 
   Future<void> _confirmDiscard() async {
-    if (_isSaving || _isShowingDiscardDialog) {
+    if (_isSaving || _isSelectingVideo || _isShowingDiscardDialog) {
       return;
     }
     _isShowingDiscardDialog = true;
@@ -485,12 +694,6 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
     if (discard == true && mounted) {
       setState(() => _allowPop = true);
       Navigator.of(context).pop();
-    }
-  }
-
-  void _showMessage(String message) {
-    if (mounted) {
-      showAppSnackBar(context, message: message, tone: AppFeedbackTone.failure);
     }
   }
 }

@@ -36,6 +36,43 @@ class SurgeryVideoReferenceRow {
   final String? videoPath;
 }
 
+final class VideoDurationConflictException implements Exception {
+  const VideoDurationConflictException({
+    required this.destinationDurationMilliseconds,
+    required this.maximumTimingMilliseconds,
+    required this.hasInvalidTiming,
+  });
+
+  final int destinationDurationMilliseconds;
+  final int maximumTimingMilliseconds;
+  final bool hasInvalidTiming;
+
+  @override
+  String toString() => '動画の長さが、保存済みの工程時刻を満たしていません。';
+}
+
+final class VideoTimelineIdentityConflictException implements Exception {
+  const VideoTimelineIdentityConflictException();
+
+  @override
+  String toString() => '工程時刻が追加されたため、動画の同一性を再確認する必要があります。';
+}
+
+final class _VideoTimingBounds {
+  const _VideoTimingBounds({
+    required this.maximumMilliseconds,
+    required this.hasInvalidTiming,
+    required this.hasRecordedTiming,
+  });
+
+  final int maximumMilliseconds;
+  final bool hasInvalidTiming;
+  final bool hasRecordedTiming;
+
+  bool exceeds(int durationMilliseconds) =>
+      hasInvalidTiming || maximumMilliseconds > durationMilliseconds;
+}
+
 class SurgeryRecordProgress {
   const SurgeryRecordProgress({
     required this.record,
@@ -274,8 +311,10 @@ ORDER BY r.surgery_date ASC, r.created_at ASC, r.id ASC
     required EyeSide eyeSide,
     required String? videoPath,
     required String? videoDisplayName,
+    void Function()? ensureMutationAllowed,
   }) {
     return runRecordMutation(surgeryRecordId, () async {
+      ensureMutationAllowed?.call();
       final now = DateTime.now();
       final record = SurgeryRecord(
         id: surgeryRecordId,
@@ -293,6 +332,7 @@ ORDER BY r.surgery_date ASC, r.created_at ASC, r.id ASC
         updatedAt: now,
       );
       await _database.transaction(() async {
+        ensureMutationAllowed?.call();
         await _database.customStatement(
           '''
 INSERT INTO surgery_records (
@@ -413,19 +453,142 @@ WHERE id = ?
     });
   }
 
+  /// Updates a video reference only when every latest persisted timing fits
+  /// within the verified destination duration.
+  ///
+  /// The reference CAS, timing validation, and update share one database
+  /// transaction. The timing predicate is repeated in the UPDATE so a timing
+  /// write cannot slip between the validation read and the reference change.
+  Future<void> updateVideoReferenceIfCurrentAndTimingsFit({
+    required String surgeryRecordId,
+    required String? expectedVideoPath,
+    required String videoPath,
+    required String videoDisplayName,
+    required int destinationDurationMilliseconds,
+    bool requireNoRecordedTimings = false,
+    void Function()? ensureMutationAllowed,
+  }) {
+    if (destinationDurationMilliseconds <= 0) {
+      throw ArgumentError.value(
+        destinationDurationMilliseconds,
+        'destinationDurationMilliseconds',
+        '動画の長さは0ミリ秒より大きい必要があります。',
+      );
+    }
+    return runRecordMutation(surgeryRecordId, () async {
+      ensureMutationAllowed?.call();
+      await _database.transaction(() async {
+        await _assertExpectedVideoPath(
+          surgeryRecordId: surgeryRecordId,
+          expectedVideoPath: expectedVideoPath,
+        );
+        final timingBounds = await _readVideoTimingBounds(surgeryRecordId);
+        if (requireNoRecordedTimings && timingBounds.hasRecordedTiming) {
+          throw const VideoTimelineIdentityConflictException();
+        }
+        if (timingBounds.exceeds(destinationDurationMilliseconds)) {
+          throw VideoDurationConflictException(
+            destinationDurationMilliseconds: destinationDurationMilliseconds,
+            maximumTimingMilliseconds: timingBounds.maximumMilliseconds,
+            hasInvalidTiming: timingBounds.hasInvalidTiming,
+          );
+        }
+
+        ensureMutationAllowed?.call();
+
+        final affected = await _database.customUpdate(
+          '''
+UPDATE surgery_records
+SET video_path = ?, video_display_name = ?, updated_at = ?
+WHERE id = ?
+  AND ((video_path IS NULL AND ? IS NULL) OR video_path = ?)
+  AND (? = 0 OR NOT EXISTS (
+    SELECT 1
+    FROM surgical_step_reviews
+    WHERE surgery_record_id = ?
+      AND (start_milliseconds IS NOT NULL OR end_milliseconds IS NOT NULL)
+  ))
+  AND NOT EXISTS (
+    SELECT 1
+    FROM surgical_step_reviews
+    WHERE surgery_record_id = ?
+      AND (
+        (start_milliseconds IS NOT NULL AND (
+          typeof(start_milliseconds) != 'integer'
+          OR start_milliseconds < 0
+          OR start_milliseconds > ?
+        ))
+        OR
+        (end_milliseconds IS NOT NULL AND (
+          typeof(end_milliseconds) != 'integer'
+          OR end_milliseconds < 0
+          OR end_milliseconds > ?
+        ))
+      )
+  )
+''',
+          variables: <Variable<Object>>[
+            Variable<String>(videoPath),
+            Variable<String>(videoDisplayName),
+            Variable<int>(_dateToMillis(DateTime.now())),
+            Variable<String>(surgeryRecordId),
+            Variable<String>(expectedVideoPath),
+            Variable<String>(expectedVideoPath),
+            Variable<int>(requireNoRecordedTimings ? 1 : 0),
+            Variable<String>(surgeryRecordId),
+            Variable<String>(surgeryRecordId),
+            Variable<int>(destinationDurationMilliseconds),
+            Variable<int>(destinationDurationMilliseconds),
+          ],
+        );
+        if (affected == 1) {
+          return;
+        }
+
+        final latest = await getRecord(surgeryRecordId);
+        if (latest == null) {
+          throw SurgeryRecordNotFoundException(surgeryRecordId);
+        }
+        if (latest.videoPath != expectedVideoPath) {
+          throw VideoReferenceConflictException(
+            expectedPath: expectedVideoPath,
+            currentPath: latest.videoPath,
+          );
+        }
+        final latestTimingBounds = await _readVideoTimingBounds(
+          surgeryRecordId,
+        );
+        if (requireNoRecordedTimings && latestTimingBounds.hasRecordedTiming) {
+          throw const VideoTimelineIdentityConflictException();
+        }
+        if (latestTimingBounds.exceeds(destinationDurationMilliseconds)) {
+          throw VideoDurationConflictException(
+            destinationDurationMilliseconds: destinationDurationMilliseconds,
+            maximumTimingMilliseconds: latestTimingBounds.maximumMilliseconds,
+            hasInvalidTiming: latestTimingBounds.hasInvalidTiming,
+          );
+        }
+        throw StateError('動画参照を更新できませんでした。');
+      });
+    });
+  }
+
   Future<void> replaceVideoReferenceAndClearTimings({
     required String surgeryRecordId,
     required String? expectedVideoPath,
     required String? videoPath,
     required String? videoDisplayName,
+    void Function()? ensureMutationAllowed,
   }) {
     return runRecordMutation(surgeryRecordId, () async {
+      ensureMutationAllowed?.call();
       await _database.transaction(() async {
         final updatedAt = _dateToMillis(DateTime.now());
         await _assertExpectedVideoPath(
           surgeryRecordId: surgeryRecordId,
           expectedVideoPath: expectedVideoPath,
         );
+        ensureMutationAllowed?.call();
         final affected = await _database.customUpdate(
           '''
 UPDATE surgery_records
@@ -624,6 +787,26 @@ LIMIT 1
       return null;
     }
     return _reviewFromRow(rows.single);
+  }
+
+  /// Read-only timeline presence check used before deciding whether a selected
+  /// video may keep existing positions. This never creates review rows.
+  Future<bool> hasRecordedTimings(String surgeryRecordId) async {
+    final rows = await _database
+        .customSelect(
+          '''
+SELECT EXISTS(
+  SELECT 1
+  FROM surgical_step_reviews
+  WHERE surgery_record_id = ?
+    AND (start_milliseconds IS NOT NULL OR end_milliseconds IS NOT NULL)
+) AS has_recorded_timings
+''',
+          variables: <Variable<Object>>[Variable<String>(surgeryRecordId)],
+          readsFrom: const {},
+        )
+        .get();
+    return rows.single.read<int>('has_recorded_timings') == 1;
   }
 
   Future<List<SurgicalStepReview>> ensureStepReviews(String surgeryRecordId) {
@@ -1091,6 +1274,68 @@ WHERE id = ?
         currentPath: record.videoPath,
       );
     }
+  }
+
+  Future<_VideoTimingBounds> _readVideoTimingBounds(
+    String surgeryRecordId,
+  ) async {
+    final rows = await _database
+        .customSelect(
+          '''
+SELECT
+  COALESCE(MAX(
+    CASE
+      WHEN typeof(start_milliseconds) = 'integer'
+        AND start_milliseconds >= 0
+      THEN start_milliseconds
+      ELSE 0
+    END
+  ), 0) AS maximum_start_milliseconds,
+  COALESCE(MAX(
+    CASE
+      WHEN typeof(end_milliseconds) = 'integer'
+        AND end_milliseconds >= 0
+      THEN end_milliseconds
+      ELSE 0
+    END
+  ), 0) AS maximum_end_milliseconds,
+  COALESCE(MAX(
+    CASE
+      WHEN (start_milliseconds IS NOT NULL AND (
+        typeof(start_milliseconds) != 'integer'
+        OR start_milliseconds < 0
+      ))
+      OR (end_milliseconds IS NOT NULL AND (
+        typeof(end_milliseconds) != 'integer'
+        OR end_milliseconds < 0
+      ))
+      THEN 1 ELSE 0
+    END
+  ), 0) AS has_invalid_timing,
+  COALESCE(MAX(
+    CASE
+      WHEN start_milliseconds IS NOT NULL
+        OR end_milliseconds IS NOT NULL
+      THEN 1 ELSE 0
+    END
+  ), 0) AS has_recorded_timing
+FROM surgical_step_reviews
+WHERE surgery_record_id = ?
+''',
+          variables: <Variable<Object>>[Variable<String>(surgeryRecordId)],
+          readsFrom: const {},
+        )
+        .get();
+    final row = rows.single;
+    final maximumStart = row.read<int>('maximum_start_milliseconds');
+    final maximumEnd = row.read<int>('maximum_end_milliseconds');
+    return _VideoTimingBounds(
+      maximumMilliseconds: maximumStart > maximumEnd
+          ? maximumStart
+          : maximumEnd,
+      hasInvalidTiming: row.read<int>('has_invalid_timing') != 0,
+      hasRecordedTiming: row.read<int>('has_recorded_timing') != 0,
+    );
   }
 
   Future<void> _insertStepReviewIfMissing({

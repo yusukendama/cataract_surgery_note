@@ -1,0 +1,669 @@
+manifest_version: "1.1"
+schema_version: "1.0"
+product: "白内障執刀ノート"
+release: "1.1.0+19"
+created_at: "2026-08-16"
+requirements_document: "../../requirements/unsupported_video_external_conversion_requirements.md"
+manifest_status: BLOCKED
+manifest_sha256: null
+status_note: >-
+  This file is an inventory and creation contract only. No media artifact,
+  test double version, checksum, license review, non-clinical attestation, or
+  execution evidence has been registered as of 2026-08-16. An entry must not
+  be treated as available merely because its ID is listed here.
+
+status_vocabulary:
+  artifact_status:
+    NOT_CREATED: "The required media artifact has not been created and registered."
+    UNREGISTERED_TEST_DOUBLE: "A versioned test-double artifact or implementation reference has not been registered."
+    READY: "Artifact and every required metadata field have been reviewed."
+  execution_status:
+    NOT_RUN: "No execution evidence has been recorded for the frozen release build."
+    PASS: "Execution evidence exists and the expected result was met."
+    FAIL: "Execution evidence exists and the expected result was not met."
+
+required_metadata:
+  - id
+  - manifest_entry_version
+  - category
+  - artifact_status
+  - artifact_path
+  - artifact_sha256
+  - generation_procedure
+  - provenance
+  - license
+  - nonclinical_attestation
+  - expected_extension
+  - expected_media.container
+  - expected_media.video_codec
+  - expected_media.profile
+  - expected_media.level
+  - expected_media.bit_depth
+  - expected_media.pixel_format
+  - expected_media.scan
+  - expected_media.frame_rate
+  - expected_media.geometry
+  - expected_media.bit_rate
+  - expected_media.timestamps
+  - expected_media.audio
+  - measured_media_metadata
+  - expected_classification
+  - expected_error
+  - execution_status
+  - execution_evidence
+
+registration_candidate_extensions:
+  - mp4
+  - mov
+  - m4v
+
+guidance_only_extensions:
+  - mpg
+  - mpeg
+  - mts
+  - m2ts
+  - avi
+  - mkv
+  - wmv
+  - webm
+
+reference_fixture_profile_v1_1:
+  duration_seconds: 60
+  content: "synthetic, non-clinical"
+  video:
+    codec: "H.264 / AVC"
+    profile: Main
+    level: "4.0"
+    bit_depth: 8
+    chroma_subsampling: "4:2:0"
+    pixel_format: "8-bit 4:2:0"
+    scan: progressive
+    frame_rate_mode: constant
+    frame_rate_fps: 30
+    width: 1920
+    height: 1080
+    sample_aspect_ratio: "1:1"
+    maximum_bit_rate_bps: 8000000
+    timestamps: "start >= 0; monotonic; no edit-list start offset"
+  permitted_audio_variants:
+    - "AAC-LC, 48000 Hz, mono"
+    - "AAC-LC, 48000 Hz, stereo, <= 128000 bps"
+    - "no audio track"
+
+pending_metadata_template:
+  artifact_path: null
+  artifact_sha256: null
+  generation_procedure: null
+  provenance: null
+  license:
+    identifier: null
+    text_or_path: null
+    reviewer: null
+    reviewed_at: null
+    status: PENDING
+  nonclinical_attestation:
+    contains_patient_information: null
+    statement: null
+    reviewer: null
+    reviewed_at: null
+    status: PENDING
+  measured_media_metadata:
+    tool_and_version: null
+    measured_at: null
+    container: null
+    video_codec: null
+    profile: null
+    level: null
+    bit_depth: null
+    pixel_format: null
+    chroma_subsampling: null
+    scan: null
+    frame_rate_mode: null
+    frame_rate_fps: null
+    width: null
+    height: null
+    sample_aspect_ratio: null
+    bit_rate_bps: null
+    timestamp_start: null
+    timestamps_monotonic: null
+    edit_list_start_offset: null
+    duration_seconds: null
+    audio_codec: null
+    audio_profile: null
+    audio_sample_rate_hz: null
+    audio_channels: null
+    audio_bit_rate_bps: null
+  execution_status: NOT_RUN
+  execution_evidence: null
+
+fixtures:
+  - id: RF-MP4-H264-AAC-STEREO-60S
+    manifest_entry_version: "1.0"
+    category: reference_candidate
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "start >= 0, monotonic, no edit-list start offset", audio: "AAC-LC, 48000 Hz, stereo, <= 128000 bps", duration: "60 s" }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: RF-MOV-H264-AAC-STEREO-60S
+    manifest_entry_version: "1.0"
+    category: reference_candidate
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mov
+    expected_media: { container: MOV, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "start >= 0, monotonic, no edit-list start offset", audio: "AAC-LC, 48000 Hz, stereo, <= 128000 bps", duration: "60 s" }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: RF-M4V-H264-AAC-STEREO-60S
+    manifest_entry_version: "1.0"
+    category: reference_candidate
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: m4v
+    expected_media: { container: M4V, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "start >= 0, monotonic, no edit-list start offset", audio: "AAC-LC, 48000 Hz, stereo, <= 128000 bps", duration: "60 s" }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: RF-MP4-H264-AAC-MONO-60S
+    manifest_entry_version: "1.0"
+    category: reference_candidate_audio_variant
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "start >= 0, monotonic, no edit-list start offset", audio: "AAC-LC, 48000 Hz, mono", duration: "60 s" }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: RF-MP4-H264-NO-AUDIO-60S
+    manifest_entry_version: "1.0"
+    category: reference_candidate_audio_variant
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "start >= 0, monotonic, no edit-list start offset", audio: "no audio track", duration: "60 s" }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: NEG-MP4-UNSUPPORTED-CODEC
+    manifest_entry_version: "1.0"
+    category: negative_candidate
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "unsupported codec, to be fixed before creation", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: null }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_then_probe_failure
+    expected_error: unplayableMedia
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: NEG-MP4-RANDOM-BYTES
+    manifest_entry_version: "1.0"
+    category: negative_candidate
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: "invalid/random bytes", video_codec: null, profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: null }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_then_probe_failure
+    expected_error: unplayableMedia
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: NEG-MP4-TRUNCATED
+    manifest_entry_version: "1.0"
+    category: negative_candidate
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: "truncated MP4", video_codec: "derived from reference fixture", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps before truncation", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps before truncation", timestamps: "intentionally incomplete", audio: "AAC-LC stereo before truncation" }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_then_probe_failure
+    expected_error: unplayableMedia
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: NEG-PROTECTED-MEDIA-DOUBLE
+    manifest_entry_version: "1.0"
+    category: protected_media_test_double
+    artifact_status: UNREGISTERED_TEST_DOUBLE
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: "explicit DRM/encryption double", video_codec: null, profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: null }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_then_protected_rejection
+    expected_error: protectedMedia
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-MPG-MPEG2-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mpg
+    expected_media: { container: MPEG-PS, video_codec: MPEG-2, profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "to be fixed before creation" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-MPEG-MPEG2-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mpeg
+    expected_media: { container: MPEG-PS, video_codec: MPEG-2, profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "to be fixed before creation" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-MPEG-PS-RANDOM
+    manifest_entry_version: "1.0"
+    category: guidance_only_negative
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mpg
+    expected_media: { container: "invalid/random bytes", video_codec: null, profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: null }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly_without_source_open
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-MPEG-PS-TRUNCATED
+    manifest_entry_version: "1.0"
+    category: guidance_only_negative
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mpeg
+    expected_media: { container: "truncated MPEG-PS", video_codec: MPEG-2, profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: "intentionally incomplete", audio: "to be fixed before creation" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly_without_source_open
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-MTS-H264-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mts
+    expected_media: { container: MPEG-TS, video_codec: "H.264 / AVC", profile: "to be fixed", level: "to be fixed", bit_depth: "to be fixed", pixel_format: "to be fixed", scan: "to be fixed", frame_rate: "to be fixed", geometry: "to be fixed", bit_rate: "to be fixed", timestamps: "to be fixed", audio: "to be fixed" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-M2TS-H264-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: m2ts
+    expected_media: { container: MPEG-TS, video_codec: "H.264 / AVC", profile: "to be fixed", level: "to be fixed", bit_depth: "to be fixed", pixel_format: "to be fixed", scan: "to be fixed", frame_rate: "to be fixed", geometry: "to be fixed", bit_rate: "to be fixed", timestamps: "to be fixed", audio: "to be fixed" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-M2TS-RANDOM
+    manifest_entry_version: "1.0"
+    category: guidance_only_negative
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: m2ts
+    expected_media: { container: "invalid/random bytes", video_codec: null, profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: null }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly_without_source_open
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-M2TS-TRUNCATED
+    manifest_entry_version: "1.0"
+    category: guidance_only_negative
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: m2ts
+    expected_media: { container: "truncated MPEG-TS", video_codec: "H.264 / AVC", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: "intentionally incomplete", audio: null }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly_without_source_open
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-M2TS-PROTECTED-LIKE
+    manifest_entry_version: "1.0"
+    category: guidance_only_negative
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: m2ts
+    expected_media: { container: "protected-looking MPEG-TS double", video_codec: "H.264 / AVC", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: null }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly_without_protection_claim
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-AVI-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: avi
+    expected_media: { container: AVI, video_codec: "to be fixed", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "to be fixed" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-MKV-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mkv
+    expected_media: { container: Matroska, video_codec: "to be fixed", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "to be fixed" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-WMV-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: wmv
+    expected_media: { container: ASF_WMV, video_codec: "to be fixed", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "to be fixed" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: GDN-WEBM-VALID
+    manifest_entry_version: "1.0"
+    category: guidance_only
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: webm
+    expected_media: { container: WebM, video_codec: "to be fixed", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "to be fixed" }
+    measured_media_metadata: null
+    expected_classification: guidanceOnly
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: META-PICKER-CONTRACT-OUTSIDE
+    manifest_entry_version: "1.0"
+    category: selection_metadata_test_double
+    artifact_status: UNREGISTERED_TEST_DOUBLE
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: "outside selectable file types"
+    expected_media: { container: "not inspected", video_codec: "not inspected", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "not inspected" }
+    measured_media_metadata: null
+    expected_classification: outsidePickerContract_without_source_open
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: META-NO-EXTENSION
+    manifest_entry_version: "1.0"
+    category: selection_metadata_test_double
+    artifact_status: UNREGISTERED_TEST_DOUBLE
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: null
+    expected_media: { container: "not inspected", video_codec: "not inspected", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "not inspected" }
+    measured_media_metadata: null
+    expected_classification: outsidePickerContract_without_source_open
+    expected_error: nonCandidateExtension
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: PROVIDER-UNAVAILABLE-DOUBLE
+    manifest_entry_version: "1.0"
+    category: file_provider_test_double
+    artifact_status: UNREGISTERED_TEST_DOUBLE
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: "unavailable by construction", video_codec: "not inspected", profile: null, level: null, bit_depth: null, pixel_format: null, scan: null, frame_rate: null, geometry: null, bit_rate: null, timestamps: null, audio: "not inspected" }
+    measured_media_metadata: null
+    expected_classification: sourceAccessFailure
+    expected_error: providerUnavailable
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: EXT-CONVERTED-MP4-H264-AAC
+    manifest_entry_version: "1.0"
+    category: external_conversion_equivalent
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "start >= 0, monotonic, no edit-list start offset", audio: "AAC-LC, 48000 Hz, stereo, <= 128000 bps", duration: "60 s" }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_after_reselection
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: TL-HEAD-TRIM
+    manifest_entry_version: "1.0"
+    category: non_identical_timeline
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "normalized after intentional head trim", audio: "AAC-LC or no audio; to be fixed", timeline_change: head_trim }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_non_identical_timeline
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: TL-SPEED-CHANGE
+    manifest_entry_version: "1.0"
+    category: non_identical_timeline
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "constant 30 fps", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "normalized after intentional speed change", audio: "AAC-LC or no audio; to be fixed", timeline_change: speed_change }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_non_identical_timeline
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+  - id: TL-FRAME-DROP
+    manifest_entry_version: "1.0"
+    category: non_identical_timeline
+    artifact_status: NOT_CREATED
+    artifact_path: null
+    artifact_sha256: null
+    generation_procedure: null
+    provenance: null
+    license: { status: PENDING, identifier: null, text_or_path: null, reviewer: null, reviewed_at: null }
+    nonclinical_attestation: { status: PENDING, contains_patient_information: null, statement: null, reviewer: null, reviewed_at: null }
+    expected_extension: mp4
+    expected_media: { container: MP4, video_codec: "H.264 / AVC", profile: Main, level: "4.0", bit_depth: 8, pixel_format: "4:2:0", scan: progressive, frame_rate: "output cadence to be fixed", geometry: "1920x1080, SAR 1:1", bit_rate: "<= 8000000 bps", timestamps: "monotonic after intentional frame drop", audio: "AAC-LC or no audio; to be fixed", timeline_change: frame_drop }
+    measured_media_metadata: null
+    expected_classification: registrationCandidate_non_identical_timeline
+    expected_error: null
+    execution_status: NOT_RUN
+    execution_evidence: null
+
+release_readiness_rules:
+  - "Every required fixture or test double must have artifact_status READY."
+  - "artifact_sha256 must be a lowercase 64-character SHA-256 for file artifacts."
+  - "generation_procedure must be reproducible and version-pin every tool."
+  - "provenance and license must be reviewed before use."
+  - "nonclinical_attestation must explicitly confirm that no patient information is present."
+  - "Measured metadata must be recorded from the final checksummed artifact, not inferred from generation options."
+  - "No fixture may be marked PASS until a frozen release build has execution evidence."

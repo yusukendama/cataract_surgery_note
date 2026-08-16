@@ -5,9 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
-import 'package:video_player/video_player.dart';
 
 import 'file_sha256.dart';
+import 'protected_storage.dart';
+import 'video_import_models.dart';
+import 'video_import_preflight.dart';
 import 'video_path_classifier.dart';
 
 export 'video_path_classifier.dart';
@@ -18,19 +20,22 @@ class StoredVideo {
     required this.originalFileName,
     required this.sizeBytes,
     required this.sha256,
+    required this.playbackEvidence,
   });
 
   final String relativePath;
   final String originalFileName;
   final int sizeBytes;
   final String sha256;
+  final VideoPlaybackEvidence playbackEvidence;
 }
 
 abstract interface class VideoStorageRepository {
   Future<StoredVideo> importVideo({
     required String surgeryRecordId,
-    required String sourcePath,
-    required String originalFileName,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
   });
 
   /// Returns `null` only when a valid managed reference has no file on disk.
@@ -132,33 +137,24 @@ class MethodChannelBackupExclusionRepository
 }
 
 abstract interface class VideoPlaybackVerifier {
-  Future<void> verify(File file);
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  });
 }
 
 class VideoPlayerPlaybackVerifier implements VideoPlaybackVerifier {
-  const VideoPlayerPlaybackVerifier();
+  const VideoPlayerPlaybackVerifier({
+    VideoPlaybackProbe playbackProbe = const VideoPlayerPlaybackProbe(),
+  }) : _playbackProbe = playbackProbe;
+
+  final VideoPlaybackProbe _playbackProbe;
 
   @override
-  Future<void> verify(File file) async {
-    final controller = VideoPlayerController.file(file);
-    try {
-      await controller.initialize();
-      final value = controller.value;
-      if (!value.isInitialized ||
-          value.duration <= Duration.zero ||
-          value.hasError) {
-        throw const FileSystemException('動画を再生できません。');
-      }
-      await controller.play();
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      if (controller.value.hasError) {
-        throw const FileSystemException('動画のデコードに失敗しました。');
-      }
-      await controller.pause();
-    } finally {
-      await controller.dispose();
-    }
-  }
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) => _playbackProbe.probe(file, cancellationToken: cancellationToken);
 }
 
 class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
@@ -169,8 +165,12 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
     VideoPlaybackVerifier? playbackVerifier,
     DateTime Function()? clock,
     Future<void> Function(File file)? deleteFile,
+    Future<File> Function(File file, String newPath)? renameFile,
+    Stream<List<int>> Function(File source)? openSourceRead,
     String Function()? idGenerator,
     Future<void> Function(File source, File staged)? postCopyFaultInjector,
+    ProtectedDataRepository? protectedDataRepository,
+    FileProtectionRepository? fileProtectionRepository,
   }) : _applicationSupportDirectory = applicationSupportDirectory,
        _idGenerator = idGenerator ?? (() => (uuid ?? const Uuid()).v4()),
        _backupExclusionRepository =
@@ -180,23 +180,25 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
            playbackVerifier ?? const VideoPlayerPlaybackVerifier(),
        _clock = clock ?? DateTime.now,
        _deleteFile = deleteFile ?? _defaultDeleteFile,
-       _postCopyFaultInjector = postCopyFaultInjector;
+       _renameFile = renameFile ?? _defaultRenameFile,
+       _openSourceRead = openSourceRead ?? _defaultOpenSourceRead,
+       _postCopyFaultInjector = postCopyFaultInjector,
+       _protectedDataRepository = protectedDataRepository,
+       _fileProtectionRepository = fileProtectionRepository;
 
   static final _AsyncMutex _storageMutex = _AsyncMutex();
   static final Set<String> _importsAwaitingDatabaseCommit = <String>{};
-  static const Set<String> _supportedExtensions = <String>{
-    '.mp4',
-    '.mov',
-    '.m4v',
-  };
-
   final Directory? _applicationSupportDirectory;
   final String Function() _idGenerator;
   final BackupExclusionRepository _backupExclusionRepository;
   final VideoPlaybackVerifier _playbackVerifier;
   final DateTime Function() _clock;
   final Future<void> Function(File file) _deleteFile;
+  final Future<File> Function(File file, String newPath) _renameFile;
+  final Stream<List<int>> Function(File source) _openSourceRead;
   final Future<void> Function(File source, File staged)? _postCopyFaultInjector;
+  final ProtectedDataRepository? _protectedDataRepository;
+  final FileProtectionRepository? _fileProtectionRepository;
 
   @override
   Future<T> runStorageTransaction<T>(Future<T> Function() action) {
@@ -206,10 +208,12 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
   @override
   Future<StoredVideo> importVideo({
     required String surgeryRecordId,
-    required String sourcePath,
-    required String originalFileName,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
   }) {
     return _storageMutex.synchronized(() async {
+      await _requireProtectedData(VideoImportPhase.sourceAccess);
       if (!isValidRecordId(surgeryRecordId)) {
         throw ArgumentError.value(
           surgeryRecordId,
@@ -217,68 +221,179 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
           '不正な症例IDです。',
         );
       }
-      final source = File(sourcePath);
-      final sourceType = await FileSystemEntity.type(
-        source.path,
-        followLinks: true,
-      );
+      cancellationToken?.throwIfCancelled(VideoImportPhase.copy);
+      final source = File(candidate.path);
+      late FileSystemEntityType sourceType;
+      try {
+        sourceType = await FileSystemEntity.type(
+          source.path,
+          followLinks: false,
+        );
+      } on FileSystemException catch (error, stackTrace) {
+        Error.throwWithStackTrace(
+          _mapImportError(error, VideoImportPhase.sourceHash),
+          stackTrace,
+        );
+      }
       if (sourceType != FileSystemEntityType.file) {
-        throw const FileSystemException('選択した動画が存在しません。');
+        throw _sourceChanged(VideoImportInternalReasonV1.sourceIdentityChanged);
       }
 
-      final extension = p.extension(originalFileName).toLowerCase();
-      if (!_supportedExtensions.contains(extension)) {
-        throw ArgumentError('対応している動画形式は mp4 / mov / m4v です。');
+      final normalizedExtension = const VideoSelectionPolicy()
+          .normalizeExtension(candidate.displayName);
+      if (normalizedExtension != candidate.normalizedExtension ||
+          !registrationCandidateExtensions.contains(normalizedExtension)) {
+        throw _sourceChanged(VideoImportInternalReasonV1.sourceIdentityChanged);
       }
+      final extension = '.$normalizedExtension';
 
-      final videosRoot = await _ensureSafeVideosRoot();
-      // No video byte may be written until this call has set and read back the
-      // directory's exclusion attribute.
-      await _backupExclusionRepository.excludeFromBackup(videosRoot.path);
-      final recordDirectory = await _ensureSafeRecordDirectory(
-        videosRoot,
-        surgeryRecordId,
-      );
-
-      final paths = await _allocateUnusedPaths(recordDirectory, extension);
+      late Directory videosRoot;
+      late Directory recordDirectory;
+      late ({File destination, File temporary}) paths;
+      try {
+        videosRoot = await _ensureSafeVideosRoot();
+        // No video byte may be written until this call has set and read back
+        // both the protection and backup-exclusion attributes.
+        await _excludeFromBackup(videosRoot.path);
+        recordDirectory = await _ensureSafeRecordDirectory(
+          videosRoot,
+          surgeryRecordId,
+        );
+        paths = await _allocateUnusedPaths(recordDirectory, extension);
+      } on VideoImportException {
+        rethrow;
+      } on Object catch (error, stackTrace) {
+        Error.throwWithStackTrace(
+          _mapImportError(error, VideoImportPhase.destinationProtection),
+          stackTrace,
+        );
+      }
       final temporary = paths.temporary;
       final destination = paths.destination;
       var destinationCreated = false;
+      var cleanupPending = false;
+      var phase = VideoImportPhase.sourceHash;
       try {
-        final sourceSizeBefore = await source.length();
-        final sourceHashBefore = await sha256OfFile(source);
-        await _copyFileExclusively(source, temporary);
+        final sourceStatBefore = await source.stat();
+        if (sourceStatBefore.size != candidate.sourceSize ||
+            sourceStatBefore.modified != candidate.sourceModifiedAt) {
+          throw _sourceChanged(VideoImportInternalReasonV1.sourceStatChanged);
+        }
+        final sourceSizeBefore = sourceStatBefore.size;
+        final sourceHashBefore = await _hashFile(
+          source,
+          phase: VideoImportPhase.sourceHash,
+          cancellationToken: cancellationToken,
+          onProgress: onProgress,
+        );
+        if (sourceHashBefore != candidate.sha256) {
+          throw _sourceChanged(VideoImportInternalReasonV1.sourceHashMismatch);
+        }
+        phase = VideoImportPhase.copy;
+        onProgress?.call(
+          const VideoImportProgress(phase: VideoImportPhase.copy),
+        );
+        await _copyFileExclusively(
+          source,
+          temporary,
+          sourceSize: sourceSizeBefore,
+          cancellationToken: cancellationToken,
+          onProgress: onProgress,
+        );
         await _postCopyFaultInjector?.call(source, temporary);
 
         if (await FileSystemEntity.type(temporary.path, followLinks: false) !=
             FileSystemEntityType.file) {
           throw const FileSystemException('動画の一時コピーを確認できません。');
         }
-        final sourceSizeAfter = await source.length();
+        phase = VideoImportPhase.sourceHash;
+        final sourceStatAfter = await source.stat();
+        phase = VideoImportPhase.copy;
         final copiedSize = await temporary.length();
-        final sourceHashAfter = await sha256OfFile(source);
-        final copiedHash = await sha256OfFile(temporary);
-        if (sourceSizeBefore != sourceSizeAfter ||
-            copiedSize != sourceSizeBefore ||
+        if (copiedSize != sourceSizeBefore) {
+          throw _copyIntegrityFailed();
+        }
+        phase = VideoImportPhase.sourceHash;
+        final sourceHashAfter = await _hashFile(
+          source,
+          phase: VideoImportPhase.sourceHash,
+          cancellationToken: cancellationToken,
+          onProgress: onProgress,
+        );
+        if (sourceSizeBefore != sourceStatAfter.size ||
+            sourceStatAfter.modified != sourceStatBefore.modified ||
             sourceHashBefore != sourceHashAfter ||
-            copiedHash != sourceHashBefore) {
-          throw const FileSystemException('動画コピーの完全性を確認できませんでした。');
+            sourceHashAfter != candidate.sha256) {
+          throw _sourceChanged(VideoImportInternalReasonV1.sourceHashMismatch);
         }
 
+        phase = VideoImportPhase.copy;
         await _assertSafeNewTarget(videosRoot, recordDirectory, destination);
         if (await FileSystemEntity.type(destination.path, followLinks: false) !=
             FileSystemEntityType.notFound) {
           throw const FileSystemException('動画の保存先が競合しました。');
         }
-        await temporary.rename(destination.path);
+        try {
+          await _renameFile(temporary, destination.path);
+        } on FileSystemException catch (error) {
+          throw _mapRenameError(error);
+        } on Object {
+          throw _renameFailed();
+        }
         destinationCreated = true;
         await _assertSafeManagedFile(
           videosRoot: videosRoot,
           recordId: surgeryRecordId,
           file: destination,
         );
-        await _backupExclusionRepository.excludeFromBackup(destination.path);
-        await _playbackVerifier.verify(destination);
+        phase = VideoImportPhase.destinationProtection;
+        onProgress?.call(
+          const VideoImportProgress(
+            phase: VideoImportPhase.destinationProtection,
+          ),
+        );
+        await _protectFile(destination.path, excludeFromBackup: true);
+        await _excludeFromBackup(destination.path);
+        phase = VideoImportPhase.copy;
+        final destinationHash = await _hashFile(
+          destination,
+          phase: VideoImportPhase.copy,
+          cancellationToken: cancellationToken,
+          onProgress: onProgress,
+        );
+        if (destinationHash != candidate.sha256 ||
+            destinationHash != sourceHashBefore ||
+            destinationHash != sourceHashAfter) {
+          throw const VideoImportException(
+            code: VideoImportErrorCode.copyIntegrityFailed,
+            phase: VideoImportPhase.copy,
+            internalReason: VideoImportInternalReasonV1.destinationHashMismatch,
+            primaryRecoveryAction:
+                VideoImportRecoveryAction.checkSourceAndReselect,
+          );
+        }
+        phase = VideoImportPhase.destinationPlayback;
+        onProgress?.call(
+          const VideoImportProgress(
+            phase: VideoImportPhase.destinationPlayback,
+          ),
+        );
+        late VideoPlaybackEvidence playbackEvidence;
+        try {
+          playbackEvidence = await _playbackVerifier.verify(
+            destination,
+            cancellationToken: cancellationToken,
+          );
+        } on VideoImportException {
+          rethrow;
+        } on Object {
+          throw const VideoImportException(
+            code: VideoImportErrorCode.destinationPlaybackFailed,
+            phase: VideoImportPhase.destinationPlayback,
+            internalReason: VideoImportInternalReasonV1.destinationPlayerFailed,
+            primaryRecoveryAction: VideoImportRecoveryAction.retry,
+          );
+        }
         _importsAwaitingDatabaseCommit.add(
           await destination.resolveSymbolicLinks(),
         );
@@ -289,16 +404,34 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
             surgeryRecordId,
             p.basename(destination.path),
           ),
-          originalFileName: originalFileName,
+          originalFileName: candidate.displayName,
           sizeBytes: copiedSize,
-          sha256: copiedHash,
+          sha256: destinationHash,
+          playbackEvidence: playbackEvidence,
         );
-      } catch (_) {
-        await _deleteKnownStagedFile(temporary);
-        if (destinationCreated) {
-          await _deleteKnownStagedFile(destination);
+      } on Object catch (error, stackTrace) {
+        try {
+          await _deleteKnownStagedFile(temporary);
+        } on Object {
+          cleanupPending = true;
         }
-        rethrow;
+        if (destinationCreated) {
+          try {
+            await _deleteKnownStagedFile(destination);
+          } on Object {
+            cleanupPending = true;
+          }
+        }
+        final mapped = _mapImportError(error, phase);
+        Error.throwWithStackTrace(
+          cleanupPending
+              ? VideoImportFailure(
+                  error: mapped,
+                  maintenanceOutcome: VideoMaintenanceOutcome.pending,
+                )
+              : mapped,
+          stackTrace,
+        );
       }
     });
   }
@@ -333,6 +466,7 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
   @override
   Future<File?> resolveVideo(String relativePath) {
     return _storageMutex.synchronized(() async {
+      await _requireProtectedData(VideoImportPhase.sourceAccess);
       final segments = relativePath.split('/');
       if (segments.length != 3) {
         throw const FileSystemException('不正な管理動画参照です。');
@@ -355,6 +489,7 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
         return null;
       }
       await _assertSafeRecordDirectory(videosRoot, recordId, recordDirectory);
+      await _protectDirectory(recordDirectory.path);
 
       final file = File(p.join(recordDirectory.path, segments[2]));
       final fileType = await FileSystemEntity.type(
@@ -369,6 +504,7 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
         recordId: recordId,
         file: file,
       );
+      await _protectFile(file.path, excludeFromBackup: true);
       return file;
     });
   }
@@ -376,6 +512,7 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
   @override
   Future<void> deleteVideo(String relativePath) {
     return _storageMutex.synchronized(() async {
+      await _requireProtectedData(VideoImportPhase.cleanup);
       final segments = relativePath.split('/');
       if (segments.length != 3 ||
           classifyVideoPath(
@@ -406,6 +543,7 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
   @override
   Future<void> deleteVideosForRecord(String surgeryRecordId) {
     return _storageMutex.synchronized(() async {
+      await _requireProtectedData(VideoImportPhase.cleanup);
       if (!isValidRecordId(surgeryRecordId)) {
         throw ArgumentError.value(surgeryRecordId, 'surgeryRecordId');
       }
@@ -432,6 +570,15 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
     Future<RecordVideoReferenceSnapshot> Function() loadReferences,
   ) {
     return _storageMutex.synchronized(() async {
+      try {
+        await _requireProtectedData(VideoImportPhase.cleanup);
+      } on Object {
+        return const VideoStorageMaintenanceReport(
+          snapshotComplete: false,
+          deletedPaths: <String>[],
+          backupExclusionFailures: <String>[],
+        );
+      }
       late RecordVideoReferenceSnapshot firstRead;
       try {
         firstRead = await loadReferences();
@@ -476,7 +623,7 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
 
       final backupFailures = <String>[];
       try {
-        await _backupExclusionRepository.excludeFromBackup(videosRoot.path);
+        await _excludeFromBackup(videosRoot.path);
       } on Object {
         backupFailures.add(videosRoot.path);
       }
@@ -499,7 +646,8 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
             recordId: reference.recordId,
             file: file,
           );
-          await _backupExclusionRepository.excludeFromBackup(file.path);
+          await _protectFile(file.path, excludeFromBackup: true);
+          await _excludeFromBackup(file.path);
         } on Object {
           backupFailures.add(relativePath);
         }
@@ -549,7 +697,9 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
         final recordId = p.basename(recordEntity.path);
         try {
           await _assertSafeRecordDirectory(videosRoot, recordId, recordEntity);
+          await _protectDirectory(recordEntity.path);
         } on Object {
+          cleanupFailures.add(recordEntity.path);
           continue;
         }
         await for (final entity in recordEntity.list(followLinks: false)) {
@@ -561,6 +711,13 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
             followLinks: false,
           );
           if (type != FileSystemEntityType.file) {
+            continue;
+          }
+          try {
+            await _protectFile(entity.path, excludeFromBackup: true);
+            await _excludeFromBackup(entity.path);
+          } on Object {
+            cleanupFailures.add(entity.path);
             continue;
           }
           final canonical = await entity.resolveSymbolicLinks();
@@ -718,7 +875,9 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
         p.basename(canonicalRoot) != 'videos') {
       throw const FileSystemException('動画保存ルートが管理領域外です。');
     }
-    return Directory(canonicalRoot);
+    final safeRoot = Directory(canonicalRoot);
+    await _protectDirectory(safeRoot.path);
+    return safeRoot;
   }
 
   Future<Directory?> _safeExistingVideosRoot() async {
@@ -737,7 +896,9 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
         p.basename(canonicalRoot) != 'videos') {
       throw const FileSystemException('動画保存ルートが管理領域外です。');
     }
-    return Directory(canonicalRoot);
+    final safeRoot = Directory(canonicalRoot);
+    await _protectDirectory(safeRoot.path);
+    return safeRoot;
   }
 
   Future<Directory> _ensureSafeRecordDirectory(
@@ -755,6 +916,7 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
       throw const FileSystemException('症例の動画保存先が安全ではありません。');
     }
     await _assertSafeRecordDirectory(videosRoot, recordId, directory);
+    await _protectDirectory(directory.path);
     return directory;
   }
 
@@ -838,21 +1000,341 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
     }
   }
 
-  Future<void> _copyFileExclusively(File source, File destination) async {
-    await destination.create(exclusive: true);
+  Future<String> _hashFile(
+    File file, {
+    required VideoImportPhase phase,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    try {
+      return await sha256OfFile(
+        file,
+        isCancelled: () => cancellationToken?.isCancelled ?? false,
+        cancellationSignal: cancellationToken?.whenCancelled,
+        onProgress: (bytesRead, totalBytes) {
+          cancellationToken?.throwIfCancelled(phase);
+          onProgress?.call(
+            VideoImportProgress(
+              phase: phase,
+              fraction: totalBytes <= 0
+                  ? null
+                  : (bytesRead / totalBytes).clamp(0, 1).toDouble(),
+            ),
+          );
+        },
+      );
+    } on VideoImportException {
+      rethrow;
+    } on FileSystemException {
+      cancellationToken?.throwIfCancelled(phase);
+      rethrow;
+    }
+  }
+
+  Future<void> _requireProtectedData(VideoImportPhase phase) async {
+    final repository = _protectedDataRepository;
+    if (repository == null) {
+      return;
+    }
+    try {
+      await repository.requireAvailable();
+    } on ProtectedDataUnavailableException {
+      throw VideoImportException(
+        code: VideoImportErrorCode.protectedDataUnavailable,
+        phase: phase,
+        internalReason: VideoImportInternalReasonV1.protectedDataUnavailable,
+        primaryRecoveryAction: VideoImportRecoveryAction.unlockAndRetry,
+      );
+    } on Object {
+      throw VideoImportException(
+        code: VideoImportErrorCode.fileProtectionFailed,
+        phase: phase,
+        internalReason: VideoImportInternalReasonV1.protectionAttributeMismatch,
+        primaryRecoveryAction: VideoImportRecoveryAction.retry,
+      );
+    }
+  }
+
+  Future<void> _protectDirectory(String path) async {
+    final repository = _fileProtectionRepository;
+    if (repository == null) {
+      return;
+    }
+    try {
+      await repository.protectDirectoryAndVerify(path);
+    } on ProtectedDataUnavailableException {
+      throw const VideoImportException(
+        code: VideoImportErrorCode.protectedDataUnavailable,
+        phase: VideoImportPhase.destinationProtection,
+        internalReason: VideoImportInternalReasonV1.protectedDataUnavailable,
+        primaryRecoveryAction: VideoImportRecoveryAction.unlockAndRetry,
+      );
+    } on BackupExclusionException {
+      throw _backupExclusionFailed();
+    } on Object {
+      throw const VideoImportException(
+        code: VideoImportErrorCode.fileProtectionFailed,
+        phase: VideoImportPhase.destinationProtection,
+        internalReason: VideoImportInternalReasonV1.protectionAttributeMismatch,
+        primaryRecoveryAction: VideoImportRecoveryAction.retry,
+      );
+    }
+  }
+
+  Future<void> _protectFile(
+    String path, {
+    required bool excludeFromBackup,
+  }) async {
+    final repository = _fileProtectionRepository;
+    if (repository == null) {
+      return;
+    }
+    try {
+      await repository.protectFileAndVerify(
+        path,
+        excludeFromBackup: excludeFromBackup,
+      );
+    } on ProtectedDataUnavailableException {
+      throw const VideoImportException(
+        code: VideoImportErrorCode.protectedDataUnavailable,
+        phase: VideoImportPhase.destinationProtection,
+        internalReason: VideoImportInternalReasonV1.protectedDataUnavailable,
+        primaryRecoveryAction: VideoImportRecoveryAction.unlockAndRetry,
+      );
+    } on BackupExclusionException {
+      throw _backupExclusionFailed();
+    } on Object {
+      throw const VideoImportException(
+        code: VideoImportErrorCode.fileProtectionFailed,
+        phase: VideoImportPhase.destinationProtection,
+        internalReason: VideoImportInternalReasonV1.protectionAttributeMismatch,
+        primaryRecoveryAction: VideoImportRecoveryAction.retry,
+      );
+    }
+  }
+
+  Future<void> _excludeFromBackup(String path) async {
+    try {
+      await _backupExclusionRepository.excludeFromBackup(path);
+    } on VideoImportException {
+      rethrow;
+    } on Object {
+      throw _backupExclusionFailed();
+    }
+  }
+
+  Future<void> _copyFileExclusively(
+    File source,
+    File destination, {
+    required int sourceSize,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    try {
+      await destination.create(exclusive: true);
+    } on FileSystemException catch (error) {
+      throw _mapDestinationWriteError(error);
+    }
     if (await FileSystemEntity.type(destination.path, followLinks: false) !=
         FileSystemEntityType.file) {
-      throw const FileSystemException('動画の一時ファイルを安全に作成できません。');
+      throw const VideoImportException(
+        code: VideoImportErrorCode.destinationWriteFailed,
+        phase: VideoImportPhase.copy,
+        internalReason: VideoImportInternalReasonV1.destinationWriteIo,
+        primaryRecoveryAction: VideoImportRecoveryAction.retry,
+      );
     }
-    final output = await destination.open(mode: FileMode.writeOnly);
+    await _protectFile(destination.path, excludeFromBackup: true);
+    await _excludeFromBackup(destination.path);
+    late RandomAccessFile output;
     try {
-      await for (final chunk in source.openRead()) {
-        await output.writeFrom(chunk);
-      }
-      await output.flush();
-    } finally {
-      await output.close();
+      output = await destination.open(mode: FileMode.writeOnly);
+    } on FileSystemException catch (error) {
+      throw _mapDestinationWriteError(error);
     }
+    var bytesCopied = 0;
+    var reachedEnd = false;
+    final input = StreamIterator<List<int>>(_openSourceRead(source));
+    try {
+      while (true) {
+        cancellationToken?.throwIfCancelled(VideoImportPhase.copy);
+        var cancellationWon = false;
+        final hasNext = cancellationToken == null
+            ? await input.moveNext()
+            : await Future.any<bool>(<Future<bool>>[
+                input.moveNext(),
+                cancellationToken.whenCancelled.then((_) {
+                  cancellationWon = true;
+                  return false;
+                }),
+              ]);
+        if (cancellationWon) {
+          cancellationToken!.throwIfCancelled(VideoImportPhase.copy);
+        }
+        if (!hasNext) {
+          reachedEnd = true;
+          break;
+        }
+        cancellationToken?.throwIfCancelled(VideoImportPhase.copy);
+        final chunk = input.current;
+        try {
+          await output.writeFrom(chunk);
+        } on FileSystemException catch (error) {
+          throw _mapDestinationWriteError(error);
+        }
+        bytesCopied += chunk.length;
+        onProgress?.call(
+          VideoImportProgress(
+            phase: VideoImportPhase.copy,
+            fraction: sourceSize <= 0
+                ? null
+                : (bytesCopied / sourceSize).clamp(0, 1).toDouble(),
+          ),
+        );
+      }
+      try {
+        await output.flush();
+      } on FileSystemException catch (error) {
+        throw _mapDestinationWriteError(error);
+      }
+    } on VideoImportException {
+      rethrow;
+    } on FileSystemException {
+      cancellationToken?.throwIfCancelled(VideoImportPhase.copy);
+      throw const VideoImportException(
+        code: VideoImportErrorCode.sourceReadFailed,
+        phase: VideoImportPhase.copy,
+        internalReason: VideoImportInternalReasonV1.sourceReadIo,
+        primaryRecoveryAction: VideoImportRecoveryAction.checkSourceAndReselect,
+      );
+    } finally {
+      try {
+        if (!reachedEnd) {
+          await input.cancel().timeout(
+            const Duration(seconds: 1),
+            onTimeout: () {},
+          );
+        }
+      } finally {
+        await output.close();
+      }
+    }
+  }
+
+  VideoImportException _mapImportError(Object error, VideoImportPhase phase) {
+    if (error is VideoImportException) {
+      return error;
+    }
+    if (error is FileSystemException) {
+      final errorCode = error.osError?.errorCode;
+      if (_isStorageCapacityError(errorCode)) {
+        return VideoImportException(
+          code: VideoImportErrorCode.insufficientStorage,
+          phase: phase,
+          internalReason: errorCode == 28
+              ? VideoImportInternalReasonV1.errnoEnospc
+              : VideoImportInternalReasonV1.errnoEdquot,
+          primaryRecoveryAction: VideoImportRecoveryAction.freeStorageAndRetry,
+        );
+      }
+      if (phase == VideoImportPhase.sourceHash) {
+        return const VideoImportException(
+          code: VideoImportErrorCode.sourceReadFailed,
+          phase: VideoImportPhase.sourceHash,
+          internalReason: VideoImportInternalReasonV1.sourceReadIo,
+          primaryRecoveryAction:
+              VideoImportRecoveryAction.checkSourceAndReselect,
+        );
+      }
+      return VideoImportException(
+        code: VideoImportErrorCode.destinationWriteFailed,
+        phase: phase,
+        internalReason: VideoImportInternalReasonV1.destinationWriteIo,
+        primaryRecoveryAction: VideoImportRecoveryAction.retry,
+      );
+    }
+    return VideoImportException(
+      code: VideoImportErrorCode.unknown,
+      phase: phase,
+      internalReason: VideoImportInternalReasonV1.unexpected,
+      primaryRecoveryAction: VideoImportRecoveryAction.retry,
+    );
+  }
+
+  VideoImportException _mapDestinationWriteError(FileSystemException error) {
+    final errorCode = error.osError?.errorCode;
+    if (_isStorageCapacityError(errorCode)) {
+      return VideoImportException(
+        code: VideoImportErrorCode.insufficientStorage,
+        phase: VideoImportPhase.copy,
+        internalReason: errorCode == 28
+            ? VideoImportInternalReasonV1.errnoEnospc
+            : VideoImportInternalReasonV1.errnoEdquot,
+        primaryRecoveryAction: VideoImportRecoveryAction.freeStorageAndRetry,
+      );
+    }
+    return const VideoImportException(
+      code: VideoImportErrorCode.destinationWriteFailed,
+      phase: VideoImportPhase.copy,
+      internalReason: VideoImportInternalReasonV1.destinationWriteIo,
+      primaryRecoveryAction: VideoImportRecoveryAction.retry,
+    );
+  }
+
+  VideoImportException _mapRenameError(FileSystemException error) {
+    final errorCode = error.osError?.errorCode;
+    if (_isStorageCapacityError(errorCode)) {
+      return VideoImportException(
+        code: VideoImportErrorCode.insufficientStorage,
+        phase: VideoImportPhase.copy,
+        internalReason: errorCode == 28
+            ? VideoImportInternalReasonV1.errnoEnospc
+            : VideoImportInternalReasonV1.errnoEdquot,
+        primaryRecoveryAction: VideoImportRecoveryAction.freeStorageAndRetry,
+      );
+    }
+    return _renameFailed();
+  }
+
+  VideoImportException _renameFailed() {
+    return const VideoImportException(
+      code: VideoImportErrorCode.destinationWriteFailed,
+      phase: VideoImportPhase.copy,
+      internalReason: VideoImportInternalReasonV1.renameFailed,
+      primaryRecoveryAction: VideoImportRecoveryAction.retry,
+    );
+  }
+
+  VideoImportException _copyIntegrityFailed() {
+    return const VideoImportException(
+      code: VideoImportErrorCode.copyIntegrityFailed,
+      phase: VideoImportPhase.copy,
+      internalReason: VideoImportInternalReasonV1.destinationHashMismatch,
+      primaryRecoveryAction: VideoImportRecoveryAction.checkSourceAndReselect,
+    );
+  }
+
+  VideoImportException _backupExclusionFailed() {
+    return const VideoImportException(
+      code: VideoImportErrorCode.backupExclusionFailed,
+      phase: VideoImportPhase.destinationProtection,
+      internalReason: VideoImportInternalReasonV1.backupAttributeMismatch,
+      primaryRecoveryAction: VideoImportRecoveryAction.retry,
+    );
+  }
+
+  bool _isStorageCapacityError(int? errorCode) {
+    // ENOSPC is 28 on Darwin/Linux. EDQUOT is 69 on Darwin and 122 on Linux.
+    return errorCode == 28 || errorCode == 69 || errorCode == 122;
+  }
+
+  VideoImportException _sourceChanged(VideoImportInternalReasonV1 reason) {
+    return VideoImportException(
+      code: VideoImportErrorCode.sourceChanged,
+      phase: VideoImportPhase.sourceHash,
+      internalReason: reason,
+      primaryRecoveryAction: VideoImportRecoveryAction.checkSourceAndReselect,
+    );
   }
 
   Future<Directory> _supportDirectory() async {
@@ -860,6 +1342,13 @@ class LocalVideoStorageRepository implements ManagedVideoStorageRepository {
   }
 
   static Future<void> _defaultDeleteFile(File file) => file.delete();
+
+  static Future<File> _defaultRenameFile(File file, String newPath) {
+    return file.rename(newPath);
+  }
+
+  static Stream<List<int>> _defaultOpenSourceRead(File source) =>
+      source.openRead();
 }
 
 class _AsyncMutex {

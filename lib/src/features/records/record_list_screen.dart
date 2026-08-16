@@ -4,18 +4,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/providers.dart';
 import '../../data/record_video_service.dart';
 import '../../data/surgery_repository.dart';
-import '../../data/surgery_video_picker.dart';
+import '../../data/video_import_models.dart';
 import '../../domain/duration_formatters.dart';
 import '../../domain/surgery_models.dart';
 import '../../theme/app_tokens.dart';
-import '../../widgets/app_snack_bar.dart';
 import '../../widgets/app_states.dart';
 import '../analysis/analysis_screen.dart';
+import '../video_import/video_import_screen_flow.dart';
+import '../video_import/video_import_ui_flow.dart';
 import 'new_record_screen.dart';
 import 'record_detail_screen.dart';
 import 'record_month_group.dart';
 
-typedef NewRecordScreenBuilder = Widget Function(SelectedSurgeryVideo video);
+typedef NewRecordScreenBuilder =
+    Widget Function(VerifiedVideoCandidate candidate);
 
 class RecordListScreen extends ConsumerStatefulWidget {
   const RecordListScreen({this.newRecordScreenBuilder, super.key});
@@ -28,6 +30,24 @@ class RecordListScreen extends ConsumerStatefulWidget {
 
 class _RecordListScreenState extends ConsumerState<RecordListScreen> {
   List<SurgeryRecord>? _lastSuccessfulItems;
+  late final VideoImportUiFlow _videoImportFlow;
+  bool _isSelectingVideo = false;
+  VideoImportException? _lastVideoImportError;
+
+  @override
+  void initState() {
+    super.initState();
+    _videoImportFlow = VideoImportUiFlow(
+      picker: ref.read(surgeryVideoPickerProvider),
+      preflight: ref.read(videoImportPreflightProvider),
+    );
+  }
+
+  @override
+  void dispose() {
+    _videoImportFlow.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -37,11 +57,27 @@ class _RecordListScreenState extends ConsumerState<RecordListScreen> {
       _lastSuccessfulItems = latestItems;
     }
     final retainedItems = _lastSuccessfulItems;
+    final recordsBody = retainedItems == null
+        ? records.when(
+            data: (_) => const SizedBox.shrink(),
+            error: (_, _) => AppErrorState(
+              message: '症例一覧を読み込めませんでした。',
+              onRetry: () => ref.invalidate(surgeryRecordsProvider),
+            ),
+            loading: () => const Center(child: CircularProgressIndicator()),
+          )
+        : _RecordList(
+            items: retainedItems,
+            recordsLoadFailed: records.hasError,
+            onRetryRecords: () => ref.invalidate(surgeryRecordsProvider),
+            onCreateRecord: _isSelectingVideo ? null : _startNewRecord,
+          );
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('白内障執刀ノート'),
         actions: [
+          const VideoRegistrationHelpButton(),
           IconButton(
             tooltip: '分析',
             onPressed: () {
@@ -53,54 +89,63 @@ class _RecordListScreenState extends ConsumerState<RecordListScreen> {
           ),
         ],
       ),
-      body: retainedItems == null
-          ? records.when(
-              data: (_) => const SizedBox.shrink(),
-              error: (_, _) => AppErrorState(
-                message: '症例一覧を読み込めませんでした。',
-                onRetry: () => ref.invalidate(surgeryRecordsProvider),
+      body: Column(
+        children: [
+          if (_lastVideoImportError case final error?)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: VideoImportPersistentErrorNotice(
+                error: error,
+                onReselect: _isSelectingVideo ? null : _startNewRecord,
               ),
-              loading: () => const Center(child: CircularProgressIndicator()),
-            )
-          : _RecordList(
-              items: retainedItems,
-              recordsLoadFailed: records.hasError,
-              onRetryRecords: () => ref.invalidate(surgeryRecordsProvider),
-              onCreateRecord: () => _startNewRecord(context),
             ),
+          Expanded(child: recordsBody),
+        ],
+      ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _startNewRecord(context),
+        onPressed: _isSelectingVideo ? null : _startNewRecord,
         icon: const Icon(Icons.add),
         label: const Text('新規症例'),
       ),
     );
   }
 
-  Future<void> _startNewRecord(BuildContext context) async {
-    final SelectedSurgeryVideo? selectedVideo;
+  Future<void> _startNewRecord() async {
+    if (_isSelectingVideo || _videoImportFlow.isActive) {
+      return;
+    }
+    setState(() => _isSelectingVideo = true);
+    VerifiedVideoCandidate? candidate;
     try {
-      selectedVideo = await ref.read(surgeryVideoPickerProvider).pickVideo();
-    } catch (_) {
-      if (context.mounted) {
-        showAppSnackBar(
-          context,
-          message: '動画を選択できませんでした。写真へのアクセス権限を確認して、もう一度お試しください。',
-          tone: AppFeedbackTone.failure,
-        );
+      candidate = await selectVerifiedVideoForScreen(
+        context: context,
+        flow: _videoImportFlow,
+        entryPoint: VideoImportEntryPoint.create,
+        onPersistentFailure: _rememberVideoImportFailure,
+        dataInvariantSuffix: VideoImportDataInvariantSuffix.createNotRegistered,
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isSelectingVideo = false);
       }
+    }
+    if (!mounted || candidate == null) {
       return;
     }
-    if (!context.mounted || selectedVideo == null) {
-      return;
-    }
-    final video = selectedVideo;
+    setState(() => _lastVideoImportError = null);
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
-            widget.newRecordScreenBuilder?.call(video) ??
-            NewRecordScreen(initialVideo: video),
+            widget.newRecordScreenBuilder?.call(candidate!) ??
+            NewRecordScreen(initialVideo: candidate!),
       ),
     );
+  }
+
+  void _rememberVideoImportFailure(VideoImportException error) {
+    if (mounted) {
+      setState(() => _lastVideoImportError = error);
+    }
   }
 }
 
@@ -115,7 +160,7 @@ class _RecordList extends ConsumerStatefulWidget {
   final List<SurgeryRecord> items;
   final bool recordsLoadFailed;
   final VoidCallback onRetryRecords;
-  final VoidCallback onCreateRecord;
+  final VoidCallback? onCreateRecord;
 
   @override
   ConsumerState<_RecordList> createState() => _RecordListState();
@@ -209,7 +254,7 @@ class _RecordListState extends ConsumerState<_RecordList> {
               icon: Icons.note_add_outlined,
               title: 'まだ症例がありません',
               message: '手術動画を選び、工程時間と振り返りを記録しましょう。',
-              actionLabel: '最初の症例を登録',
+              actionLabel: widget.onCreateRecord == null ? null : '最初の症例を登録',
               onAction: widget.onCreateRecord,
             ),
           )

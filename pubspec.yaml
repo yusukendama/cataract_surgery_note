@@ -1,7 +1,7 @@
 name: cataract_surgery_note
 description: "白内障手術の工程時間、動画レビュー、振り返り、分析を端末内に記録するアプリ。"
 publish_to: 'none'
-version: 1.0.0+18
+version: 1.1.0+19
 
 environment:
   sdk: ^3.10.1

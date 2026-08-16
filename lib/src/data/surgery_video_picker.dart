@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 
+import 'video_import_models.dart';
+
 class SelectedSurgeryVideo {
   const SelectedSurgeryVideo({required this.path, required this.displayName});
 
@@ -20,7 +22,7 @@ class FilePickerSurgeryVideoPicker implements SurgeryVideoPicker {
   Future<SelectedSurgeryVideo?> pickVideo() async {
     final result = await FilePicker.pickFiles(
       type: FileType.custom,
-      allowedExtensions: const ['mp4', 'mov', 'm4v'],
+      allowedExtensions: selectableVideoExtensions,
     );
     if (result == null) {
       return null;

@@ -5,9 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../domain/surgery_models.dart';
 import '../domain/surgery_trend.dart';
 import 'app_database.dart';
+import 'protected_storage.dart';
 import 'record_video_service.dart';
 import 'surgery_repository.dart';
 import 'surgery_video_picker.dart';
+import 'video_import_preflight.dart';
 import 'video_storage_repository.dart';
 
 final appDatabaseProvider = Provider<AppDatabase>((ref) {
@@ -20,8 +22,24 @@ final surgeryRepositoryProvider = Provider<SurgeryRepository>((ref) {
   return SurgeryRepository(ref.watch(appDatabaseProvider));
 });
 
+final protectedStorageRepositoryProvider = Provider<ProtectedStorageRepository>(
+  (ref) {
+    return MethodChannelProtectedStorageRepository();
+  },
+);
+
+final videoImportPreflightProvider = Provider<VideoImportPreflight>((ref) {
+  return DefaultVideoImportPreflight(
+    protectedDataRepository: ref.watch(protectedStorageRepositoryProvider),
+  );
+});
+
 final videoStorageRepositoryProvider = Provider<VideoStorageRepository>((ref) {
-  return LocalVideoStorageRepository();
+  final protectedStorage = ref.watch(protectedStorageRepositoryProvider);
+  return LocalVideoStorageRepository(
+    protectedDataRepository: protectedStorage,
+    fileProtectionRepository: protectedStorage,
+  );
 });
 
 final surgeryVideoPickerProvider = Provider<SurgeryVideoPicker>((ref) {
@@ -32,6 +50,7 @@ final recordVideoServiceProvider = Provider<RecordVideoService>((ref) {
   return RecordVideoService(
     surgeryRepository: ref.watch(surgeryRepositoryProvider),
     videoStorageRepository: ref.watch(videoStorageRepositoryProvider),
+    videoImportPreflight: ref.watch(videoImportPreflightProvider),
   );
 });
 
@@ -130,3 +149,10 @@ final stepReviewsProvider =
     FutureProvider.family<List<SurgicalStepReview>, String>((ref, recordId) {
       return ref.watch(surgeryRepositoryProvider).ensureStepReviews(recordId);
     });
+
+final recordHasRecordedTimingsProvider = FutureProvider.family<bool, String>((
+  ref,
+  recordId,
+) {
+  return ref.watch(surgeryRepositoryProvider).hasRecordedTimings(recordId);
+});

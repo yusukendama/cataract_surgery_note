@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:cataract_surgery_note/src/data/file_sha256.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:drift/drift.dart' show QueryRow, Variable;
@@ -10,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
 import 'fixtures/legacy_database_fixtures.dart';
+import 'support/video_import_test_support.dart';
 
 class _RecordingBackupExclusion implements BackupExclusionRepository {
   _RecordingBackupExclusion({this.failPathSuffixOnce});
@@ -34,7 +36,12 @@ class _NoopPlaybackVerifier implements VideoPlaybackVerifier {
   const _NoopPlaybackVerifier();
 
   @override
-  Future<void> verify(File file) async {}
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) async {
+    return testVideoPlaybackEvidence;
+  }
 }
 
 void main() {
@@ -237,6 +244,7 @@ WHERE surgery_record_id = ? AND step = ?
     final service = RecordVideoService(
       surgeryRepository: repository,
       videoStorageRepository: storage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
     final states = <String, RecordVideoState>{};
     for (final record in list) {
@@ -597,6 +605,7 @@ WHERE surgery_record_id = ? AND step = ?
         backupExclusionRepository: failingBackup,
         playbackVerifier: const _NoopPlaybackVerifier(),
       ),
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
     final failedReport = await failingService.initialize();
     expect(failedReport!.backupExclusionVerified, isFalse);
@@ -616,6 +625,7 @@ WHERE surgery_record_id = ? AND step = ?
         backupExclusionRepository: retryBackup,
         playbackVerifier: const _NoopPlaybackVerifier(),
       ),
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
     final retryReport = await retryService.initialize();
     expect(

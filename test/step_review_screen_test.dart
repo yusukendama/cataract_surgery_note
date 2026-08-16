@@ -6,6 +6,8 @@ import 'package:cataract_surgery_note/src/data/providers.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
 import 'package:cataract_surgery_note/src/data/surgery_video_picker.dart';
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
+import 'package:cataract_surgery_note/src/data/video_import_preflight.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/features/review/step_review_screen.dart';
@@ -13,6 +15,8 @@ import 'package:cataract_surgery_note/src/theme/app_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'support/video_import_test_support.dart';
 
 void main() {
   Future<(AppDatabase, SurgeryRecord)> createRecord(WidgetTester tester) async {
@@ -35,6 +39,7 @@ void main() {
     SurgeryRepository? repository,
     VideoStorageRepository? videoStorageRepository,
     SurgeryVideoPicker? surgeryVideoPicker,
+    VideoImportPreflight? videoImportPreflight,
     RecordVideoService? recordVideoService,
     SuccessHapticFeedback? successHapticFeedback,
     MediaQueryData? mediaQueryData,
@@ -51,6 +56,8 @@ void main() {
           ),
         if (surgeryVideoPicker != null)
           surgeryVideoPickerProvider.overrideWithValue(surgeryVideoPicker),
+        if (videoImportPreflight != null)
+          videoImportPreflightProvider.overrideWithValue(videoImportPreflight),
         if (recordVideoService != null)
           recordVideoServiceProvider.overrideWithValue(recordVideoService),
       ],
@@ -305,11 +312,11 @@ void main() {
     expect(find.text('同じ動画を再登録'), findsNothing);
   });
 
-  testWidgets('videoPath nullで既存時刻がある初回添付は選択前後に同一動画を確認する', (tester) async {
+  testWidgets('工程時刻がある初回添付は未選択・キャンセル・同一動画保持を分ける', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
+    final repository = SurgeryRepository(database);
     await tester.runAsync(() async {
-      final repository = SurgeryRepository(database);
       final reviews = await repository.ensureStepReviews(record.id);
       final total = reviews.singleWhere(
         (review) => review.step == SurgicalStep.totalSurgeryTime,
@@ -325,19 +332,42 @@ void main() {
         displayName: 'review-selected.mp4',
       ),
     );
-    await pumpScreen(tester, database, record.id, surgeryVideoPicker: picker);
+    final preflight = const _ReadyVideoImportPreflight();
+    final storage = _RecordingReviewVideoStorage();
+    final service = _RecordingReviewVideoService(
+      repository,
+      storage,
+      preflight,
+    );
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      repository: repository,
+      videoStorageRepository: storage,
+      surgeryVideoPicker: picker,
+      videoImportPreflight: preflight,
+      recordVideoService: service,
+    );
 
     await tester.tap(find.text('動画を登録'));
     await tester.pumpAndSettle();
     expect(picker.calls, 0);
-    expect(find.text('記録済み位置に対応する動画を選択'), findsOneWidget);
-    expect(find.textContaining('同じ手術動画を選択'), findsOneWidget);
+    expect(find.text('工程位置が記録されています'), findsOneWidget);
+    expect(find.textContaining('同じ動画として工程位置を保持するか'), findsOneWidget);
 
     await tester.tap(find.text('動画を選ぶ'));
-    await tester.pumpAndSettle();
+    await _pumpAsyncWork(tester);
     expect(picker.calls, 1);
-    expect(find.text('記録済み位置を保持して動画を登録'), findsOneWidget);
-    expect(find.textContaining('同じ手術動画を選択したことを確認'), findsOneWidget);
+    expect(find.text('選択した動画について確認してください'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const Key('continue-with-timeline-identity')),
+          )
+          .onPressed,
+      isNull,
+    );
 
     await tester.tap(find.text('キャンセル'));
     await tester.pumpAndSettle();
@@ -354,7 +384,429 @@ void main() {
     expect(unchangedRecord!.videoPath, isNull);
     expect(unchangedTiming!.startMilliseconds, 100);
     expect(unchangedTiming!.endMilliseconds, 900);
+    expect(service.totalMutationCalls, 0);
+    expect(storage.importCalls, 0);
+
+    await tester.tap(find.text('動画を登録'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('動画を選ぶ'));
+    await _pumpAsyncWork(tester);
+    await _chooseTimelineIdentity(
+      tester,
+      const Key('timeline-identity-same-unchanged'),
+    );
+    expect(find.text('記録済み位置を保持して動画を登録'), findsOneWidget);
+    await tester.tap(find.text('この動画を登録'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    late SurgicalStepReview? preservedTiming;
+    await tester.runAsync(() async {
+      preservedTiming = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+    });
+    expect(picker.calls, 2);
+    expect(service.attachCalls, 1);
+    expect(service.attachWithTimingResetCalls, 0);
+    expect(storage.importCalls, 1);
+    expect(preservedTiming!.startMilliseconds, 100);
+    expect(preservedTiming!.endMilliseconds, 900);
   });
+
+  testWidgets('changed/unknownの初回添付は時刻を消去し未保存入力を保持する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    await tester.runAsync(() async {
+      final reviews = await repository.ensureStepReviews(record.id);
+      final total = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.totalSurgeryTime,
+      );
+      await repository.saveStepTiming(
+        review: total.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+        expectedVideoPath: null,
+      );
+    });
+    final preflight = const _ReadyVideoImportPreflight();
+    final storage = _RecordingReviewVideoStorage();
+    final service = _RecordingReviewVideoService(
+      repository,
+      storage,
+      preflight,
+    );
+    final picker = _CountingVideoPicker(
+      const SelectedSurgeryVideo(
+        path: '/tmp/changed-attach.mp4',
+        displayName: 'changed-attach.mp4',
+      ),
+    );
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      repository: repository,
+      videoStorageRepository: storage,
+      surgeryVideoPicker: picker,
+      videoImportPreflight: preflight,
+      recordVideoService: service,
+    );
+
+    await _openTab(tester, 'CCC');
+    await tester.ensureVisible(find.text('自己評価・反省点'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('自己評価・反省点'));
+    await tester.pumpAndSettle();
+    final rating = find.byType(DropdownButtonFormField<StepRating>);
+    await tester.ensureVisible(rating);
+    await tester.pumpAndSettle();
+    await tester.tap(rating);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(StepRating.good.label).last);
+    await tester.pumpAndSettle();
+    final reflection = find.widgetWithText(TextField, '反省点');
+    await tester.ensureVisible(reflection);
+    await tester.pumpAndSettle();
+    await tester.enterText(reflection, '未保存の反省点');
+    await _openCaseMemoTab(tester);
+    final memo = find.widgetWithText(TextField, '症例全体のメモ');
+    await tester.enterText(memo, '未保存の症例メモ');
+    await tester.pump();
+    expect(_saveButton(tester).onPressed, isNotNull);
+
+    await tester.tap(find.text('動画を登録'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('動画を選ぶ'));
+    await _pumpAsyncWork(tester);
+    await _chooseTimelineIdentity(
+      tester,
+      const Key('timeline-identity-changed-or-unknown'),
+    );
+    expect(find.text('工程位置を消去して動画を登録'), findsOneWidget);
+    expect(find.textContaining('未保存の入力内容は残ります'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '登録'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(service.attachCalls, 0);
+    expect(service.attachWithTimingResetCalls, 1);
+    expect(service.replaceCalls, 0);
+    expect(storage.importCalls, 1);
+    expect(tester.widget<TextField>(memo).controller!.text, '未保存の症例メモ');
+    expect(_saveButton(tester).onPressed, isNotNull);
+
+    await _openTab(tester, 'CCC');
+    if (find.widgetWithText(TextField, '反省点').evaluate().isEmpty) {
+      await tester.ensureVisible(find.text('自己評価・反省点'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('自己評価・反省点'));
+      await tester.pumpAndSettle();
+    }
+    expect(
+      tester
+          .widget<TextField>(find.widgetWithText(TextField, '反省点'))
+          .controller!
+          .text,
+      '未保存の反省点',
+    );
+    expect(
+      tester
+          .widget<DropdownButtonFormField<StepRating>>(
+            find.byType(DropdownButtonFormField<StepRating>),
+          )
+          .initialValue,
+      StepRating.good,
+    );
+
+    late SurgeryRecord? persistedRecord;
+    late SurgicalStepReview? persistedTotal;
+    late SurgicalStepReview? persistedCcc;
+    await tester.runAsync(() async {
+      persistedRecord = await repository.getRecord(record.id);
+      persistedTotal = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+      persistedCcc = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+    });
+    expect(persistedTotal!.startMilliseconds, isNull);
+    expect(persistedTotal!.endMilliseconds, isNull);
+    expect(persistedRecord!.caseMemo, isEmpty);
+    expect(persistedCcc!.rating, StepRating.unreviewed);
+    expect(persistedCcc!.reflection, isEmpty);
+  });
+
+  testWidgets('工程時刻がある同一動画再登録は未選択・キャンセル・same保持を分ける', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    final oldPath = 'videos/${record.id}/missing.mp4';
+    await tester.runAsync(() async {
+      final reviews = await repository.ensureStepReviews(record.id);
+      final total = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.totalSurgeryTime,
+      );
+      await repository.saveStepTiming(
+        review: total.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+        expectedVideoPath: null,
+      );
+      await repository.updateVideoReference(
+        surgeryRecordId: record.id,
+        videoPath: oldPath,
+        videoDisplayName: 'missing.mp4',
+      );
+    });
+    final preflight = const _ReadyVideoImportPreflight();
+    final storage = _RecordingReviewVideoStorage();
+    final service = _RecordingReviewVideoService(
+      repository,
+      storage,
+      preflight,
+    );
+    final picker = _CountingVideoPicker(
+      const SelectedSurgeryVideo(
+        path: '/tmp/same-relink.mp4',
+        displayName: 'same-relink.mp4',
+      ),
+    );
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      repository: repository,
+      videoStorageRepository: storage,
+      surgeryVideoPicker: picker,
+      videoImportPreflight: preflight,
+      recordVideoService: service,
+    );
+
+    await tester.tap(find.text('同じ動画を再登録'));
+    await _pumpAsyncWork(tester);
+    expect(find.text('選択した動画について確認してください'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.byKey(const Key('continue-with-timeline-identity')),
+          )
+          .onPressed,
+      isNull,
+    );
+    await tester.tap(find.text('キャンセル'));
+    await tester.pumpAndSettle();
+
+    late SurgeryRecord? unchangedRecord;
+    late SurgicalStepReview? unchangedTiming;
+    await tester.runAsync(() async {
+      unchangedRecord = await repository.getRecord(record.id);
+      unchangedTiming = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+    });
+    expect(unchangedRecord!.videoPath, oldPath);
+    expect(unchangedTiming!.startMilliseconds, 100);
+    expect(unchangedTiming!.endMilliseconds, 900);
+    expect(service.totalMutationCalls, 0);
+    expect(storage.importCalls, 0);
+
+    await tester.tap(find.text('同じ動画を再登録'));
+    await _pumpAsyncWork(tester);
+    await _chooseTimelineIdentity(
+      tester,
+      const Key('timeline-identity-same-unchanged'),
+    );
+    expect(find.text('同じ動画を再登録'), findsOneWidget);
+    await tester.tap(find.text('同じ動画として再登録'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    late SurgeryRecord? relinkedRecord;
+    late SurgicalStepReview? preservedTiming;
+    await tester.runAsync(() async {
+      relinkedRecord = await repository.getRecord(record.id);
+      preservedTiming = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+    });
+    expect(picker.calls, 2);
+    expect(service.relinkCalls, 1);
+    expect(service.replaceCalls, 0);
+    expect(storage.importCalls, 1);
+    expect(relinkedRecord!.videoPath, isNot(oldPath));
+    expect(preservedTiming!.startMilliseconds, 100);
+    expect(preservedTiming!.endMilliseconds, 900);
+  });
+
+  testWidgets('changed/unknownの同一動画再登録はreplaceとして工程時刻を消去する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    final oldPath = 'videos/${record.id}/missing.mp4';
+    await tester.runAsync(() async {
+      final reviews = await repository.ensureStepReviews(record.id);
+      final total = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.totalSurgeryTime,
+      );
+      await repository.saveStepTiming(
+        review: total.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+        expectedVideoPath: null,
+      );
+      await repository.updateVideoReference(
+        surgeryRecordId: record.id,
+        videoPath: oldPath,
+        videoDisplayName: 'missing.mp4',
+      );
+    });
+    final preflight = const _ReadyVideoImportPreflight();
+    final storage = _RecordingReviewVideoStorage();
+    final service = _RecordingReviewVideoService(
+      repository,
+      storage,
+      preflight,
+    );
+    final picker = _CountingVideoPicker(
+      const SelectedSurgeryVideo(
+        path: '/tmp/changed-relink.mp4',
+        displayName: 'changed-relink.mp4',
+      ),
+    );
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      repository: repository,
+      videoStorageRepository: storage,
+      surgeryVideoPicker: picker,
+      videoImportPreflight: preflight,
+      recordVideoService: service,
+    );
+
+    await tester.tap(find.text('同じ動画を再登録'));
+    await _pumpAsyncWork(tester);
+    await _chooseTimelineIdentity(
+      tester,
+      const Key('timeline-identity-changed-or-unknown'),
+    );
+    expect(find.text('工程位置を消去して動画を差し替え'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, '差し替え'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    late SurgeryRecord? replacedRecord;
+    late SurgicalStepReview? clearedTiming;
+    await tester.runAsync(() async {
+      replacedRecord = await repository.getRecord(record.id);
+      clearedTiming = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+    });
+    expect(service.relinkCalls, 0);
+    expect(service.replaceCalls, 1);
+    expect(storage.importCalls, 1);
+    expect(replacedRecord!.videoPath, isNot(oldPath));
+    expect(clearedTiming!.startMilliseconds, isNull);
+    expect(clearedTiming!.endMilliseconds, isNull);
+  });
+
+  for (final scenario
+      in <
+        ({
+          String name,
+          String fileName,
+          String expectedTitle,
+          VideoImportPreflight preflight,
+        })
+      >[
+        (
+          name: 'noncandidate',
+          fileName: 'selected.avi',
+          expectedTitle: 'この拡張子のファイルは登録対象外です',
+          preflight: const _NonCandidateVideoImportPreflight(),
+        ),
+        (
+          name: 'preflight失敗',
+          fileName: 'selected.mp4',
+          expectedTitle: 'この動画は使用できません',
+          preflight: const _FailingVideoImportPreflight(),
+        ),
+      ]) {
+    testWidgets('${scenario.name}でstorageとDBを変更しない', (tester) async {
+      final (database, record) = await createRecord(tester);
+      addTearDown(database.close);
+      final repository = SurgeryRepository(database);
+      await tester.runAsync(() async {
+        final reviews = await repository.ensureStepReviews(record.id);
+        final total = reviews.singleWhere(
+          (review) => review.step == SurgicalStep.totalSurgeryTime,
+        );
+        await repository.saveStepTiming(
+          review: total.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+          expectedVideoPath: null,
+        );
+      });
+      final storage = _RecordingReviewVideoStorage();
+      final service = _RecordingReviewVideoService(
+        repository,
+        storage,
+        scenario.preflight,
+      );
+      final picker = _CountingVideoPicker(
+        SelectedSurgeryVideo(
+          path: '/tmp/${scenario.fileName}',
+          displayName: scenario.fileName,
+        ),
+      );
+      await pumpScreen(
+        tester,
+        database,
+        record.id,
+        repository: repository,
+        videoStorageRepository: storage,
+        surgeryVideoPicker: picker,
+        videoImportPreflight: scenario.preflight,
+        recordVideoService: service,
+      );
+
+      await tester.tap(find.text('動画を登録'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('動画を選ぶ'));
+      await _pumpAsyncWork(tester);
+
+      expect(find.text(scenario.expectedTitle), findsOneWidget);
+      expect(storage.importCalls, 0);
+      expect(service.totalMutationCalls, 0);
+      late SurgeryRecord? unchangedRecord;
+      late SurgicalStepReview? unchangedTiming;
+      await tester.runAsync(() async {
+        unchangedRecord = await repository.getRecord(record.id);
+        unchangedTiming = await repository.getStepReview(
+          surgeryRecordId: record.id,
+          step: SurgicalStep.totalSurgeryTime,
+        );
+      });
+      expect(unchangedRecord!.videoPath, isNull);
+      expect(unchangedTiming!.startMilliseconds, 100);
+      expect(unchangedTiming!.endMilliseconds, 900);
+
+      await tester.tap(find.text('閉じる'));
+      await tester.pumpAndSettle();
+      expect(find.text('動画を登録'), findsOneWidget);
+    });
+  }
 
   testWidgets('動画commit後の後処理保留を成功ではなくwarning表示する', (tester) async {
     final (database, record) = await createRecord(tester);
@@ -373,6 +825,7 @@ void main() {
       record.id,
       repository: repository,
       surgeryVideoPicker: picker,
+      videoImportPreflight: const _ReadyVideoImportPreflight(),
       recordVideoService: service,
     );
 
@@ -417,6 +870,7 @@ void main() {
       await RecordVideoService(
         surgeryRepository: repository,
         videoStorageRepository: storage,
+        videoImportPreflight: const PassThroughVideoImportPreflight(),
       ).resolveVideoForRecord(legacyRecord);
     });
     addTearDown(() async {
@@ -1276,6 +1730,22 @@ PopScope<void> _popScope(WidgetTester tester) {
   );
 }
 
+Future<void> _pumpAsyncWork(WidgetTester tester) async {
+  await tester.runAsync(
+    () => Future<void>.delayed(const Duration(milliseconds: 50)),
+  );
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
+}
+
+Future<void> _chooseTimelineIdentity(WidgetTester tester, Key choiceKey) async {
+  await tester.tap(find.byKey(choiceKey));
+  await tester.pump();
+  await tester.tap(find.byKey(const Key('continue-with-timeline-identity')));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 300));
+}
+
 Future<void> _openCaseMemoTab(WidgetTester tester) async {
   await _openTab(tester, '症例メモ');
 }
@@ -1497,14 +1967,16 @@ class _MigratingVideoStorage implements VideoStorageRepository {
   @override
   Future<StoredVideo> importVideo({
     required String surgeryRecordId,
-    required String sourcePath,
-    required String originalFileName,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
   }) async {
     return StoredVideo(
       relativePath: relativePathFor(surgeryRecordId),
-      originalFileName: originalFileName,
+      originalFileName: candidate.displayName,
       sizeBytes: await videoFile.length(),
       sha256: 'test-sha256',
+      playbackEvidence: candidate.playbackEvidence,
     );
   }
 
@@ -1526,8 +1998,9 @@ class _ReviewStateVideoStorage implements VideoStorageRepository {
   @override
   Future<StoredVideo> importVideo({
     required String surgeryRecordId,
-    required String sourcePath,
-    required String originalFileName,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
   }) {
     throw UnimplementedError();
   }
@@ -1553,28 +2026,226 @@ class _PendingCleanupVideoService extends RecordVideoService {
     : super(
         surgeryRepository: repository,
         videoStorageRepository: const _ReviewStateVideoStorage(),
+        videoImportPreflight: const _ReadyVideoImportPreflight(),
       );
 
   final SurgeryRepository repository;
 
   @override
-  bool get hasPendingCleanup => true;
-
-  @override
-  Future<SurgeryRecord> attachVideoToRecord({
+  Future<VideoImportOutcome<SurgeryRecord>> attachVideoToRecord({
     required String surgeryRecordId,
-    required String sourcePath,
-    required String originalFileName,
+    required VerifiedVideoCandidate candidate,
+    VideoTimelineIdentityDeclaration timelineIdentityDeclaration =
+        VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
   }) async {
     final relativePath = 'videos/$surgeryRecordId/pending-cleanup.mp4';
     await repository.updateVideoReferenceIfCurrent(
       surgeryRecordId: surgeryRecordId,
       expectedVideoPath: null,
       videoPath: relativePath,
-      videoDisplayName: originalFileName,
+      videoDisplayName: candidate.displayName,
     );
-    return (await repository.getRecord(surgeryRecordId))!;
+    return VideoImportOutcome(
+      value: (await repository.getRecord(surgeryRecordId))!,
+      maintenanceOutcome: VideoMaintenanceOutcome.pending,
+    );
   }
+}
+
+class _RecordingReviewVideoStorage implements VideoStorageRepository {
+  int importCalls = 0;
+
+  @override
+  Future<StoredVideo> importVideo({
+    required String surgeryRecordId,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    importCalls++;
+    cancellationToken?.throwIfCancelled(VideoImportPhase.copy);
+    return StoredVideo(
+      relativePath:
+          'videos/$surgeryRecordId/review-import-$importCalls.${candidate.normalizedExtension}',
+      originalFileName: candidate.displayName,
+      sizeBytes: candidate.sourceSize,
+      sha256: candidate.sha256,
+      playbackEvidence: candidate.playbackEvidence,
+    );
+  }
+
+  @override
+  Future<File?> resolveVideo(String relativePath) async => null;
+
+  @override
+  Future<void> deleteVideo(String relativePath) async {}
+
+  @override
+  Future<void> deleteVideosForRecord(String surgeryRecordId) async {}
+}
+
+class _RecordingReviewVideoService extends RecordVideoService {
+  _RecordingReviewVideoService(
+    SurgeryRepository repository,
+    _RecordingReviewVideoStorage storage,
+    VideoImportPreflight preflight,
+  ) : super(
+        surgeryRepository: repository,
+        videoStorageRepository: storage,
+        videoImportPreflight: preflight,
+      );
+
+  int attachCalls = 0;
+  int attachWithTimingResetCalls = 0;
+  int relinkCalls = 0;
+  int replaceCalls = 0;
+
+  int get totalMutationCalls =>
+      attachCalls + attachWithTimingResetCalls + relinkCalls + replaceCalls;
+
+  @override
+  Future<VideoImportOutcome<SurgeryRecord>> attachVideoToRecord({
+    required String surgeryRecordId,
+    required VerifiedVideoCandidate candidate,
+    VideoTimelineIdentityDeclaration timelineIdentityDeclaration =
+        VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) {
+    attachCalls++;
+    return super.attachVideoToRecord(
+      surgeryRecordId: surgeryRecordId,
+      candidate: candidate,
+      timelineIdentityDeclaration: timelineIdentityDeclaration,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<VideoImportOutcome<SurgeryRecord>> attachWithTimingReset({
+    required String surgeryRecordId,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) {
+    attachWithTimingResetCalls++;
+    return super.attachWithTimingReset(
+      surgeryRecordId: surgeryRecordId,
+      candidate: candidate,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<VideoImportOutcome<SurgeryRecord>> relinkSameVideo({
+    required String surgeryRecordId,
+    required String expectedVideoPath,
+    required VerifiedVideoCandidate candidate,
+    VideoTimelineIdentityDeclaration timelineIdentityDeclaration =
+        VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) {
+    relinkCalls++;
+    return super.relinkSameVideo(
+      surgeryRecordId: surgeryRecordId,
+      expectedVideoPath: expectedVideoPath,
+      candidate: candidate,
+      timelineIdentityDeclaration: timelineIdentityDeclaration,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+  }
+
+  @override
+  Future<VideoImportOutcome<SurgeryRecord>> replaceVideoForRecord({
+    required String surgeryRecordId,
+    required String expectedVideoPath,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) {
+    replaceCalls++;
+    return super.replaceVideoForRecord(
+      surgeryRecordId: surgeryRecordId,
+      expectedVideoPath: expectedVideoPath,
+      candidate: candidate,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+  }
+}
+
+class _ReadyVideoImportPreflight extends PassThroughVideoImportPreflight {
+  const _ReadyVideoImportPreflight();
+
+  @override
+  Future<VideoSelectionPreflightResult> inspectSelection(
+    SelectedSurgeryVideo selection, {
+    required int selectionGeneration,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    return VideoSelectionReady(
+      _candidateForSelection(selection, selectionGeneration),
+    );
+  }
+}
+
+class _NonCandidateVideoImportPreflight
+    extends PassThroughVideoImportPreflight {
+  const _NonCandidateVideoImportPreflight();
+
+  @override
+  Future<VideoSelectionPreflightResult> inspectSelection(
+    SelectedSurgeryVideo selection, {
+    required int selectionGeneration,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    return const VideoSelectionNonCandidate(normalizedExtension: 'avi');
+  }
+}
+
+class _FailingVideoImportPreflight extends PassThroughVideoImportPreflight {
+  const _FailingVideoImportPreflight();
+
+  @override
+  Future<VideoSelectionPreflightResult> inspectSelection(
+    SelectedSurgeryVideo selection, {
+    required int selectionGeneration,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    throw const VideoImportException(
+      code: VideoImportErrorCode.unplayableMedia,
+      phase: VideoImportPhase.sourcePlayback,
+      internalReason: VideoImportInternalReasonV1.playerInitFailed,
+      primaryRecoveryAction: VideoImportRecoveryAction.dismiss,
+    );
+  }
+}
+
+VerifiedVideoCandidate _candidateForSelection(
+  SelectedSurgeryVideo selection,
+  int selectionGeneration,
+) {
+  return VerifiedVideoCandidate(
+    path: selection.path,
+    displayName: selection.displayName,
+    normalizedExtension: const VideoSelectionPolicy().normalizeExtension(
+      selection.displayName,
+    ),
+    selectionGeneration: selectionGeneration,
+    sourceSize: 2048,
+    sourceModifiedAt: DateTime.utc(2026, 8, 15),
+    sha256: 'synthetic-review-video-sha256',
+    playbackEvidence: testVideoPlaybackEvidence,
+  );
 }
 
 class _CountingVideoPicker implements SurgeryVideoPicker {

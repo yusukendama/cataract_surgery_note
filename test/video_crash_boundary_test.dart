@@ -3,11 +3,14 @@ import 'dart:io';
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+
+import 'support/video_import_test_support.dart';
 
 class _BackupExclusion implements BackupExclusionRepository {
   const _BackupExclusion();
@@ -20,7 +23,10 @@ class _PlaybackVerifier implements VideoPlaybackVerifier {
   const _PlaybackVerifier();
 
   @override
-  Future<void> verify(File file) async {}
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) async => testVideoPlaybackEvidence;
 }
 
 void main() {
@@ -59,8 +65,7 @@ void main() {
       final oldSource = await _source(temporaryDirectory, 'old.mp4', 17);
       final oldStored = await storage.importVideo(
         surgeryRecordId: record.id,
-        sourcePath: oldSource.path,
-        originalFileName: 'old.mp4',
+        candidate: await verifiedVideoCandidateForFile(oldSource),
       );
       await repository.updateVideoReferenceIfCurrent(
         surgeryRecordId: record.id,
@@ -98,8 +103,7 @@ void main() {
       final newSource = await _source(temporaryDirectory, 'new.mp4', 31);
       final newStored = await storage.importVideo(
         surgeryRecordId: record.id,
-        sourcePath: newSource.path,
-        originalFileName: 'new.mp4',
+        candidate: await verifiedVideoCandidateForFile(newSource),
       );
       await repository.replaceVideoReferenceAndClearTimings(
         surgeryRecordId: record.id,
@@ -128,6 +132,7 @@ void main() {
       final service = RecordVideoService(
         surgeryRepository: repository,
         videoStorageRepository: storage,
+        videoImportPreflight: const PassThroughVideoImportPreflight(),
       );
       final report = await service.initialize();
       expect(report!.snapshotComplete, isTrue);

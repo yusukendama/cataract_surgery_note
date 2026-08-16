@@ -5,11 +5,14 @@ import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/record_mutation_coordinator.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+
+import 'support/video_import_test_support.dart';
 
 class _BackupExclusion implements BackupExclusionRepository {
   const _BackupExclusion({this.shouldThrow = false});
@@ -28,7 +31,10 @@ class _PlaybackVerifier implements VideoPlaybackVerifier {
   const _PlaybackVerifier();
 
   @override
-  Future<void> verify(File file) async {}
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) async => testVideoPlaybackEvidence;
 }
 
 class _RecordingBackupExclusion implements BackupExclusionRepository {
@@ -59,6 +65,7 @@ void main() {
     service = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: videoStorageRepository,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
   });
 
@@ -71,6 +78,7 @@ void main() {
 
   test('新規症例のDB insert失敗時は症例と新規動画を残さない', () async {
     final source = await _source(temporaryDirectory, 'source.mp4');
+    final candidate = await verifiedVideoCandidateForFile(source);
     await database.customStatement('''
 CREATE TRIGGER fail_record_creation
 BEFORE INSERT ON surgery_records
@@ -81,8 +89,7 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
       service.createRecordWithVideo(
         surgeryDate: DateTime(2026, 8, 15),
         eyeSide: EyeSide.right,
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: candidate,
       ),
       throwsA(anything),
     );
@@ -106,16 +113,22 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
         supportDirectory,
         backup: const _BackupExclusion(shouldThrow: true),
       ),
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
 
     await expectLater(
       failingService.createRecordWithVideo(
         surgeryDate: DateTime(2026, 8, 15),
         eyeSide: EyeSide.left,
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.backupExclusionFailed,
+        ),
+      ),
     );
 
     expect(await surgeryRepository.watchableListSnapshot(), isEmpty);
@@ -183,6 +196,7 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
         supportDirectory,
         backup: const _BackupExclusion(shouldThrow: true),
       ),
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
 
     final resolved = await failingService.resolveVideoForRecord(withLegacyPath);
@@ -233,17 +247,239 @@ BEGIN SELECT RAISE(ABORT, 'injected migration DB failure'); END
     );
     final beforeRows = await _stepRows(database, record.id);
 
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
 
     expect(await _stepRows(database, record.id), beforeRows);
     expect(attached.reviewSchemaVersion, isNull);
     expect(attached.caseMemo, record.caseMemo);
     expect(attached.reviewStatus, record.reviewStatus);
     await _expectLegacyTimingAndSkipPreserved(surgeryRepository, record.id);
+  });
+
+  test('保存済み工程時刻を満たさない初回添付は型付きduration conflictにする', () async {
+    final source = await _source(temporaryDirectory, 'short.mp4');
+    final record = await _recordWithReview(surgeryRepository);
+    final review = await surgeryRepository.getStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    await surgeryRepository.saveStepTiming(
+      review: review!.copyWith(startMilliseconds: 100, endMilliseconds: 13000),
+      expectedVideoPath: null,
+    );
+    final beforeRows = await _stepRows(database, record.id);
+
+    await expectLater(
+      service.attachVideoToRecord(
+        surgeryRecordId: record.id,
+        candidate: await verifiedVideoCandidateForFile(source),
+      ),
+      throwsA(
+        isA<VideoImportException>()
+            .having(
+              (error) => error.code,
+              'code',
+              VideoImportErrorCode.durationConflict,
+            )
+            .having(
+              (error) => error.internalReason,
+              'internalReason',
+              VideoImportInternalReasonV1.durationBelowRecordedTiming,
+            )
+            .having(
+              (error) => error.primaryRecoveryAction,
+              'primaryRecoveryAction',
+              VideoImportRecoveryAction.resetTimingsAndAttach,
+            ),
+      ),
+    );
+
+    expect((await surgeryRepository.getRecord(record.id))!.videoPath, isNull);
+    expect(await _stepRows(database, record.id), beforeRows);
+    expect(await _managedFiles(supportDirectory), isEmpty);
+    expect(await source.exists(), isTrue);
+  });
+
+  test('工程時刻なし確認後に時刻が追加された場合はcommitせずstaged動画を補償削除する', () async {
+    final source = await _source(temporaryDirectory, 'race.mp4');
+    final record = await surgeryRepository.createRecord(
+      surgeryDate: DateTime(2026, 8, 16),
+      eyeSide: EyeSide.left,
+    );
+    final review = await surgeryRepository.ensureStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    final racingStorage = _AfterImportStorage(
+      videoStorageRepository,
+      afterImport: () => surgeryRepository.saveStepTiming(
+        review: review.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+        expectedVideoPath: null,
+      ),
+    );
+    final racingService = RecordVideoService(
+      surgeryRepository: surgeryRepository,
+      videoStorageRepository: racingStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
+    );
+
+    await expectLater(
+      racingService.attachVideoToRecord(
+        surgeryRecordId: record.id,
+        candidate: await verifiedVideoCandidateForFile(source),
+        timelineIdentityDeclaration:
+            VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+      ),
+      throwsA(
+        isA<VideoImportException>()
+            .having(
+              (error) => error.code,
+              'code',
+              VideoImportErrorCode.videoReferenceConflict,
+            )
+            .having(
+              (error) => error.internalReason,
+              'internalReason',
+              VideoImportInternalReasonV1.referenceCasMismatch,
+            ),
+      ),
+    );
+
+    final persistedRecord = await surgeryRepository.getRecord(record.id);
+    final persistedReview = await surgeryRepository.getStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    expect(persistedRecord!.videoPath, isNull);
+    expect(persistedReview!.startMilliseconds, 100);
+    expect(persistedReview.endMilliseconds, 900);
+    expect(await _managedFiles(supportDirectory), isEmpty);
+    expect(await source.exists(), isTrue);
+  });
+
+  test('record mutation lock待機中のcancelはDB更新前に停止してstaged動画を補償削除する', () async {
+    final source = await _source(temporaryDirectory, 'cancel-at-lock.mp4');
+    final record = await surgeryRepository.createRecord(
+      surgeryDate: DateTime(2026, 8, 16),
+      eyeSide: EyeSide.right,
+    );
+    final lockAcquired = Completer<void>();
+    final releaseLock = Completer<void>();
+    final heldMutation = surgeryRepository.runRecordMutation(
+      record.id,
+      () async {
+        lockAcquired.complete();
+        await releaseLock.future;
+      },
+    );
+    await lockAcquired.future;
+
+    final reachedCommit = Completer<void>();
+    final cancellationToken = VideoImportCancellationToken();
+    final operation = service.attachVideoToRecord(
+      surgeryRecordId: record.id,
+      candidate: await verifiedVideoCandidateForFile(source),
+      timelineIdentityDeclaration:
+          VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+      cancellationToken: cancellationToken,
+      onProgress: (progress) {
+        if (progress.phase == VideoImportPhase.databaseCommit &&
+            !reachedCommit.isCompleted) {
+          reachedCommit.complete();
+        }
+      },
+    );
+    await reachedCommit.future;
+    cancellationToken.cancel();
+    releaseLock.complete();
+
+    await expectLater(
+      operation,
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.userCanceled,
+        ),
+      ),
+    );
+    await heldMutation;
+
+    expect((await surgeryRepository.getRecord(record.id))!.videoPath, isNull);
+    expect(await _managedFiles(supportDirectory), isEmpty);
+    expect(await source.exists(), isTrue);
+  });
+
+  test('DB commit後の遅いcancelは論理成功を失敗へ反転しない', () async {
+    final source = await _source(temporaryDirectory, 'late-cancel.mp4');
+    final record = await surgeryRepository.createRecord(
+      surgeryDate: DateTime(2026, 8, 16),
+      eyeSide: EyeSide.left,
+    );
+    final cancellationToken = VideoImportCancellationToken();
+    final finishHookStorage = _AfterImportStorage(
+      videoStorageRepository,
+      onFinish: () async => cancellationToken.cancel(),
+    );
+    final finishHookService = RecordVideoService(
+      surgeryRepository: surgeryRepository,
+      videoStorageRepository: finishHookStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
+    );
+
+    final outcome = await finishHookService.attachVideoToRecord(
+      surgeryRecordId: record.id,
+      candidate: await verifiedVideoCandidateForFile(source),
+      timelineIdentityDeclaration:
+          VideoTimelineIdentityDeclaration.noRecordedTimingsObserved,
+      cancellationToken: cancellationToken,
+    );
+
+    expect(cancellationToken.isCancelled, isTrue);
+    expect(outcome.value.videoPath, isNotNull);
+    expect(
+      (await surgeryRepository.getRecord(record.id))!.videoPath,
+      outcome.value.videoPath,
+    );
+    expect(
+      await videoStorageRepository.resolveVideo(outcome.value.videoPath!),
+      isNotNull,
+    );
+  });
+
+  test('attachWithTimingResetは時刻だけをリセットして初回添付する', () async {
+    final source = await _source(temporaryDirectory, 'short.mp4');
+    final record = await _recordWithReview(surgeryRepository);
+    final review = await surgeryRepository.getStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    await surgeryRepository.saveStepTiming(
+      review: review!.copyWith(startMilliseconds: 100, endMilliseconds: 13000),
+      expectedVideoPath: null,
+    );
+
+    final outcome = await service.attachWithTimingReset(
+      surgeryRecordId: record.id,
+      candidate: await verifiedVideoCandidateForFile(source),
+    );
+    final attached = outcome.value;
+    final persistedReview = await surgeryRepository.getStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+
+    expect(outcome.maintenanceOutcome, VideoMaintenanceOutcome.complete);
+    expect(attached.videoPath, isNotNull);
+    expect(attached.caseMemo, record.caseMemo);
+    expect(attached.reviewStatus, record.reviewStatus);
+    expect(persistedReview!.startMilliseconds, isNull);
+    expect(persistedReview.endMilliseconds, isNull);
+    expect(persistedReview.rating, StepRating.good);
+    expect(persistedReview.reflection, '保持する反省点');
   });
 
   test('旧schema症例の同一動画再登録は時刻・skip・schema未移行を保持する', () async {
@@ -253,19 +489,17 @@ BEGIN SELECT RAISE(ABORT, 'injected migration DB failure'); END
       surgeryRepository,
       database,
     );
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
     final beforeRows = await _stepRows(database, record.id);
 
-    final relinked = await service.relinkSameVideo(
+    final relinked = (await service.relinkSameVideo(
       surgeryRecordId: record.id,
       expectedVideoPath: attached.videoPath!,
-      sourcePath: sameSource.path,
-      originalFileName: 'same.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(sameSource),
+    )).value;
 
     expect(relinked.videoPath, isNot(attached.videoPath));
     expect(await _stepRows(database, record.id), beforeRows);
@@ -279,11 +513,10 @@ BEGIN SELECT RAISE(ABORT, 'injected migration DB failure'); END
     final firstSource = await _source(temporaryDirectory, 'first.mp4');
     final sameSource = await _source(temporaryDirectory, 'same.mp4');
     final record = await _recordWithReview(surgeryRepository);
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
     final beforeRows = await _stepRows(database, record.id);
     final beforeFiles = await _managedFiles(supportDirectory);
     await database.customStatement('''
@@ -296,8 +529,7 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
       service.relinkSameVideo(
         surgeryRecordId: record.id,
         expectedVideoPath: attached.videoPath!,
-        sourcePath: sameSource.path,
-        originalFileName: 'same.mp4',
+        candidate: await verifiedVideoCandidateForFile(sameSource),
       ),
       throwsA(anything),
     );
@@ -318,18 +550,16 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
       'replacement.mp4',
     );
     final record = await _recordWithReview(surgeryRepository);
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
 
-    final replaced = await service.replaceVideoForRecord(
+    final replaced = (await service.replaceVideoForRecord(
       surgeryRecordId: record.id,
       expectedVideoPath: attached.videoPath!,
-      sourcePath: replacementSource.path,
-      originalFileName: 'replacement.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(replacementSource),
+    )).value;
 
     final rows = await _stepRows(database, record.id);
     expect(rows.every((row) => row['start_milliseconds'] == null), isTrue);
@@ -346,11 +576,10 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
       'replacement.mp4',
     );
     final record = await _recordWithReview(surgeryRepository);
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
     final beforeRows = await _stepRows(database, record.id);
     final beforeFiles = await _managedFiles(supportDirectory);
     final replacementLength = await replacementSource.length();
@@ -365,16 +594,22 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
           );
         },
       ),
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
 
     await expectLater(
       corruptingService.replaceVideoForRecord(
         surgeryRecordId: record.id,
         expectedVideoPath: attached.videoPath!,
-        sourcePath: replacementSource.path,
-        originalFileName: 'replacement.mp4',
+        candidate: await verifiedVideoCandidateForFile(replacementSource),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.copyIntegrityFailed,
+        ),
+      ),
     );
 
     expect(
@@ -399,11 +634,10 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
       surgeryDate: DateTime(2026, 8, 15),
       eyeSide: EyeSide.right,
     );
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
     final newerPath = 'videos/${record.id}/newer.mp4';
     await surgeryRepository.updateVideoReferenceIfCurrent(
       surgeryRecordId: record.id,
@@ -417,10 +651,15 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
       service.replaceVideoForRecord(
         surgeryRecordId: record.id,
         expectedVideoPath: attached.videoPath!,
-        sourcePath: replacementSource.path,
-        originalFileName: 'replacement.mp4',
+        candidate: await verifiedVideoCandidateForFile(replacementSource),
       ),
-      throwsA(isA<VideoReferenceConflictException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.videoReferenceConflict,
+        ),
+      ),
     );
 
     expect(await _managedFiles(supportDirectory), filesBefore);
@@ -444,10 +683,12 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
       surgeryRecordId: record.id,
       step: SurgicalStep.capsulorhexis,
     );
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
+    final replacementCandidate = await verifiedVideoCandidateForFile(
+      replacementSource,
     );
     final entered = Completer<void>();
     final release = Completer<void>();
@@ -459,8 +700,7 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
         return service.replaceVideoForRecord(
           surgeryRecordId: record.id,
           expectedVideoPath: attached.videoPath!,
-          sourcePath: replacementSource.path,
-          originalFileName: 'replacement.mp4',
+          candidate: replacementCandidate,
         );
       },
     );
@@ -475,7 +715,7 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
     );
 
     release.complete();
-    final replaced = await replacement;
+    final replaced = (await replacement).value;
     await staleExpectation;
 
     expect(replaced.videoPath, isNot(attached.videoPath));
@@ -497,11 +737,10 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
       surgeryRecordId: record.id,
       step: SurgicalStep.capsulorhexis,
     );
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'managed.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
     final entered = Completer<void>();
     final release = Completer<void>();
     final removal = surgeryRepository.runRecordMutation(record.id, () async {
@@ -593,11 +832,10 @@ BEGIN SELECT RAISE(ABORT, 'injected relink DB failure'); END
   test('動画削除のDB失敗は参照・時刻・管理動画を保持する', () async {
     final source = await _source(temporaryDirectory, 'managed.mp4');
     final record = await _recordWithReview(surgeryRepository);
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'managed.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
     final beforeRows = await _stepRows(database, record.id);
     final beforeFiles = await _managedFiles(supportDirectory);
     await database.customStatement('''
@@ -625,11 +863,10 @@ BEGIN SELECT RAISE(ABORT, 'injected remove DB failure'); END
   test('動画削除のcleanup失敗は次回初期化で再試行する', () async {
     final source = await _source(temporaryDirectory, 'managed.mp4');
     final record = await _recordWithReview(surgeryRepository);
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'managed.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
     final failingStorage = _storage(
       supportDirectory,
       deleteFile: (file) async => throw const FileSystemException('削除失敗'),
@@ -637,6 +874,7 @@ BEGIN SELECT RAISE(ABORT, 'injected remove DB failure'); END
     final failingService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: failingStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
 
     final removed = await failingService.removeVideoForRecord(
@@ -652,6 +890,7 @@ BEGIN SELECT RAISE(ABORT, 'injected remove DB failure'); END
     final retryService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: retryStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
     final report = await retryService.initialize();
     expect(report!.hasPendingCleanup, isFalse);
@@ -661,11 +900,10 @@ BEGIN SELECT RAISE(ABORT, 'injected remove DB failure'); END
   test('症例DB削除失敗は症例・工程・管理動画を保持する', () async {
     final source = await _source(temporaryDirectory, 'managed.mp4');
     final record = await _recordWithReview(surgeryRepository);
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'managed.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
     final beforeRows = await _stepRows(database, record.id);
     await database.customStatement('''
 CREATE TRIGGER fail_record_delete
@@ -698,6 +936,7 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
     final externalSafeService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: _storage(supportDirectory, backup: backup),
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
 
     final report = await externalSafeService.initialize();
@@ -715,11 +954,10 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
   test('症例cleanup失敗はDB削除を戻さず次回初期化で再試行する', () async {
     final source = await _source(temporaryDirectory, 'managed.mp4');
     final record = await _recordWithReview(surgeryRepository);
-    final attached = await service.attachVideoToRecord(
+    final attached = (await service.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'managed.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
     final failingStorage = _storage(
       supportDirectory,
       deleteFile: (file) async => throw const FileSystemException('削除失敗'),
@@ -727,6 +965,7 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
     final failingService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: failingStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
 
     await failingService.deleteRecordAndManagedVideos(record.id);
@@ -740,6 +979,7 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
     final retryService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: retryStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
     final report = await retryService.initialize();
     expect(report!.hasPendingCleanup, isFalse);
@@ -795,6 +1035,7 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
     final cleanupService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: failingCleanupStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
     final firstSource = await _source(temporaryDirectory, 'first.mp4');
     final replacementSource = await _source(
@@ -805,18 +1046,17 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
       surgeryDate: DateTime(2026, 8, 15),
       eyeSide: EyeSide.left,
     );
-    final attached = await cleanupService.attachVideoToRecord(
+    final attached = (await cleanupService.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: firstSource.path,
-      originalFileName: 'first.mp4',
-    );
+      candidate: await verifiedVideoCandidateForFile(firstSource),
+    )).value;
 
-    final replaced = await cleanupService.replaceVideoForRecord(
+    final replacementOutcome = await cleanupService.replaceVideoForRecord(
       surgeryRecordId: record.id,
       expectedVideoPath: attached.videoPath!,
-      sourcePath: replacementSource.path,
-      originalFileName: 'replacement.mp4',
+      candidate: await verifiedVideoCandidateForFile(replacementSource),
     );
+    final replaced = replacementOutcome.value;
 
     expect(
       (await surgeryRepository.getRecord(record.id))!.videoPath,
@@ -831,11 +1071,16 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
       isNotNull,
     );
     expect(cleanupService.hasPendingCleanup, isTrue);
+    expect(
+      replacementOutcome.maintenanceOutcome,
+      VideoMaintenanceOutcome.pending,
+    );
 
     final retryStorage = _storage(supportDirectory);
     final retryService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: retryStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
     final retryReport = await retryService.initialize();
 
@@ -875,15 +1120,17 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
     final throwingService = RecordVideoService(
       surgeryRepository: surgeryRepository,
       videoStorageRepository: throwingStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
     );
 
-    final attached = await throwingService.attachVideoToRecord(
+    final outcome = await throwingService.attachVideoToRecord(
       surgeryRecordId: record.id,
-      sourcePath: source.path,
-      originalFileName: 'managed.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
+    final attached = outcome.value;
 
     expect(attached.videoPath, isNotNull);
+    expect(outcome.maintenanceOutcome, VideoMaintenanceOutcome.pending);
     expect(
       (await surgeryRepository.getRecord(record.id))!.videoPath,
       attached.videoPath,
@@ -895,6 +1142,53 @@ BEGIN SELECT RAISE(ABORT, 'injected record delete failure'); END
       await videoStorageRepository.resolveVideo(attached.videoPath!),
       isNotNull,
     );
+  });
+
+  test('commit失敗後の補償削除失敗は主エラーとmaintenance保留を両方保持する', () async {
+    final source = await _source(temporaryDirectory, 'managed.mp4');
+    final record = await surgeryRepository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.right,
+    );
+    final failingStorage = _storage(
+      supportDirectory,
+      deleteFile: (file) async => throw const FileSystemException('削除失敗'),
+    );
+    final failingService = RecordVideoService(
+      surgeryRepository: surgeryRepository,
+      videoStorageRepository: failingStorage,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
+    );
+    await database.customStatement('''
+CREATE TRIGGER fail_video_attach
+BEFORE UPDATE OF video_path ON surgery_records
+BEGIN SELECT RAISE(ABORT, 'injected attach DB failure'); END
+''');
+
+    await expectLater(
+      failingService.attachVideoToRecord(
+        surgeryRecordId: record.id,
+        candidate: await verifiedVideoCandidateForFile(source),
+      ),
+      throwsA(
+        isA<VideoImportFailure>()
+            .having(
+              (failure) => failure.error.code,
+              'code',
+              VideoImportErrorCode.commitFailed,
+            )
+            .having(
+              (failure) => failure.maintenanceOutcome,
+              'maintenanceOutcome',
+              VideoMaintenanceOutcome.pending,
+            ),
+      ),
+    );
+
+    expect((await surgeryRepository.getRecord(record.id))!.videoPath, isNull);
+    expect(failingService.hasPendingCleanup, isTrue);
+    expect(await _managedFiles(supportDirectory), hasLength(1));
+    expect(await source.exists(), isTrue);
   });
 
   test('不正参照はfilesystemを触らず不正状態と判定する', () async {
@@ -983,18 +1277,72 @@ class _ThrowingMaintenanceStorage implements ManagedVideoStorageRepository {
   @override
   Future<StoredVideo> importVideo({
     required String surgeryRecordId,
-    required String sourcePath,
-    required String originalFileName,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
   }) => delegate.importVideo(
     surgeryRecordId: surgeryRecordId,
-    sourcePath: sourcePath,
-    originalFileName: originalFileName,
+    candidate: candidate,
+    cancellationToken: cancellationToken,
+    onProgress: onProgress,
   );
 
   @override
   Future<VideoStorageMaintenanceReport> maintainManagedStorage(
     Future<RecordVideoReferenceSnapshot> Function() loadReferences,
   ) => throw const FileSystemException('maintenance失敗');
+
+  @override
+  Future<File?> resolveVideo(String relativePath) =>
+      delegate.resolveVideo(relativePath);
+
+  @override
+  Future<T> runStorageTransaction<T>(Future<T> Function() action) =>
+      delegate.runStorageTransaction(action);
+}
+
+class _AfterImportStorage implements ManagedVideoStorageRepository {
+  _AfterImportStorage(this.delegate, {this.afterImport, this.onFinish});
+
+  final ManagedVideoStorageRepository delegate;
+  final Future<void> Function()? afterImport;
+  final Future<void> Function()? onFinish;
+
+  @override
+  Future<StoredVideo> importVideo({
+    required String surgeryRecordId,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    final stored = await delegate.importVideo(
+      surgeryRecordId: surgeryRecordId,
+      candidate: candidate,
+      cancellationToken: cancellationToken,
+      onProgress: onProgress,
+    );
+    await afterImport?.call();
+    return stored;
+  }
+
+  @override
+  Future<void> deleteVideo(String relativePath) =>
+      delegate.deleteVideo(relativePath);
+
+  @override
+  Future<void> deleteVideosForRecord(String surgeryRecordId) =>
+      delegate.deleteVideosForRecord(surgeryRecordId);
+
+  @override
+  Future<void> finishImport(String relativePath) async {
+    await delegate.finishImport(relativePath);
+    await onFinish?.call();
+  }
+
+  @override
+  Future<VideoStorageMaintenanceReport> maintainManagedStorage(
+    Future<RecordVideoReferenceSnapshot> Function() loadReferences,
+  ) => delegate.maintainManagedStorage(loadReferences);
 
   @override
   Future<File?> resolveVideo(String relativePath) =>

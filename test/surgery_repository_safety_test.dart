@@ -467,6 +467,177 @@ BEGIN SELECT RAISE(ABORT, 'injected review failure'); END
     expect(restoredRecord.reviewStatus, ReviewStatus.draft);
   });
 
+  test('destination durationと最新最大工程時刻が同値なら動画参照を更新する', () async {
+    final record = await _recordWithKnownLegacyAndUnknownSteps(
+      database,
+      repository,
+    );
+    final beforeRows = await _stepRows(database, record.id);
+
+    await repository.updateVideoReferenceIfCurrentAndTimingsFit(
+      surgeryRecordId: record.id,
+      expectedVideoPath: null,
+      videoPath: 'videos/${record.id}/attached.mp4',
+      videoDisplayName: 'attached.mp4',
+      destinationDurationMilliseconds: 500,
+    );
+
+    final updated = await repository.getRecord(record.id);
+    expect(updated!.videoPath, 'videos/${record.id}/attached.mp4');
+    expect(updated.videoDisplayName, 'attached.mp4');
+    expect(updated.caseMemo, record.caseMemo);
+    expect(await _stepRows(database, record.id), beforeRows);
+  });
+
+  test('最新最大工程時刻がdestination durationを1ms超える場合は全状態を保持する', () async {
+    final record = await _recordWithKnownLegacyAndUnknownSteps(
+      database,
+      repository,
+    );
+    final beforeRecord = (await repository.getRecord(record.id))!;
+    final beforeRows = await _stepRows(database, record.id);
+
+    await expectLater(
+      repository.updateVideoReferenceIfCurrentAndTimingsFit(
+        surgeryRecordId: record.id,
+        expectedVideoPath: null,
+        videoPath: 'videos/${record.id}/too-short.mp4',
+        videoDisplayName: 'too-short.mp4',
+        destinationDurationMilliseconds: 499,
+      ),
+      throwsA(
+        isA<VideoDurationConflictException>()
+            .having(
+              (error) => error.destinationDurationMilliseconds,
+              'destinationDurationMilliseconds',
+              499,
+            )
+            .having(
+              (error) => error.maximumTimingMilliseconds,
+              'maximumTimingMilliseconds',
+              500,
+            )
+            .having(
+              (error) => error.hasInvalidTiming,
+              'hasInvalidTiming',
+              isFalse,
+            ),
+      ),
+    );
+
+    final afterRecord = (await repository.getRecord(record.id))!;
+    expect(afterRecord.videoPath, beforeRecord.videoPath);
+    expect(afterRecord.videoDisplayName, beforeRecord.videoDisplayName);
+    expect(afterRecord.updatedAt, beforeRecord.updatedAt);
+    expect(await _stepRows(database, record.id), beforeRows);
+  });
+
+  test('負の工程時刻が1件でもあればduration適合と推測せず全状態を保持する', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.left,
+    );
+    final review = await repository.ensureStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    await _setRawTimingAndSkipped(
+      database,
+      review.id,
+      startMilliseconds: -1,
+      endMilliseconds: 100,
+    );
+    final beforeRecord = (await repository.getRecord(record.id))!;
+    final beforeRows = await _stepRows(database, record.id);
+
+    await expectLater(
+      repository.updateVideoReferenceIfCurrentAndTimingsFit(
+        surgeryRecordId: record.id,
+        expectedVideoPath: null,
+        videoPath: 'videos/${record.id}/invalid-timing.mp4',
+        videoDisplayName: 'invalid-timing.mp4',
+        destinationDurationMilliseconds: 1000,
+      ),
+      throwsA(
+        isA<VideoDurationConflictException>().having(
+          (error) => error.hasInvalidTiming,
+          'hasInvalidTiming',
+          isTrue,
+        ),
+      ),
+    );
+
+    final afterRecord = (await repository.getRecord(record.id))!;
+    expect(afterRecord.videoPath, beforeRecord.videoPath);
+    expect(afterRecord.videoDisplayName, beforeRecord.videoDisplayName);
+    expect(afterRecord.updatedAt, beforeRecord.updatedAt);
+    expect(await _stepRows(database, record.id), beforeRows);
+  });
+
+  test('duration適合更新でも期待videoPathとのCAS競合を成功扱いしない', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.right,
+    );
+    final currentPath = 'videos/${record.id}/current.mp4';
+    await repository.updateVideoReference(
+      surgeryRecordId: record.id,
+      videoPath: currentPath,
+      videoDisplayName: 'current.mp4',
+    );
+    final beforeRecord = (await repository.getRecord(record.id))!;
+    final beforeRows = await _stepRows(database, record.id);
+
+    await expectLater(
+      repository.updateVideoReferenceIfCurrentAndTimingsFit(
+        surgeryRecordId: record.id,
+        expectedVideoPath: 'videos/${record.id}/stale.mp4',
+        videoPath: 'videos/${record.id}/new.mp4',
+        videoDisplayName: 'new.mp4',
+        destinationDurationMilliseconds: 1000,
+      ),
+      throwsA(isA<VideoReferenceConflictException>()),
+    );
+
+    final afterRecord = (await repository.getRecord(record.id))!;
+    expect(afterRecord.videoPath, currentPath);
+    expect(afterRecord.videoDisplayName, beforeRecord.videoDisplayName);
+    expect(afterRecord.updatedAt, beforeRecord.updatedAt);
+    expect(await _stepRows(database, record.id), beforeRows);
+  });
+
+  test('videoPath未登録でも動画追加と全工程時刻消去を同一transactionで行う', () async {
+    final record = await _recordWithKnownLegacyAndUnknownSteps(
+      database,
+      repository,
+    );
+    final beforeRows = await _stepRows(database, record.id);
+
+    await repository.replaceVideoReferenceAndClearTimings(
+      surgeryRecordId: record.id,
+      expectedVideoPath: null,
+      videoPath: 'videos/${record.id}/attached-with-reset.mp4',
+      videoDisplayName: 'attached-with-reset.mp4',
+    );
+
+    final updated = (await repository.getRecord(record.id))!;
+    final afterRows = await _stepRows(database, record.id);
+    expect(updated.videoPath, 'videos/${record.id}/attached-with-reset.mp4');
+    expect(updated.videoDisplayName, 'attached-with-reset.mp4');
+    expect(updated.caseMemo, record.caseMemo);
+    expect(updated.reviewSchemaVersion, 1);
+    expect(
+      afterRows.map((row) => row['id']),
+      beforeRows.map((row) => row['id']),
+    );
+    for (var index = 0; index < afterRows.length; index++) {
+      expect(afterRows[index]['start_milliseconds'], isNull);
+      expect(afterRows[index]['end_milliseconds'], isNull);
+      expect(afterRows[index]['rating'], beforeRows[index]['rating']);
+      expect(afterRows[index]['reflection'], beforeRows[index]['reflection']);
+    }
+  });
+
   test('動画差し替えは参照更新と全工程時刻消去を同時commitする', () async {
     final record = await _recordWithKnownLegacyAndUnknownSteps(
       database,

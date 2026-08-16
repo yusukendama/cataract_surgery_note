@@ -1,12 +1,69 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-Future<String> sha256OfFile(File file) async {
-  final digest = _Sha256Digest();
-  await for (final chunk in file.openRead()) {
-    digest.add(chunk);
-  }
+String sha256OfBytes(List<int> bytes) {
+  final digest = _Sha256Digest()..add(bytes);
   return digest.close();
+}
+
+Future<String> sha256OfFile(
+  File file, {
+  void Function(int bytesRead, int totalBytes)? onProgress,
+  bool Function()? isCancelled,
+  Future<void>? cancellationSignal,
+  Future<int> Function(File file)? readLength,
+  Stream<List<int>> Function(File file)? openRead,
+}) async {
+  final digest = _Sha256Digest();
+  final totalBytes = await (readLength?.call(file) ?? file.length());
+  var bytesRead = 0;
+  var reachedEnd = false;
+  final iterator = StreamIterator<List<int>>(
+    openRead?.call(file) ?? file.openRead(),
+  );
+  try {
+    while (true) {
+      _throwIfHashCancelled(isCancelled);
+      var cancellationWon = false;
+      final hasNext = cancellationSignal == null
+          ? await iterator.moveNext()
+          : await Future.any<bool>(<Future<bool>>[
+              iterator.moveNext(),
+              cancellationSignal.then((_) {
+                cancellationWon = true;
+                return false;
+              }),
+            ]);
+      if (cancellationWon) {
+        throw const FileSystemException('動画の確認をキャンセルしました。');
+      }
+      if (!hasNext) {
+        reachedEnd = true;
+        break;
+      }
+      _throwIfHashCancelled(isCancelled);
+      final chunk = iterator.current;
+      digest.add(chunk);
+      bytesRead += chunk.length;
+      onProgress?.call(bytesRead, totalBytes);
+    }
+    _throwIfHashCancelled(isCancelled);
+    return digest.close();
+  } finally {
+    if (!reachedEnd) {
+      await iterator.cancel().timeout(
+        const Duration(seconds: 1),
+        onTimeout: () {},
+      );
+    }
+  }
+}
+
+void _throwIfHashCancelled(bool Function()? isCancelled) {
+  if (isCancelled?.call() ?? false) {
+    throw const FileSystemException('動画の確認をキャンセルしました。');
+  }
 }
 
 class _Sha256Digest {

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/providers.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/features/review/step_review_screen.dart';
@@ -377,8 +378,9 @@ class _AvailableVideoStorage implements VideoStorageRepository {
   @override
   Future<StoredVideo> importVideo({
     required String surgeryRecordId,
-    required String sourcePath,
-    required String originalFileName,
+    required VerifiedVideoCandidate candidate,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
   }) {
     throw UnimplementedError();
   }

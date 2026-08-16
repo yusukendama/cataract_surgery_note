@@ -8,6 +8,7 @@ import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/features/records/record_detail_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_list_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_month_group.dart';
+import 'package:cataract_surgery_note/src/features/video_import/video_registration_guidance_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -180,6 +181,15 @@ void main() {
     expect(find.text('まだ症例がありません'), findsOneWidget);
     expect(find.text('最初の症例を登録'), findsOneWidget);
     expect(find.byType(SliverPersistentHeader), findsNothing);
+  });
+
+  testWidgets('動画選択前から再登録できる動画の目安を開ける', (tester) async {
+    await pumpList(tester, const []);
+
+    await tester.tap(find.byTooltip('再登録できる動画の目安'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(VideoRegistrationGuidanceScreen), findsOneWidget);
   });
 
   testWidgets('工程数と正常動画を除き、レビュー3状態と総時間を表示する', (tester) async {

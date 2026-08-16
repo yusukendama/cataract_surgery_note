@@ -1,9 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+
+import 'support/video_import_test_support.dart';
 
 class _RecordingBackupExclusion implements BackupExclusionRepository {
   _RecordingBackupExclusion({this.throwOnCall});
@@ -26,10 +29,29 @@ class _PlaybackVerifier implements VideoPlaybackVerifier {
   final bool shouldThrow;
 
   @override
-  Future<void> verify(File file) async {
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) async {
     if (shouldThrow) {
       throw const FileSystemException('再生不能');
     }
+    return testVideoPlaybackEvidence;
+  }
+}
+
+class _CancellablePlaybackVerifier implements VideoPlaybackVerifier {
+  final Completer<void> entered = Completer<void>();
+
+  @override
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) async {
+    entered.complete();
+    await cancellationToken!.whenCancelled;
+    cancellationToken.throwIfCancelled(VideoImportPhase.destinationPlayback);
+    throw StateError('unreachable');
   }
 }
 
@@ -69,10 +91,15 @@ void main() {
     await expectLater(
       repository.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.backupExclusionFailed,
+        ),
+      ),
     );
 
     expect(
@@ -96,10 +123,15 @@ void main() {
     await expectLater(
       repository.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.backupExclusionFailed,
+        ),
+      ),
     );
 
     final recordDirectory = Directory(
@@ -121,10 +153,15 @@ void main() {
     await expectLater(
       repository.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mov',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.destinationPlaybackFailed,
+        ),
+      ),
     );
     expect(
       await Directory(
@@ -133,6 +170,94 @@ void main() {
       isEmpty,
     );
   });
+
+  test(
+    'destination probe中のcancelはtyped cancellationとなりstaged fileを消去する',
+    () async {
+      final source = await _source(temporaryDirectory, 'source.mp4');
+      final verifier = _CancellablePlaybackVerifier();
+      final storage = LocalVideoStorageRepository(
+        applicationSupportDirectory: supportDirectory,
+        backupExclusionRepository: _RecordingBackupExclusion(),
+        playbackVerifier: verifier,
+      );
+      final cancellationToken = VideoImportCancellationToken();
+
+      final import = storage.importVideo(
+        surgeryRecordId: 'record-1',
+        candidate: await verifiedVideoCandidateForFile(source),
+        cancellationToken: cancellationToken,
+      );
+      await verifier.entered.future;
+      cancellationToken.cancel();
+
+      await expectLater(
+        import,
+        throwsA(
+          isA<VideoImportException>().having(
+            (error) => error.code,
+            'code',
+            VideoImportErrorCode.userCanceled,
+          ),
+        ),
+      );
+      final recordDirectory = Directory(
+        p.join(supportDirectory.path, 'videos', 'record-1'),
+      );
+      expect(await recordDirectory.list().toList(), isEmpty);
+      expect(await source.exists(), isTrue);
+    },
+  );
+
+  test(
+    'File Provider相当のcopy stream無応答中もcancelでsubscriptionとtmpを解放する',
+    () async {
+      final source = await _source(temporaryDirectory, 'stalled-source.mp4');
+      final streamEntered = Completer<void>();
+      final streamCancelled = Completer<void>();
+      final stalledStream = StreamController<List<int>>(
+        onListen: () => streamEntered.complete(),
+        onCancel: () {
+          if (!streamCancelled.isCompleted) {
+            streamCancelled.complete();
+          }
+        },
+      );
+      final storage = LocalVideoStorageRepository(
+        applicationSupportDirectory: supportDirectory,
+        backupExclusionRepository: _RecordingBackupExclusion(),
+        playbackVerifier: const _PlaybackVerifier(),
+        openSourceRead: (_) => stalledStream.stream,
+      );
+      final cancellationToken = VideoImportCancellationToken();
+
+      final import = storage.importVideo(
+        surgeryRecordId: 'record-1',
+        candidate: await verifiedVideoCandidateForFile(source),
+        cancellationToken: cancellationToken,
+      );
+      await streamEntered.future.timeout(const Duration(seconds: 2));
+      cancellationToken.cancel();
+
+      await expectLater(
+        import.timeout(const Duration(seconds: 3)),
+        throwsA(
+          isA<VideoImportException>().having(
+            (error) => error.code,
+            'code',
+            VideoImportErrorCode.userCanceled,
+          ),
+        ),
+      );
+      await streamCancelled.future.timeout(const Duration(seconds: 2));
+      await stalledStream.close();
+      final recordDirectory = Directory(
+        p.join(supportDirectory.path, 'videos', 'record-1'),
+      );
+      expect(await recordDirectory.list().toList(), isEmpty);
+      expect(await source.exists(), isTrue);
+    },
+  );
 
   test('同サイズで内容が異なるstaged fileをSHA-256不一致で拒否する', () async {
     final source = await _source(temporaryDirectory, 'source.mp4');
@@ -152,10 +277,15 @@ void main() {
     await expectLater(
       storage.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.copyIntegrityFailed,
+        ),
+      ),
     );
 
     expect(await source.readAsBytes(), sourceBytes);
@@ -185,13 +315,106 @@ void main() {
     await expectLater(
       storage.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.sourceChanged,
+        ),
+      ),
     );
 
     expect(await source.length(), sourceLength);
+    expect(
+      await Directory(
+        p.join(supportDirectory.path, 'videos', 'record-1'),
+      ).list().toList(),
+      isEmpty,
+    );
+  });
+
+  test('candidate SHA-256とsourceHashBeforeが異なる場合はsourceChangedにする', () async {
+    final source = await _source(temporaryDirectory, 'source.mp4');
+    final verified = await verifiedVideoCandidateForFile(source);
+    final staleCandidate = VerifiedVideoCandidate(
+      path: verified.path,
+      displayName: verified.displayName,
+      normalizedExtension: verified.normalizedExtension,
+      selectionGeneration: verified.selectionGeneration,
+      sourceSize: verified.sourceSize,
+      sourceModifiedAt: verified.sourceModifiedAt,
+      sha256: 'stale-candidate-sha256',
+      playbackEvidence: verified.playbackEvidence,
+      sourceIdentifier: verified.sourceIdentifier,
+    );
+    final storage = repository();
+
+    await expectLater(
+      storage.importVideo(
+        surgeryRecordId: 'record-1',
+        candidate: staleCandidate,
+      ),
+      throwsA(
+        isA<VideoImportException>()
+            .having(
+              (error) => error.code,
+              'code',
+              VideoImportErrorCode.sourceChanged,
+            )
+            .having(
+              (error) => error.internalReason,
+              'internalReason',
+              VideoImportInternalReasonV1.sourceHashMismatch,
+            ),
+      ),
+    );
+
+    expect(await source.exists(), isTrue);
+    expect(
+      await Directory(
+        p.join(supportDirectory.path, 'videos', 'record-1'),
+      ).list().toList(),
+      isEmpty,
+    );
+  });
+
+  test('preflight後の同size・同mtime差し替えもSHA-256でsourceChangedにする', () async {
+    final source = await _source(temporaryDirectory, 'source.mp4');
+    final initialModifiedAt = await source.lastModified();
+    final stableModifiedAt = DateTime.fromMillisecondsSinceEpoch(
+      initialModifiedAt.millisecondsSinceEpoch ~/ 1000 * 1000,
+    );
+    await source.setLastModified(stableModifiedAt);
+    final candidate = await verifiedVideoCandidateForFile(source);
+    await source.writeAsBytes(
+      List<int>.filled(candidate.sourceSize, 0xa7),
+      flush: true,
+    );
+    await source.setLastModified(candidate.sourceModifiedAt);
+    final replacedStat = await source.stat();
+    expect(replacedStat.size, candidate.sourceSize);
+    expect(replacedStat.modified, candidate.sourceModifiedAt);
+    final storage = repository();
+
+    await expectLater(
+      storage.importVideo(surgeryRecordId: 'record-1', candidate: candidate),
+      throwsA(
+        isA<VideoImportException>()
+            .having(
+              (error) => error.code,
+              'code',
+              VideoImportErrorCode.sourceChanged,
+            )
+            .having(
+              (error) => error.internalReason,
+              'internalReason',
+              VideoImportInternalReasonV1.sourceHashMismatch,
+            ),
+      ),
+    );
+
     expect(
       await Directory(
         p.join(supportDirectory.path, 'videos', 'record-1'),
@@ -224,8 +447,7 @@ void main() {
 
     final stored = await storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
 
     expect(stored.relativePath, 'videos/record-1/fresh.mp4');
@@ -249,8 +471,7 @@ void main() {
     final storage = repository();
     final stored = await storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
 
     await storage.maintainManagedStorage(
@@ -283,8 +504,7 @@ void main() {
 
     final import = storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
     await copyReached.future;
     var maintenanceCompleted = false;
@@ -315,8 +535,7 @@ void main() {
     final storage = repository();
     final stored = await storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
     await storage.finishImport(stored.relativePath);
     final recordDirectory = Directory(
@@ -350,8 +569,7 @@ void main() {
     final storage = repository();
     final stored = await storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
     await storage.finishImport(stored.relativePath);
 
@@ -411,8 +629,7 @@ void main() {
     final storage = repository();
     final stored = await storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
     await storage.finishImport(stored.relativePath);
 
@@ -435,8 +652,7 @@ void main() {
     final storage = repository();
     final stored = await storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
     await storage.finishImport(stored.relativePath);
     final file = await storage.resolveVideo(stored.relativePath);
@@ -455,8 +671,7 @@ void main() {
     final storage = repository();
     final stored = await storage.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
     await storage.finishImport(stored.relativePath);
     final file = await storage.resolveVideo(stored.relativePath);
@@ -501,10 +716,15 @@ void main() {
     await expectLater(
       storage.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.destinationWriteFailed,
+        ),
+      ),
     );
     await expectLater(
       storage.deleteVideo('videos/record-1/managed.mp4'),
@@ -558,10 +778,15 @@ void main() {
     await expectLater(
       storage.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.destinationWriteFailed,
+        ),
+      ),
     );
     await expectLater(
       storage.deleteVideo('videos/record-1/managed.mp4'),
@@ -600,10 +825,15 @@ void main() {
     await expectLater(
       storage.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: source.path,
-        originalFileName: 'source.mp4',
+        candidate: await verifiedVideoCandidateForFile(source),
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.destinationWriteFailed,
+        ),
+      ),
     );
 
     expect(await outside.list().toList(), isEmpty);

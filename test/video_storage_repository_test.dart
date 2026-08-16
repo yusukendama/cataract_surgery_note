@@ -1,8 +1,11 @@
 import 'dart:io';
 
+import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+
+import 'support/video_import_test_support.dart';
 
 class _NoopBackupExclusionRepository implements BackupExclusionRepository {
   @override
@@ -11,7 +14,10 @@ class _NoopBackupExclusionRepository implements BackupExclusionRepository {
 
 class _NoopPlaybackVerifier implements VideoPlaybackVerifier {
   @override
-  Future<void> verify(File file) async {}
+  Future<VideoPlaybackEvidence> verify(
+    File file, {
+    VideoImportCancellationToken? cancellationToken,
+  }) async => testVideoPlaybackEvidence;
 }
 
 void main() {
@@ -42,25 +48,37 @@ void main() {
 
     final stored = await repository.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
 
     expect(stored.relativePath, startsWith('videos/record-1/'));
     expect(stored.relativePath, endsWith('.mp4'));
     expect(stored.originalFileName, 'source.mp4');
     expect(stored.sizeBytes, 4096);
+    expect(stored.playbackEvidence.duration, const Duration(seconds: 12));
+    expect(stored.playbackEvidence.width, 1920);
+    expect(stored.playbackEvidence.height, 1080);
+    expect(stored.playbackEvidence.aspectRatio, closeTo(16 / 9, 0.000001));
     expect(await repository.resolveVideo(stored.relativePath), isNotNull);
   });
 
   test('コピー元が存在しない場合は失敗する', () async {
+    final source = await _writeSourceVideo(tempDirectory, 'missing.mp4', 128);
+    final candidate = await verifiedVideoCandidateForFile(source);
+    await source.delete();
+
     expect(
       () => repository.importVideo(
         surgeryRecordId: 'record-1',
-        sourcePath: p.join(tempDirectory.path, 'missing.mp4'),
-        originalFileName: 'missing.mp4',
+        candidate: candidate,
       ),
-      throwsA(isA<FileSystemException>()),
+      throwsA(
+        isA<VideoImportException>().having(
+          (error) => error.code,
+          'code',
+          VideoImportErrorCode.sourceChanged,
+        ),
+      ),
     );
   });
 
@@ -69,8 +87,7 @@ void main() {
 
     await repository.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mov',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
 
     expect(
@@ -86,8 +103,7 @@ void main() {
 
     final stored = await repository.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.m4v',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
     final resolved = await repository.resolveVideo(stored.relativePath);
 
@@ -98,8 +114,7 @@ void main() {
     final source = await _writeSourceVideo(tempDirectory, 'source.mp4', 256);
     final stored = await repository.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
 
     final resolved = await repository.resolveVideo(stored.relativePath);
@@ -113,8 +128,7 @@ void main() {
 
     await repository.importVideo(
       surgeryRecordId: 'record-1',
-      sourcePath: source.path,
-      originalFileName: 'source.mp4',
+      candidate: await verifiedVideoCandidateForFile(source),
     );
 
     expect(await source.exists(), isTrue);
