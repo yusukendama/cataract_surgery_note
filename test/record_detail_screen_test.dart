@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:ui' show SemanticsAction;
 
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/providers.dart';
@@ -115,6 +117,28 @@ class _PendingCleanupVideoStorage extends _ImportingVideoStorage
       backupExclusionFailures: <String>[],
       cleanupFailures: <String>['videos/fixture/old.mp4'],
     );
+  }
+}
+
+class _PendingDeleteRecordVideoService extends RecordVideoService {
+  _PendingDeleteRecordVideoService(SurgeryRepository repository)
+    : super(
+        surgeryRepository: repository,
+        videoStorageRepository: _PresentVideoStorage(),
+        videoImportPreflight: const _SyntheticVideoImportPreflight(),
+      );
+
+  final deletionStarted = Completer<void>();
+  final releaseDeletion = Completer<void>();
+  int deleteCalls = 0;
+
+  @override
+  Future<void> deleteRecordAndManagedVideos(String surgeryRecordId) async {
+    deleteCalls++;
+    if (!deletionStarted.isCompleted) {
+      deletionStarted.complete();
+    }
+    await releaseDeletion.future;
   }
 }
 
@@ -251,7 +275,7 @@ void main() {
     expect(find.text('2026/07/18 右眼'), findsOneWidget);
   });
 
-  testWidgets('管理動画と除外read-backの両方が成功したときだけ確認済みと表示する', (tester) async {
+  testWidgets('管理動画の除外read-back成功時はバックアップ案内を表示しない', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
     await tester.runAsync(() async {
@@ -286,14 +310,86 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('present.mp4'), findsOneWidget);
-    expect(find.byKey(const Key('backup-exclusion-verified')), findsOneWidget);
-    expect(find.text('バックアップ除外を確認済みです。選択元の動画も別途保管してください。'), findsOneWidget);
+    expect(find.byKey(const Key('backup-exclusion-hidden')), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const Key('backup-exclusion-hidden'))).height,
+      0,
+    );
+    expect(find.textContaining('バックアップ除外を確認済みです'), findsNothing);
+    expect(find.textContaining('選択元の動画も別途保管してください'), findsNothing);
     expect(find.byKey(const Key('backup-exclusion-warning')), findsNothing);
     expect(find.text('別の動画に差し替え'), findsOneWidget);
+    final videoCard = find.ancestor(
+      of: find.text('present.mp4'),
+      matching: find.byType(Card),
+    );
+    final replaceButton = find.ancestor(
+      of: find.text('別の動画に差し替え'),
+      matching: find.byWidgetPredicate((widget) => widget is FilledButton),
+    );
+    expect(
+      tester.getTopLeft(replaceButton).dy - tester.getBottomLeft(videoCard).dy,
+      12,
+    );
     expect(
       find.text('保存した動画が見つかりません。機種変更や端末の復元後は、元の動画を選び直してください。'),
       findsNothing,
     );
+  });
+
+  testWidgets('管理動画の除外read-back確認中は専用表示と余白を出さない', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      await SurgeryRepository(database).updateVideoReference(
+        surgeryRecordId: record.id,
+        videoPath: 'videos/${record.id}/present.mp4',
+        videoDisplayName: 'present.mp4',
+      );
+    });
+    final maintenance = Completer<VideoStorageMaintenanceReport?>();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          videoStorageRepositoryProvider.overrideWithValue(
+            _PresentVideoStorage(),
+          ),
+          recordVideoStateProvider(record.id).overrideWith(
+            (ref) =>
+                const RecordVideoState(RecordVideoStateKind.availableManaged),
+          ),
+          videoStorageMaintenanceProvider.overrideWith(
+            (ref) => maintenance.future,
+          ),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('present.mp4'), findsOneWidget);
+    expect(find.text('バックアップ除外を確認しています…'), findsNothing);
+    expect(find.byKey(const Key('backup-exclusion-checking')), findsNothing);
+    expect(find.byKey(const Key('backup-exclusion-hidden')), findsOneWidget);
+    expect(
+      tester.getSize(find.byKey(const Key('backup-exclusion-hidden'))).height,
+      0,
+    );
+    expect(find.byKey(const Key('backup-exclusion-warning')), findsNothing);
+
+    maintenance.complete(
+      const VideoStorageMaintenanceReport(
+        snapshotComplete: true,
+        deletedPaths: <String>[],
+        backupExclusionFailures: <String>[],
+      ),
+    );
+    await tester.pumpAndSettle();
   });
 
   testWidgets('除外read-backを確認できない管理動画では断定せず再確認を出す', (tester) async {
@@ -307,6 +403,7 @@ void main() {
       );
     });
 
+    var maintenanceCalls = 0;
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -314,15 +411,16 @@ void main() {
           videoStorageRepositoryProvider.overrideWithValue(
             _PresentVideoStorage(),
           ),
-          videoStorageMaintenanceProvider.overrideWith(
-            (ref) async => const VideoStorageMaintenanceReport(
+          videoStorageMaintenanceProvider.overrideWith((ref) async {
+            maintenanceCalls++;
+            return const VideoStorageMaintenanceReport(
               snapshotComplete: true,
               deletedPaths: <String>[],
               backupExclusionFailures: <String>[
                 'videos/root-record/present.mp4',
               ],
-            ),
-          ),
+            );
+          }),
         ],
         child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
       ),
@@ -333,6 +431,13 @@ void main() {
     expect(find.text('再確認'), findsOneWidget);
     expect(find.byKey(const Key('backup-exclusion-verified')), findsNothing);
     expect(find.textContaining('バックアップ対象外です'), findsNothing);
+    expect(maintenanceCalls, 1);
+
+    await tester.tap(find.text('再確認'));
+    await tester.pumpAndSettle();
+
+    expect(maintenanceCalls, 2);
+    expect(find.byKey(const Key('backup-exclusion-warning')), findsOneWidget);
   });
 
   testWidgets('DBにパスがあり実ファイルが無いときは再選択を促す', (tester) async {
@@ -368,7 +473,7 @@ void main() {
     expect(find.text('登録済みの動画'), findsNothing);
   });
 
-  testWidgets('4セクションを表示しreviewStatusに依存しない', (tester) async {
+  testWidgets('3セクションと控えめな削除導線を表示しreviewStatusに依存しない', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
 
@@ -378,11 +483,274 @@ void main() {
     expect(find.text('動画'), findsOneWidget);
     expect(find.text('工程記録'), findsOneWidget);
     expect(find.byTooltip('再登録できる動画の目安'), findsOneWidget);
-    await tester.drag(find.byType(ListView), const Offset(0, -500));
-    await tester.pumpAndSettle();
-    expect(find.text('危険操作'), findsOneWidget);
+    final deleteButtonFinder = find.byKey(const Key('delete-record-button'));
+    expect(deleteButtonFinder, findsNothing);
+    await tester.dragUntilVisible(
+      deleteButtonFinder,
+      find.byType(ListView),
+      const Offset(0, -300),
+    );
+
+    expect(find.text('危険操作'), findsNothing);
+    expect(deleteButtonFinder, findsOneWidget);
+    expect(
+      find.descendant(
+        of: deleteButtonFinder,
+        matching: find.byIcon(Icons.delete_outline),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester.widget<TextButton>(deleteButtonFinder).style?.backgroundColor,
+      isNull,
+    );
+    expect(tester.widget<TextButton>(deleteButtonFinder).style?.side, isNull);
+    final buttonSize = tester.getSize(deleteButtonFinder);
+    expect(buttonSize.height, greaterThanOrEqualTo(48));
+    expect(
+      buttonSize.width,
+      lessThan(tester.getSize(find.byType(Scaffold)).width),
+    );
+
+    final context = tester.element(deleteButtonFinder);
+    expect(
+      tester
+          .widget<TextButton>(deleteButtonFinder)
+          .style
+          ?.foregroundColor
+          ?.resolve(<WidgetState>{}),
+      Theme.of(context).colorScheme.error,
+    );
+    final semantics = tester.ensureSemantics();
+    final deleteNode = tester.getSemantics(deleteButtonFinder);
+    expect(deleteNode.label, '症例を削除');
+    expect(
+      deleteNode.getSemanticsData().hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    semantics.dispose();
+
     expect(find.textContaining('状態:'), findsNothing);
     expect(find.text(record.reviewStatus.label), findsNothing);
+  });
+
+  testWidgets('狭い画面の文字倍率2.0でも削除導線へ到達できる', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [appDatabaseProvider.overrideWith((ref) => database)],
+        child: MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(320, 568),
+              textScaler: TextScaler.linear(2),
+            ),
+            child: RecordDetailScreen(recordId: record.id),
+          ),
+        ),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    final deleteButtonFinder = find.byKey(const Key('delete-record-button'));
+    await tester.dragUntilVisible(
+      deleteButtonFinder,
+      find.byType(ListView),
+      const Offset(0, -240),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('症例を削除'), findsOneWidget);
+    final buttonSize = tester.getSize(deleteButtonFinder);
+    expect(buttonSize.height, greaterThanOrEqualTo(48));
+    expect(buttonSize.width, lessThan(320));
+  });
+
+  testWidgets('症例削除ダイアログを閉じると記録と動画参照を保持する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    late SurgicalStepReview ccc;
+    await tester.runAsync(() async {
+      await repository.updateVideoReference(
+        surgeryRecordId: record.id,
+        videoPath: 'videos/${record.id}/present.mp4',
+        videoDisplayName: 'present.mp4',
+      );
+      ccc = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+      await repository.saveStepReview(
+        ccc.copyWith(
+          startMilliseconds: 100,
+          endMilliseconds: 500,
+          rating: StepRating.good,
+          reflection: '保持する記録',
+        ),
+      );
+    });
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          videoStorageRepositoryProvider.overrideWithValue(
+            _PresentVideoStorage(),
+          ),
+          videoStorageMaintenanceProvider.overrideWith(
+            (ref) async => const VideoStorageMaintenanceReport(
+              snapshotComplete: true,
+              deletedPaths: <String>[],
+              backupExclusionFailures: <String>[],
+            ),
+          ),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    final deleteButtonFinder = find.byKey(const Key('delete-record-button'));
+    await tester.dragUntilVisible(
+      deleteButtonFinder,
+      find.byType(ListView),
+      const Offset(0, -300),
+    );
+    await tester.tap(deleteButtonFinder);
+    await tester.pumpAndSettle();
+
+    expect(find.text('この症例を削除しますか？'), findsOneWidget);
+    expect(
+      find.text(
+        'この症例の記録（総手術時間、工程記録、自己評価、反省点、症例メモ）と、アプリ内に保存された動画を削除します。アプリ外の元動画は削除されません。この操作は元に戻せません。',
+      ),
+      findsOneWidget,
+    );
+    expect(find.widgetWithText(TextButton, 'キャンセル'), findsOneWidget);
+    final confirmFinder = find.widgetWithText(FilledButton, '削除');
+    expect(confirmFinder, findsOneWidget);
+    final confirmContext = tester.element(confirmFinder);
+    expect(
+      tester
+          .widget<FilledButton>(confirmFinder)
+          .style
+          ?.backgroundColor
+          ?.resolve(<WidgetState>{}),
+      Theme.of(confirmContext).colorScheme.error,
+    );
+
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+    expect(find.text('この症例を削除しますか？'), findsNothing);
+
+    await tester.tap(deleteButtonFinder);
+    await tester.pumpAndSettle();
+    expect(find.text('この症例を削除しますか？'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.text('この症例を削除しますか？'), findsNothing);
+
+    await tester.tap(deleteButtonFinder);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'キャンセル'));
+    await tester.pumpAndSettle();
+
+    late SurgeryRecord? unchangedRecord;
+    late SurgicalStepReview? unchangedCcc;
+    await tester.runAsync(() async {
+      unchangedRecord = await repository.getRecord(record.id);
+      unchangedCcc = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+    });
+    expect(unchangedRecord, isNotNull);
+    expect(unchangedRecord!.videoPath, 'videos/${record.id}/present.mp4');
+    expect(unchangedCcc!.startMilliseconds, 100);
+    expect(unchangedCcc!.endMilliseconds, 500);
+    expect(unchangedCcc!.rating, StepRating.good);
+    expect(unchangedCcc!.reflection, '保持する記録');
+  });
+
+  testWidgets('症例削除中は進行表示、多重実行防止、離脱抑止を維持する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final service = _PendingDeleteRecordVideoService(
+      SurgeryRepository(database),
+    );
+    final semantics = tester.ensureSemantics();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          recordVideoServiceProvider.overrideWithValue(service),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    final deleteButtonFinder = find.byKey(const Key('delete-record-button'));
+    await tester.dragUntilVisible(
+      deleteButtonFinder,
+      find.byType(ListView),
+      const Offset(0, -300),
+    );
+    await tester.tap(deleteButtonFinder);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '削除'));
+    await tester.pump();
+
+    expect(service.deletionStarted.isCompleted, isTrue);
+    expect(service.deleteCalls, 1);
+    expect(tester.widget<TextButton>(deleteButtonFinder).onPressed, isNull);
+    expect(
+      find.descendant(
+        of: deleteButtonFinder,
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .getSemantics(deleteButtonFinder)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isFalse,
+    );
+    expect(
+      tester
+          .widget<PopScope<void>>(
+            find.byKey(const Key('record-detail-pop-scope')),
+          )
+          .canPop,
+      isFalse,
+    );
+
+    await tester.tap(deleteButtonFinder, warnIfMissed: false);
+    await tester.pump();
+    expect(service.deleteCalls, 1);
+
+    service.releaseDeletion.complete();
+    await tester.pumpAndSettle();
+    semantics.dispose();
   });
 
   testWidgets('不正参照を開かず、同じ動画再登録と別動画差し替えを分ける', (tester) async {

@@ -555,7 +555,7 @@ void main() {
     );
     await tester.tap(find.text('症例を削除'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, '症例を削除'));
+    await tester.tap(find.widgetWithText(FilledButton, '削除'));
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 50)),
     );
