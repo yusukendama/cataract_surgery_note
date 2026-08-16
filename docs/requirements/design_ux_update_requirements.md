@@ -5,7 +5,7 @@
 - 文書版：3.0（前回改訂版を全面的に置換）
 - 基準コード：`68e0e1a`（`main`）
 - 検証日：2026年8月13日
-- ステータス：ユーザー提供AppIcon原画の静的反映済み。実機表示と署名済みarchive検証待ち
+- ステータス：ユーザー提供AppIcon原画の反映と署名済みarchive／IPA生成済み。実機表示とApp Store Connect validation待ち
 
 ---
 
@@ -1122,12 +1122,12 @@ Phase 0の終了条件は、§11-1の全試験と、§11-2の1〜8、動画な�
 
 ### 外部入力
 
-- **AppIcon原画**：ユーザー提供原画を受領し、全slotへ静的反映済み。RG-6の正式合格には実機表示と署名済みarchive／App Store asset validationの確認が必要
+- **AppIcon原画**：ユーザー提供原画を受領し、全slotと署名済みarchive／IPAへ反映済み。RG-6の正式合格には実機表示とApp Store Connect validationの確認が必要
 
 ### 現環境で未実施
 
 - iOS 15.x runtimeがローカルSimulatorにないため、最低OSでの起動 / 操作確認
-- 署名済みarchive、TestFlight / App Store validation
+- TestFlight / App Store Connect validationとアップロード
 - 実機のVoiceOver、AppIcon、cold launch、バックアップ除外属性
 - 旧版file-backed DB fixtureによる自動互換試験
 - Light / Darkおよび全viewportのGolden

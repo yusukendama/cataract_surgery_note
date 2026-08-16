@@ -4,7 +4,7 @@
 - 実装ブランチ：`feature/design-ux-update-v3`
 - 基準コミット：`68e0e1a`
 - 最終自動検証日：2026年8月15日
-- 状態：ユーザー提供のAppIcon原画を含む静的実装を反映済み。厳密なリリースゲートには実機・iOS 15・cold launch計測・署名済みarchive等の未確認項目あり
+- 状態：ユーザー提供のAppIcon原画を含む静的実装と署名済みarchive／App Store IPA生成を確認済み。厳密なリリースゲートには実機・iOS 15・cold launch計測・App Store Connect validation等の未確認項目あり
 
 ## 1. 実装範囲
 
@@ -50,6 +50,8 @@
 - `LaunchBackground` named colorを追加し、Light `#006D77`、Dark `#003F45`をLaunchScreen、Main storyboard、Flutter pre-contentで共有
 - `ja.lproj/InfoPlist.strings`とbundle localizationを追加
 - iOS側のbackup除外設定・read-back helperとXCTestを追加
+- RunnerのPrivacy Manifestへアプリコンテナ／ユーザー選択ファイルのFile Timestamp理由を宣言し、依存SDKを含む全manifestを配布IPA内で検証
+- 非免除暗号を使用しないexport compliance宣言とAutomatic signingを明示
 - README、アプリdescription、要件定義、実装報告を更新
 - ユーザー提供原画の黒い四隅を既存グラデーションで補完し、OS側のマスクを前提とするフルブリード・sRGB・alphaなしのAppIconマスターを追加
 - AppIconマスターからiPhone／iPad／App Storeの全slotとAndroidの各mipmapを生成し、Flutter標準アイコンを置換
@@ -60,7 +62,7 @@
 - 新規安全性部品：`file_sha256.dart`、`record_mutation_coordinator.dart`、`video_path_classifier.dart`
 - 画面：`new_record_screen.dart`、`record_list_screen.dart`、`record_detail_screen.dart`、`step_review_screen.dart`、`analysis_screen.dart`、`surgery_trend_chart.dart`
 - テーマ／共通UI：`lib/src/theme/*`、`lib/src/widgets/*`、`lib/main.dart`
-- iOS：`AppDelegate.swift`、`Info.plist`、両storyboard、`LaunchBackground.colorset`、`ja.lproj`、`RunnerTests.swift`、Xcode project設定
+- iOS：`AppDelegate.swift`、`Info.plist`、`PrivacyInfo.xcprivacy`、両storyboard、`LaunchBackground.colorset`、`ja.lproj`、`RunnerTests.swift`、Xcode project設定
 - AppIcon：`assets/branding/app_icon_master.png`、`ios/Runner/Assets.xcassets/AppIcon.appiconset/*`、`android/app/src/main/res/mipmap-*/ic_launcher.png`
 - 自動試験：既存test群の更新に加え、旧DB fixture、path／storage／service／repository／crash boundary／theme／Golden testを追加
 - 文書：`README.md`、`docs/requirements/design_ux_update_requirements.md`
@@ -81,6 +83,8 @@
 | Asset Catalog compile | 成功、AppIconに関するerror／warningなし |
 | Debug iOS Simulator build | 成功、`Runner.app`生成 |
 | 署名なしRelease iOS build | 成功、`Runner.app` 21.7 MB |
+| 署名済みApp Store archive／IPA | 成功、version 1.0.0、build 16、archive 177.7 MB、IPA 23.6 MB |
+| 配布成果物検証 | archive／IPAの厳密codesign、Distribution証明書、App Store profile、全9 Privacy Manifest、arm64、dSYM UUID一致を確認 |
 | Release bundle | `ja.lproj`あり、最低OS 15.0、iPhone／iPad、宣言方向を確認 |
 | iOS XCTest | iPhone 17／iOS 26.0で3件成功 |
 
@@ -94,23 +98,23 @@ iOS XCTestで確認した内容は、Launch色のLight／Dark値、日本語bund
 
 | Gate | 現在の判定 | 根拠／未確認 |
 |---|---|---|
-| RG-1 コード品質 | 配布前項目まで成功 | analyze、221 tests、Debug、unsigned Releaseは成功。署名済みarchiveとApp Store asset validationは未実施 |
+| RG-1 コード品質 | 配布前項目まで成功 | analyze、221 tests、Debug、unsigned Release、署名済みarchive／App Store IPAとローカル配布成果物検証は成功。App Store Connect validationは未実施 |
 | RG-2 データと動画 | 自動試験成功、正式合格は保留 | 旧DB／SHA-256／fault／喪失状態／native read-backは確認。実機上の新旧fixture内「全管理動画」のread-backは未確認 |
 | RG-3 iOS | 保留 | 日本語bundleと日本語DatePicker自動試験は成功。iOS 15、iPad、実機、native picker、編集メニュー、全方向、連続resizeの手動matrixは未実施 |
 | RG-4 UX／A11y | 保留 | デザイン基盤Golden、guideline、custom semantics、contrast、theme切替試験は成功。全実画面・全状態のmatrix、実VoiceOver、実機文字倍率、レビュー位置通知100回のbuild-count、実動画での速度維持、旧Controller遅延完了の専用試験は未完了 |
 | RG-5 起動画面 | 実装成功、正式合格は保留 | asset／storyboard／bundle色とXCTestは成功。clean-install動画のframe samplingを指定全端末・全方向・Light／Dark・iOS 15で未実施 |
-| RG-6 AppIcon | 静的実装成功、正式合格は保留 | ユーザー提供原画から全slotを生成し、Flutter標準アイコン、alpha、焼き付け角丸、不要メタデータがないこととAsset Catalog compileを確認。実機ホーム、App Switcher、Spotlight、設定、署名済みarchive／App Store asset validationは未確認 |
+| RG-6 AppIcon | 静的実装・archive格納成功、正式合格は保留 | ユーザー提供原画から全slotを生成し、Flutter標準アイコン、alpha、焼き付け角丸、不要メタデータがないこと、Asset Catalog compile、署名済みarchive／IPAへの格納を確認。実機ホーム、App Switcher、Spotlight、設定、App Store Connect validationは未確認 |
 
 要件定義の厳密な定義では、未確認を合格扱いにできないため、現時点を「配布可能」または「RG-1〜RG-6通過」とは判定しない。
 
 ## 5. 配布前に必要な作業
 
-1. AppIconをclean installした実機のホーム、App Switcher、Spotlight、設定、および署名済みarchive／App Store asset validationで確認する。
+1. AppIconをclean installした実機のホーム、App Switcher、Spotlight、設定、およびApp Store Connect validationで確認する。
 2. iOS／iPadOS 15.xと現行OSのiPhone／iPadで、主要フロー、全宣言方向、Light／Dark、文字倍率2.0、VoiceOver、native picker、編集メニューを確認する。
 3. iPadで幅320ptまでの連続resize、Stage Manager／Split View、実行中回転を確認する。
 4. clean installごとにcold launchを録画し、要件のRGB許容値と白／黒全面frame数をframe samplingする。
 5. 実機のfixture内全管理動画でbackup除外属性をread-backする。
-6. 署名済みarchive、TestFlight／App Store validationを実行する。
+6. 生成済みIPAをTestFlight／App Store Connectでvalidationし、アップロードする。
 7. §11-2の性能／lifecycle専用試験（位置通知100回、実動画での速度維持、dispose済みController遅延完了）と、全実画面・全状態のGolden matrixを追加する。
 
 ## 6. 今回のProblems修正
