@@ -141,6 +141,8 @@ void main() {
     expect(find.text('任意'), findsOneWidget);
     expect(find.widgetWithText(TextField, '反省点'), findsNothing);
 
+    await tester.ensureVisible(find.text('自己評価・反省点'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('自己評価・反省点'));
     await tester.pumpAndSettle();
     expect(find.widgetWithText(TextField, '反省点'), findsOneWidget);
@@ -727,6 +729,8 @@ void main() {
       repository: repository,
     );
     await _openTab(tester, 'CCC');
+    await tester.ensureVisible(find.text('自己評価・反省点'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('自己評価・反省点'));
     await tester.pumpAndSettle();
     final reflection = find.widgetWithText(TextField, '反省点');
@@ -795,6 +799,8 @@ void main() {
     addTearDown(database.close);
     final container = await pumpScreen(tester, database, record.id);
     await _openTab(tester, 'CCC');
+    await tester.ensureVisible(find.text('自己評価・反省点'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('自己評価・反省点'));
     await tester.pumpAndSettle();
 
@@ -941,6 +947,323 @@ void main() {
     expect(find.text('破棄して一覧へ戻る'), findsOneWidget);
     expect(_saveButton(tester).onPressed, isNull);
   });
+
+  testWidgets('動画がなくても時間記録なしを保存して未着手に戻せる', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+
+    await pumpScreen(tester, database, record.id);
+    await _openTab(tester, 'CCC');
+
+    final skipButton = find
+        .byKey(const Key('procedure-skip-button'))
+        .hitTestable();
+    await tester.ensureVisible(skipButton);
+    await tester.pumpAndSettle();
+    await tester.tap(skipButton);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('時間記録なし'), findsOneWidget);
+    late SurgicalStepReview skipped;
+    late SurgeryRecord savedRecord;
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      skipped = (await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+      savedRecord = (await repository.getRecord(record.id))!;
+    });
+    expect(skipped.recordingStatus, StepRecordingStatus.skipped);
+    expect(skipped.startMilliseconds, isNull);
+    expect(skipped.endMilliseconds, isNull);
+    expect(savedRecord.reviewSchemaVersion, 1);
+    expect(savedRecord.reviewStatus, ReviewStatus.reviewed);
+
+    final resetButton = find
+        .byKey(const Key('procedure-reset-button'))
+        .hitTestable();
+    await tester.ensureVisible(resetButton);
+    await tester.pumpAndSettle();
+    await tester.tap(resetButton);
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    late SurgicalStepReview restored;
+    await tester.runAsync(() async {
+      restored = (await SurgeryRepository(database).getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+    });
+    expect(restored.recordingStatus, StepRecordingStatus.unprocessed);
+    expect(restored.isSkipped, isFalse);
+    expect(find.text('時間記録なし'), findsNothing);
+    expect(
+      find.byKey(const Key('procedure-start-button')).hitTestable(),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('入力中の時刻を時間記録なしにする前に確認し、確定時だけ時刻を削除する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      final ccc = (await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+      await repository.saveStepTiming(
+        review: ccc.copyWith(startMilliseconds: 1000),
+        expectedVideoPath: null,
+      );
+    });
+
+    await pumpScreen(tester, database, record.id);
+    await _openTab(tester, 'CCC');
+    final skipButton = find
+        .byKey(const Key('procedure-skip-button'))
+        .hitTestable();
+    await tester.ensureVisible(skipButton);
+    await tester.pumpAndSettle();
+    await tester.tap(skipButton);
+    await tester.pumpAndSettle();
+
+    expect(find.text('時間記録なしにする'), findsNWidgets(2));
+    expect(find.text('入力中の時刻を削除して、この工程を「時間記録なし」にしますか？'), findsOneWidget);
+    await tester.tap(find.widgetWithText(TextButton, 'キャンセル'));
+    await tester.pumpAndSettle();
+
+    late SurgicalStepReview afterCancel;
+    await tester.runAsync(() async {
+      afterCancel = (await SurgeryRepository(database).getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+    });
+    expect(afterCancel.startMilliseconds, 1000);
+    expect(afterCancel.isSkipped, isFalse);
+
+    await tester.tap(skipButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '時間記録なしにする'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    late SurgicalStepReview committed;
+    await tester.runAsync(() async {
+      committed = (await SurgeryRepository(database).getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+    });
+    expect(committed.recordingStatus, StepRecordingStatus.skipped);
+    expect(committed.startMilliseconds, isNull);
+    expect(committed.endMilliseconds, isNull);
+  });
+
+  testWidgets('時間記録なしの保存失敗時は表示とDBを未着手のまま保つ', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = _FailingSkippedRepository(database);
+
+    await pumpScreen(tester, database, record.id, repository: repository);
+    await _openTab(tester, 'CCC');
+    final skipButton = find
+        .byKey(const Key('procedure-skip-button'))
+        .hitTestable();
+    await tester.ensureVisible(skipButton);
+    await tester.pumpAndSettle();
+    await tester.tap(skipButton);
+    await tester.pumpAndSettle();
+
+    expect(repository.saveCalls, 1);
+    expect(find.text('工程状態を保存できませんでした。もう一度お試しください。'), findsOneWidget);
+    expect(find.text('時間記録なし'), findsNothing);
+
+    late SurgicalStepReview persisted;
+    await tester.runAsync(() async {
+      persisted = (await SurgeryRepository(database).getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+    });
+    expect(persisted.recordingStatus, StepRecordingStatus.unprocessed);
+    expect(persisted.isSkipped, isFalse);
+  });
+
+  testWidgets('skip保存中の動画参照競合でskippedにせず最新工程を再読込する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final oldPath = 'videos/${record.id}/old.mp4';
+    final newPath = 'videos/${record.id}/new.mp4';
+    await tester.runAsync(() async {
+      await SurgeryRepository(database).updateVideoReference(
+        surgeryRecordId: record.id,
+        videoPath: oldPath,
+        videoDisplayName: 'old.mp4',
+      );
+    });
+    final repository = _ControlledSkippedRepository(database);
+
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      repository: repository,
+      videoStorageRepository: const _ReviewStateVideoStorage(),
+    );
+    await _openTab(tester, 'CCC');
+    final skipButton = find
+        .byKey(const Key('procedure-skip-button'))
+        .hitTestable();
+    await tester.ensureVisible(skipButton);
+    await tester.pumpAndSettle();
+    await tester.tap(skipButton);
+    await tester.runAsync(() => repository.started.future);
+    await tester.pump();
+
+    await tester.runAsync(() async {
+      final concurrentRepository = SurgeryRepository(database);
+      await concurrentRepository.updateVideoReferenceIfCurrent(
+        surgeryRecordId: record.id,
+        expectedVideoPath: oldPath,
+        videoPath: newPath,
+        videoDisplayName: 'new.mp4',
+      );
+      final latest = (await concurrentRepository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+      await concurrentRepository.saveStepTiming(
+        review: latest.copyWith(startMilliseconds: 1200),
+        expectedVideoPath: newPath,
+      );
+    });
+    repository.release.complete();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(repository.saveCalls, 1);
+    expect(
+      find.text('動画が変更されたため工程状態を保存しませんでした。最新状態を再確認してください。'),
+      findsOneWidget,
+    );
+    expect(find.text('時間記録なし'), findsNothing);
+    final timingCard = tester.widget<ProcedureTimingCard>(
+      find.byType(ProcedureTimingCard),
+    );
+    expect(timingCard.timing.recordingStatus, StepRecordingStatus.unprocessed);
+    expect(timingCard.timing.startMilliseconds, 1200);
+    expect(timingCard.timing.isRunning, isTrue);
+    expect(find.text('開始時刻：0:01.2'), findsOneWidget);
+
+    late SurgeryRecord latestRecord;
+    late SurgicalStepReview latestReview;
+    await tester.runAsync(() async {
+      final dataRepository = SurgeryRepository(database);
+      latestRecord = (await dataRepository.getRecord(record.id))!;
+      latestReview = (await dataRepository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      ))!;
+    });
+    expect(latestRecord.videoPath, newPath);
+    expect(latestReview.startMilliseconds, 1200);
+    expect(latestReview.isSkipped, isFalse);
+  });
+
+  for (final videoKind in const <RecordVideoStateKind>[
+    RecordVideoStateKind.missing,
+    RecordVideoStateKind.invalidReference,
+    RecordVideoStateKind.checkFailed,
+  ]) {
+    testWidgets('動画${videoKind.name}でもskipとskipped再設定を保存できる', (tester) async {
+      final (database, record) = await createRecord(tester);
+      addTearDown(database.close);
+      final videoPath = videoKind == RecordVideoStateKind.invalidReference
+          ? '../invalid.mp4'
+          : 'videos/${record.id}/${videoKind.name}.mp4';
+      await tester.runAsync(() async {
+        await SurgeryRepository(database).updateVideoReference(
+          surgeryRecordId: record.id,
+          videoPath: videoPath,
+          videoDisplayName: '${videoKind.name}.mp4',
+        );
+      });
+      final storage = videoKind == RecordVideoStateKind.checkFailed
+          ? const _ReviewStateVideoStorage(
+              resolveError: FileSystemException('制御可能な確認失敗'),
+            )
+          : const _ReviewStateVideoStorage();
+
+      await pumpScreen(
+        tester,
+        database,
+        record.id,
+        videoStorageRepository: storage,
+      );
+      expect(switch (videoKind) {
+        RecordVideoStateKind.missing => find.textContaining('動画の実体が見つかりません'),
+        RecordVideoStateKind.invalidReference => find.textContaining('動画参照が不正'),
+        RecordVideoStateKind.checkFailed => find.textContaining(
+          '動画を確認できませんでした',
+        ),
+        _ => throw StateError('対象外の動画状態です。'),
+      }, findsOneWidget);
+
+      await _openTab(tester, 'CCC');
+      final skipButton = find
+          .byKey(const Key('procedure-skip-button'))
+          .hitTestable();
+      await tester.ensureVisible(skipButton);
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextButton>(skipButton).onPressed, isNotNull);
+      await tester.tap(skipButton);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('時間記録なし'), findsOneWidget);
+      final resetButton = find
+          .byKey(const Key('procedure-reset-button'))
+          .hitTestable();
+      await tester.ensureVisible(resetButton);
+      await tester.pumpAndSettle();
+      expect(tester.widget<OutlinedButton>(resetButton).onPressed, isNotNull);
+      await tester.tap(resetButton);
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pumpAndSettle();
+
+      late SurgicalStepReview persisted;
+      await tester.runAsync(() async {
+        persisted = (await SurgeryRepository(database).getStepReview(
+          surgeryRecordId: record.id,
+          step: SurgicalStep.capsulorhexis,
+        ))!;
+      });
+      expect(persisted.recordingStatus, StepRecordingStatus.unprocessed);
+      expect(persisted.isSkipped, isFalse);
+      expect(find.text('時間記録なし'), findsNothing);
+      expect(
+        find.byKey(const Key('procedure-start-button')).hitTestable(),
+        findsOneWidget,
+      );
+    });
+  }
 }
 
 TextButton _saveButton(WidgetTester tester) {
@@ -1037,6 +1360,48 @@ class _ControlledTimingRepository extends SurgeryRepository {
     await release.future;
     return super.saveStepTiming(
       review: review,
+      expectedVideoPath: expectedVideoPath,
+    );
+  }
+}
+
+class _FailingSkippedRepository extends SurgeryRepository {
+  _FailingSkippedRepository(super.database);
+
+  int saveCalls = 0;
+
+  @override
+  Future<SurgicalStepReview> saveStepSkipped({
+    required SurgicalStepReview review,
+    required bool isSkipped,
+    required String? expectedVideoPath,
+  }) async {
+    saveCalls++;
+    throw StateError('制御可能なskip保存失敗');
+  }
+}
+
+class _ControlledSkippedRepository extends SurgeryRepository {
+  _ControlledSkippedRepository(super.database);
+
+  final Completer<void> started = Completer<void>();
+  final Completer<void> release = Completer<void>();
+  int saveCalls = 0;
+
+  @override
+  Future<SurgicalStepReview> saveStepSkipped({
+    required SurgicalStepReview review,
+    required bool isSkipped,
+    required String? expectedVideoPath,
+  }) async {
+    saveCalls++;
+    if (!started.isCompleted) {
+      started.complete();
+    }
+    await release.future;
+    return super.saveStepSkipped(
+      review: review,
+      isSkipped: isSkipped,
       expectedVideoPath: expectedVideoPath,
     );
   }

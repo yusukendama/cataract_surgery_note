@@ -489,6 +489,12 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
                                         !_hasPendingWrite && !_recordWasDeleted
                                         ? () => _resetStep(byStep[step]!)
                                         : null,
+                                    onSkip:
+                                        !step.isTotalSurgeryTime &&
+                                            !_hasPendingWrite &&
+                                            !_recordWasDeleted
+                                        ? () => _skipStep(byStep[step]!)
+                                        : null,
                                     onTapStart:
                                         byStep[step]!.startMilliseconds ==
                                                 null ||
@@ -573,7 +579,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (byStep[step]!.isCompleted) ...[
+                if (byStep[step]!.isProcessed) ...[
                   const Icon(Icons.check, size: 14),
                   const SizedBox(width: 4),
                 ] else if (byStep[step]!.isRunning) ...[
@@ -1217,7 +1223,9 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       _draftInitialized = true;
       _isDirty = false;
       final firstIncomplete = reviews.indexWhere(
-        (review) => !review.isCompleted,
+        (review) => review.step.isTotalSurgeryTime
+            ? !review.isCompleted
+            : !review.isProcessed,
       );
       if (firstIncomplete > 0) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1338,6 +1346,10 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   }
 
   Future<void> _resetStep(SurgicalStepReview review) async {
+    if (review.recordingStatus == StepRecordingStatus.skipped) {
+      await _saveSkipped(review, isSkipped: false);
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1360,6 +1372,71 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
         review.copyWith(clearStart: true, clearEnd: true),
         requiresVideoPosition: false,
       );
+    }
+  }
+
+  Future<void> _skipStep(SurgicalStepReview review) async {
+    if (_hasPendingWrite || _recordWasDeleted) {
+      return;
+    }
+    if (review.startMilliseconds != null || review.endMilliseconds != null) {
+      final confirmed = await showAppConfirmDialog(
+        context: context,
+        title: '時間記録なしにする',
+        message: '入力中の時刻を削除して、この工程を「時間記録なし」にしますか？',
+        confirmLabel: '時間記録なしにする',
+        isDestructive: true,
+      );
+      if (!confirmed || !mounted) {
+        return;
+      }
+    }
+    await _saveSkipped(review, isSkipped: true);
+  }
+
+  Future<void> _saveSkipped(
+    SurgicalStepReview review, {
+    required bool isSkipped,
+  }) async {
+    if (_hasPendingWrite || _recordWasDeleted) {
+      return;
+    }
+    final expectedVideoPath = _latestRecord?.videoPath;
+    setState(() => _savingStep = review.step);
+    try {
+      final saved = await ref
+          .read(surgeryRepositoryProvider)
+          .saveStepSkipped(
+            review: review,
+            isSkipped: isSkipped,
+            expectedVideoPath: expectedVideoPath,
+          );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _replaceCommittedTiming(saved);
+        _markCommittedRefreshPending();
+      });
+      _invalidateReviewData();
+      await _performSuccessHaptic();
+    } on VideoReferenceConflictException {
+      _showMessage('動画が変更されたため工程状態を保存しませんでした。最新状態を再確認してください。');
+      _refreshAll();
+    } on SurgeryRecordNotFoundException {
+      if (mounted) {
+        setState(() => _recordWasDeleted = true);
+      }
+      _showMessage('症例が別画面で削除されたため保存できません。');
+    } on SurgicalStepReviewNotFoundException {
+      _showMessage('工程情報が更新されたため保存できませんでした。再読み込みしてください。');
+      _refreshAll();
+    } catch (_) {
+      _showMessage('工程状態を保存できませんでした。もう一度お試しください。');
+    } finally {
+      if (mounted) {
+        setState(() => _savingStep = null);
+      }
     }
   }
 
@@ -1951,6 +2028,7 @@ class ProcedureTimingCard extends StatelessWidget {
     required this.onStart,
     required this.onEnd,
     required this.onReset,
+    this.onSkip,
     this.videoUnavailableReason = '動画を確認できないため利用できません',
     this.onTapStart,
     this.onTapEnd,
@@ -1963,16 +2041,36 @@ class ProcedureTimingCard extends StatelessWidget {
   final VoidCallback? onStart;
   final VoidCallback? onEnd;
   final VoidCallback? onReset;
+  final VoidCallback? onSkip;
   final String videoUnavailableReason;
   final VoidCallback? onTapStart;
   final VoidCallback? onTapEnd;
 
   @override
   Widget build(BuildContext context) {
-    final status = switch ((timing.isRunning, timing.isCompleted)) {
-      (true, _) => const (label: '計測中', icon: Icons.timer_outlined),
-      (_, true) => const (label: '完了', icon: Icons.check_circle_outline),
-      _ => const (label: '未着手', icon: Icons.radio_button_unchecked),
+    final hasTimingInput =
+        timing.startMilliseconds != null || timing.endMilliseconds != null;
+    final status = switch (timing.recordingStatus) {
+      StepRecordingStatus.skipped => const (
+        label: '時間記録なし',
+        icon: Icons.do_not_disturb_alt_outlined,
+      ),
+      StepRecordingStatus.recorded => const (
+        label: '完了',
+        icon: Icons.check_circle_outline,
+      ),
+      StepRecordingStatus.unprocessed when timing.isRunning => const (
+        label: '計測中',
+        icon: Icons.timer_outlined,
+      ),
+      StepRecordingStatus.unprocessed when hasTimingInput => const (
+        label: '要再設定',
+        icon: Icons.warning_amber_outlined,
+      ),
+      StepRecordingStatus.unprocessed => const (
+        label: '未着手',
+        icon: Icons.radio_button_unchecked,
+      ),
     };
     return Card(
       child: Padding(
@@ -1998,7 +2096,9 @@ class ProcedureTimingCard extends StatelessWidget {
                 ),
               ],
             ),
-            if (timing.isRunning) ...[
+            if (timing.recordingStatus == StepRecordingStatus.skipped) ...[
+              const SizedBox(height: 12),
+            ] else if (timing.isRunning) ...[
               _TimingSeekButton(
                 label:
                     '開始時刻：'
@@ -2037,60 +2137,74 @@ class ProcedureTimingCard extends StatelessWidget {
                 height: 56,
                 child: Center(child: CircularProgressIndicator()),
               )
-            else if (timing.isNotStarted)
-              Tooltip(
-                message: onStart == null
-                    ? videoUnavailableReason
-                    : '現在の動画位置で工程を開始',
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(minHeight: 56),
-                    child: FilledButton.icon(
-                      key: const Key('procedure-start-button'),
-                      onPressed: onStart,
-                      icon: const Icon(Icons.play_arrow),
-                      label: const Text('この工程を開始'),
-                    ),
+            else ...[
+              _buildPrimaryAction(context),
+              if (timing.recordingStatus == StepRecordingStatus.unprocessed &&
+                  !step.isTotalSurgeryTime) ...[
+                const SizedBox(height: 4),
+                Align(
+                  alignment: Alignment.center,
+                  child: TextButton(
+                    key: const Key('procedure-skip-button'),
+                    onPressed: onSkip,
+                    child: const Text('今回は時間を記録しない'),
                   ),
                 ),
-              )
-            else if (timing.isRunning)
-              Tooltip(
-                message: onEnd == null
-                    ? videoUnavailableReason
-                    : '現在の動画位置で工程を終了',
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ConstrainedBox(
-                    constraints: const BoxConstraints(minHeight: 56),
-                    child: FilledButton.icon(
-                      key: const Key('procedure-end-button'),
-                      style: FilledButton.styleFrom(
-                        backgroundColor: Theme.of(context).colorScheme.error,
-                        foregroundColor: Theme.of(context).colorScheme.onError,
-                      ),
-                      onPressed: onEnd,
-                      icon: const Icon(Icons.stop),
-                      label: const Text('この工程を終了'),
-                    ),
-                  ),
-                ),
-              )
-            else
-              Align(
-                alignment: Alignment.centerRight,
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(48, 48),
-                  ),
-                  onPressed: onReset,
-                  icon: const Icon(Icons.refresh),
-                  label: const Text('再設定'),
-                ),
-              ),
+              ],
+            ],
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildPrimaryAction(BuildContext context) {
+    if (timing.isNotStarted) {
+      return Tooltip(
+        message: onStart == null ? videoUnavailableReason : '現在の動画位置で工程を開始',
+        child: SizedBox(
+          width: double.infinity,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 56),
+            child: FilledButton.icon(
+              key: const Key('procedure-start-button'),
+              onPressed: onStart,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('この工程を開始'),
+            ),
+          ),
+        ),
+      );
+    }
+    if (timing.isRunning) {
+      return Tooltip(
+        message: onEnd == null ? videoUnavailableReason : '現在の動画位置で工程を終了',
+        child: SizedBox(
+          width: double.infinity,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 56),
+            child: FilledButton.icon(
+              key: const Key('procedure-end-button'),
+              style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.error,
+                foregroundColor: Theme.of(context).colorScheme.onError,
+              ),
+              onPressed: onEnd,
+              icon: const Icon(Icons.stop),
+              label: const Text('この工程を終了'),
+            ),
+          ),
+        ),
+      );
+    }
+    return Align(
+      alignment: Alignment.centerRight,
+      child: OutlinedButton.icon(
+        key: const Key('procedure-reset-button'),
+        style: OutlinedButton.styleFrom(minimumSize: const Size(48, 48)),
+        onPressed: onReset,
+        icon: const Icon(Icons.refresh),
+        label: const Text('再設定'),
       ),
     );
   }

@@ -28,26 +28,18 @@ class RecordMonthGroup {
   final List<SurgeryRecord> records;
 }
 
-/// Groups records by their surgery month in the device's local time zone.
+/// Groups records by the calendar components of their registered surgery date.
 ///
 /// Groups and records are both newest-first. Records on the same surgery date
-/// are ordered by creation time, while otherwise identical records keep their
-/// input order.
+/// are ordered by creation time, then by their stable record ID.
 List<RecordMonthGroup> groupRecordsByMonth(Iterable<SurgeryRecord> records) {
-  final indexedRecords =
-      records
-          .toList()
-          .asMap()
-          .entries
-          .map((entry) => _IndexedRecord(index: entry.key, record: entry.value))
-          .toList()
-        ..sort(_compareRecords);
+  final sortedRecords = records.toList()..sort(_compareRecords);
 
   final groupedRecords = <RecordMonth, List<SurgeryRecord>>{};
-  for (final indexedRecord in indexedRecords) {
-    final localDate = indexedRecord.record.surgeryDate.toLocal();
-    final month = RecordMonth(year: localDate.year, month: localDate.month);
-    groupedRecords.putIfAbsent(month, () => []).add(indexedRecord.record);
+  for (final record in sortedRecords) {
+    final surgeryDate = record.surgeryDate;
+    final month = RecordMonth(year: surgeryDate.year, month: surgeryDate.month);
+    groupedRecords.putIfAbsent(month, () => []).add(record);
   }
 
   return List.unmodifiable(
@@ -60,28 +52,19 @@ List<RecordMonthGroup> groupRecordsByMonth(Iterable<SurgeryRecord> records) {
   );
 }
 
-int _compareRecords(_IndexedRecord left, _IndexedRecord right) {
-  final leftDate = left.record.surgeryDate.toLocal();
-  final rightDate = right.record.surgeryDate.toLocal();
+int _compareRecords(SurgeryRecord left, SurgeryRecord right) {
+  final leftDate = left.surgeryDate;
+  final rightDate = right.surgeryDate;
   final bySurgeryDate = _dateKey(rightDate).compareTo(_dateKey(leftDate));
   if (bySurgeryDate != 0) {
     return bySurgeryDate;
   }
 
-  final byCreationDate = right.record.createdAt.compareTo(
-    left.record.createdAt,
-  );
+  final byCreationDate = right.createdAt.compareTo(left.createdAt);
   if (byCreationDate != 0) {
     return byCreationDate;
   }
-  return left.index.compareTo(right.index);
+  return left.id.compareTo(right.id);
 }
 
 int _dateKey(DateTime date) => date.year * 10000 + date.month * 100 + date.day;
-
-class _IndexedRecord {
-  const _IndexedRecord({required this.index, required this.record});
-
-  final int index;
-  final SurgeryRecord record;
-}

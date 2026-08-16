@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import '../domain/procedure_timing_rules.dart';
 import '../domain/surgery_models.dart';
+import '../domain/surgery_review_rules.dart';
 import '../domain/surgery_trend.dart';
 import 'app_database.dart';
 import 'record_mutation_coordinator.dart';
@@ -41,12 +42,14 @@ class SurgeryRecordProgress {
     required this.completedStepCount,
     required this.hasRunningStep,
     required this.totalSurgeryDuration,
+    this.timingReviewStatus,
   });
 
   final SurgeryRecord record;
   final int completedStepCount;
   final bool hasRunningStep;
   final Duration? totalSurgeryDuration;
+  final CaseTimingReviewStatus? timingReviewStatus;
 }
 
 class SurgeryRepository {
@@ -62,6 +65,7 @@ class SurgeryRepository {
   final Uuid _uuid;
   final RecordMutationCoordinator _mutationCoordinator;
   final ProcedureTimingRules _rules = const ProcedureTimingRules();
+  final SurgeryReviewRules _reviewRules = const SurgeryReviewRules();
 
   String allocateRecordId() => _uuid.v4();
 
@@ -75,7 +79,7 @@ class SurgeryRepository {
   Future<List<SurgeryRecord>> watchableListSnapshot() async {
     final rows = await _database.customSelect('''
 SELECT * FROM surgery_records
-ORDER BY surgery_date DESC, created_at DESC
+ORDER BY surgery_date DESC, created_at DESC, id ASC
 ''', readsFrom: const {}).get();
     return rows.map(_recordFromRow).toList();
   }
@@ -84,7 +88,7 @@ ORDER BY surgery_date DESC, created_at DESC
     return _database
         .customSelect('''
 SELECT * FROM surgery_records
-ORDER BY surgery_date DESC, created_at DESC
+ORDER BY surgery_date DESC, created_at DESC, id ASC
 ''', readsFrom: const {})
         .watch()
         .map((rows) => rows.map(_recordFromRow).toList());
@@ -92,8 +96,7 @@ ORDER BY surgery_date DESC, created_at DESC
 
   /// Returns list/detail supporting information without creating review rows.
   Future<List<SurgeryRecordProgress>> fetchRecordProgressSnapshots() async {
-    final displayStepIds = surgicalStepsInDisplayOrder
-        .where((step) => !step.isTotalSurgeryTime)
+    final displayStepIds = activeIndividualSurgicalSteps
         .map((step) => "'${step.storageId}'")
         .join(', ');
     final rows = await _database.customSelect('''
@@ -101,15 +104,37 @@ SELECT
   r.*,
   SUM(CASE
     WHEN s.step IN ($displayStepIds)
-      AND s.start_milliseconds IS NOT NULL
-      AND s.end_milliseconds IS NOT NULL
-      AND s.end_milliseconds > s.start_milliseconds
+      AND (
+        (s.start_milliseconds IS NOT NULL
+          AND s.end_milliseconds IS NOT NULL
+          AND s.end_milliseconds > s.start_milliseconds)
+        OR (
+          s.start_milliseconds IS NULL
+          AND s.end_milliseconds IS NULL
+          AND s.is_skipped = 1
+        )
+      )
     THEN 1 ELSE 0 END) AS completed_step_count,
   MAX(CASE
     WHEN s.step IN ($displayStepIds)
       AND s.start_milliseconds IS NOT NULL
       AND s.end_milliseconds IS NULL
     THEN 1 ELSE 0 END) AS has_running_step,
+  MAX(CASE
+    WHEN s.step IN ($displayStepIds)
+      AND (
+        s.start_milliseconds IS NOT NULL
+        OR s.end_milliseconds IS NOT NULL
+        OR s.is_skipped = 1
+      )
+    THEN 1 ELSE 0 END) AS has_individual_step_input,
+  MAX(CASE
+    WHEN s.step = '${SurgicalStep.totalSurgeryTime.storageId}'
+      AND (
+        s.start_milliseconds IS NOT NULL
+        OR s.end_milliseconds IS NOT NULL
+      )
+    THEN 1 ELSE 0 END) AS has_total_surgery_timing_input,
   MAX(CASE
     WHEN s.step = '${SurgicalStep.totalSurgeryTime.storageId}'
       AND s.start_milliseconds IS NOT NULL
@@ -121,18 +146,28 @@ FROM surgery_records AS r
 LEFT JOIN surgical_step_reviews AS s
   ON s.surgery_record_id = r.id
 GROUP BY r.id
-ORDER BY r.surgery_date DESC, r.created_at DESC
+ORDER BY r.surgery_date DESC, r.created_at DESC, r.id ASC
 ''', readsFrom: const {}).get();
     return rows
         .map((row) {
           final totalMilliseconds = row.read<int?>('total_surgery_duration');
+          final totalSurgeryDuration = totalMilliseconds == null
+              ? null
+              : Duration(milliseconds: totalMilliseconds);
           return SurgeryRecordProgress(
             record: _recordFromRow(row),
             completedStepCount: row.read<int>('completed_step_count'),
             hasRunningStep: row.read<int>('has_running_step') == 1,
-            totalSurgeryDuration: totalMilliseconds == null
-                ? null
-                : Duration(milliseconds: totalMilliseconds),
+            totalSurgeryDuration: totalSurgeryDuration,
+            timingReviewStatus: _reviewRules.calculateCaseStatus(
+              reviewSchemaVersion: row.read<int?>('review_schema_version'),
+              totalSurgeryDuration: totalSurgeryDuration,
+              hasTotalSurgeryTimingInput:
+                  row.read<int>('has_total_surgery_timing_input') == 1,
+              processedStepCount: row.read<int>('completed_step_count'),
+              hasIndividualStepInput:
+                  row.read<int>('has_individual_step_input') == 1,
+            ),
           );
         })
         .toList(growable: false);
@@ -251,6 +286,7 @@ ORDER BY r.surgery_date ASC, r.created_at ASC, r.id ASC
         ),
         eyeSide: eyeSide,
         reviewStatus: ReviewStatus.draft,
+        reviewSchemaVersion: 1,
         videoPath: videoPath,
         videoDisplayName: videoDisplayName,
         createdAt: now,
@@ -261,14 +297,16 @@ ORDER BY r.surgery_date ASC, r.created_at ASC, r.id ASC
           '''
 INSERT INTO surgery_records (
   id, surgery_date, eye_side, review_status,
-  video_path, video_display_name, case_memo, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  review_schema_version, video_path, video_display_name,
+  case_memo, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''',
           [
             record.id,
             _dateToMillis(record.surgeryDate),
             record.eyeSide.name,
             record.reviewStatus.name,
+            record.reviewSchemaVersion,
             record.videoPath,
             record.videoDisplayName,
             record.caseMemo,
@@ -383,6 +421,7 @@ WHERE id = ?
   }) {
     return runRecordMutation(surgeryRecordId, () async {
       await _database.transaction(() async {
+        final updatedAt = _dateToMillis(DateTime.now());
         await _assertExpectedVideoPath(
           surgeryRecordId: surgeryRecordId,
           expectedVideoPath: expectedVideoPath,
@@ -390,14 +429,17 @@ WHERE id = ?
         final affected = await _database.customUpdate(
           '''
 UPDATE surgery_records
-SET video_path = ?, video_display_name = ?, updated_at = ?
+SET video_path = ?,
+    video_display_name = ?,
+    review_schema_version = 1,
+    updated_at = ?
 WHERE id = ?
   AND ((video_path IS NULL AND ? IS NULL) OR video_path = ?)
 ''',
           variables: <Variable<Object>>[
             Variable<String>(videoPath),
             Variable<String>(videoDisplayName),
-            Variable<int>(_dateToMillis(DateTime.now())),
+            Variable<int>(updatedAt),
             Variable<String>(surgeryRecordId),
             Variable<String>(expectedVideoPath),
             Variable<String>(expectedVideoPath),
@@ -416,11 +458,19 @@ WHERE id = ?
         await _database.customUpdate(
           '''
 UPDATE surgical_step_reviews
-SET start_milliseconds = NULL, end_milliseconds = NULL, updated_at = ?
+SET is_skipped = CASE
+      WHEN start_milliseconds IS NULL
+        AND end_milliseconds IS NULL
+        AND is_skipped = 1
+      THEN 1 ELSE 0
+    END,
+    start_milliseconds = NULL,
+    end_milliseconds = NULL,
+    updated_at = ?
 WHERE surgery_record_id = ?
 ''',
           variables: <Variable<Object>>[
-            Variable<int>(_dateToMillis(DateTime.now())),
+            Variable<int>(updatedAt),
             Variable<String>(surgeryRecordId),
           ],
         );
@@ -486,18 +536,43 @@ WHERE id = ?
   /// intentionally preserved.
   Future<void> clearStepTimings(String surgeryRecordId) {
     return runRecordMutation(surgeryRecordId, () async {
-      final record = await getRecord(surgeryRecordId);
-      if (record == null) {
-        throw SurgeryRecordNotFoundException(surgeryRecordId);
-      }
-      await _database.customStatement(
-        '''
+      await _database.transaction(() async {
+        final updatedAt = _dateToMillis(DateTime.now());
+        final affected = await _database.customUpdate(
+          '''
 UPDATE surgical_step_reviews
-SET start_milliseconds = NULL, end_milliseconds = NULL, updated_at = ?
+SET is_skipped = CASE
+      WHEN start_milliseconds IS NULL
+        AND end_milliseconds IS NULL
+        AND is_skipped = 1
+      THEN 1 ELSE 0
+    END,
+    start_milliseconds = NULL,
+    end_milliseconds = NULL,
+    updated_at = ?
 WHERE surgery_record_id = ?
 ''',
-        [_dateToMillis(DateTime.now()), surgeryRecordId],
-      );
+          variables: <Variable<Object>>[
+            Variable<int>(updatedAt),
+            Variable<String>(surgeryRecordId),
+          ],
+        );
+        final recordAffected = await _database.customUpdate(
+          '''
+UPDATE surgery_records
+SET review_schema_version = 1, updated_at = ?
+WHERE id = ?
+''',
+          variables: <Variable<Object>>[
+            Variable<int>(updatedAt),
+            Variable<String>(surgeryRecordId),
+          ],
+        );
+        if (recordAffected != 1) {
+          throw SurgeryRecordNotFoundException(surgeryRecordId);
+        }
+        assert(affected >= 0);
+      });
     });
   }
 
@@ -627,7 +702,10 @@ LIMIT 1
         final affected = await _database.customUpdate(
           '''
 UPDATE surgical_step_reviews
-SET start_milliseconds = ?, end_milliseconds = ?, updated_at = ?
+SET start_milliseconds = ?,
+    end_milliseconds = ?,
+    is_skipped = 0,
+    updated_at = ?
 WHERE id = ? AND surgery_record_id = ? AND step = ?
 ''',
           variables: <Variable<Object>>[
@@ -645,7 +723,7 @@ WHERE id = ? AND surgery_record_id = ? AND step = ?
         final recordAffected = await _database.customUpdate(
           '''
 UPDATE surgery_records
-SET review_status = ?, updated_at = ?
+SET review_status = ?, review_schema_version = 1, updated_at = ?
 WHERE id = ?
 ''',
           variables: <Variable<Object>>[
@@ -666,6 +744,90 @@ WHERE id = ?
           endMilliseconds: review.endMilliseconds,
           clearStart: review.startMilliseconds == null,
           clearEnd: review.endMilliseconds == null,
+          isSkipped: false,
+          updatedAt: updatedAt,
+        );
+      });
+    });
+  }
+
+  /// Persists the explicit "do not record timing" decision for one active
+  /// individual step. This operation never requires a playable video, but it
+  /// remains bound to the video reference observed by the caller.
+  Future<SurgicalStepReview> saveStepSkipped({
+    required SurgicalStepReview review,
+    required bool isSkipped,
+    required String? expectedVideoPath,
+  }) {
+    if (!activeIndividualSurgicalSteps.contains(review.step)) {
+      throw ArgumentError('総手術時間または非表示工程は時間記録なしにできません。');
+    }
+
+    return runRecordMutation(review.surgeryRecordId, () async {
+      final updatedAt = _millisToDate(_dateToMillis(DateTime.now()));
+      return _database.transaction(() async {
+        await _assertExpectedVideoPath(
+          surgeryRecordId: review.surgeryRecordId,
+          expectedVideoPath: expectedVideoPath,
+        );
+        final existingRows = await _database
+            .customSelect(
+              '''
+SELECT * FROM surgical_step_reviews
+WHERE id = ? AND surgery_record_id = ? AND step = ?
+LIMIT 1
+''',
+              variables: <Variable<Object>>[
+                Variable<String>(review.id),
+                Variable<String>(review.surgeryRecordId),
+                Variable<String>(review.step.storageId),
+              ],
+              readsFrom: const {},
+            )
+            .get();
+        if (existingRows.length != 1) {
+          throw SurgicalStepReviewNotFoundException(review.id);
+        }
+        final existing = _reviewFromRow(existingRows.single);
+        final affected = await _database.customUpdate(
+          '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = NULL,
+    end_milliseconds = NULL,
+    is_skipped = ?,
+    updated_at = ?
+WHERE id = ? AND surgery_record_id = ? AND step = ?
+''',
+          variables: <Variable<Object>>[
+            Variable<int>(isSkipped ? 1 : 0),
+            Variable<int>(_dateToMillis(updatedAt)),
+            Variable<String>(review.id),
+            Variable<String>(review.surgeryRecordId),
+            Variable<String>(review.step.storageId),
+          ],
+        );
+        if (affected != 1) {
+          throw SurgicalStepReviewNotFoundException(review.id);
+        }
+        final recordAffected = await _database.customUpdate(
+          '''
+UPDATE surgery_records
+SET review_status = ?, review_schema_version = 1, updated_at = ?
+WHERE id = ?
+''',
+          variables: <Variable<Object>>[
+            Variable<String>(ReviewStatus.reviewed.name),
+            Variable<int>(_dateToMillis(updatedAt)),
+            Variable<String>(review.surgeryRecordId),
+          ],
+        );
+        if (recordAffected != 1) {
+          throw SurgeryRecordNotFoundException(review.surgeryRecordId);
+        }
+        return existing.copyWith(
+          clearStart: true,
+          clearEnd: true,
+          isSkipped: isSkipped,
           updatedAt: updatedAt,
         );
       });
@@ -803,49 +965,92 @@ WHERE id = ?
     }
 
     return runRecordMutation(review.surgeryRecordId, () async {
-      final updated = review.copyWith(updatedAt: DateTime.now());
-      await _database.transaction(() async {
+      final updatedAt = _millisToDate(_dateToMillis(DateTime.now()));
+      return _database.transaction(() async {
+        final existingRows = await _database
+            .customSelect(
+              '''
+SELECT * FROM surgical_step_reviews
+WHERE id = ? AND surgery_record_id = ? AND step = ?
+LIMIT 1
+''',
+              variables: <Variable<Object>>[
+                Variable<String>(review.id),
+                Variable<String>(review.surgeryRecordId),
+                Variable<String>(review.step.storageId),
+              ],
+              readsFrom: const {},
+            )
+            .get();
+        if (existingRows.length != 1) {
+          throw SurgicalStepReviewNotFoundException(review.id);
+        }
+        final existing = _reviewFromRow(existingRows.single);
+        final normalizedIsSkipped =
+            review.startMilliseconds == null &&
+            review.endMilliseconds == null &&
+            review.isSkipped;
+        final timingChanged =
+            existing.startMilliseconds != review.startMilliseconds ||
+            existing.endMilliseconds != review.endMilliseconds ||
+            existing.isSkipped != normalizedIsSkipped;
         final affected = await _database.customUpdate(
           '''
 UPDATE surgical_step_reviews
 SET start_milliseconds = ?,
     end_milliseconds = ?,
+    is_skipped = ?,
     rating = ?,
     reflection = ?,
     updated_at = ?
 WHERE id = ? AND surgery_record_id = ? AND step = ?
 ''',
           variables: <Variable<Object>>[
-            Variable<int>(updated.startMilliseconds),
-            Variable<int>(updated.endMilliseconds),
-            Variable<String>(updated.rating.name),
-            Variable<String>(updated.reflection),
-            Variable<int>(_dateToMillis(updated.updatedAt)),
-            Variable<String>(updated.id),
-            Variable<String>(updated.surgeryRecordId),
-            Variable<String>(updated.step.storageId),
+            Variable<int>(review.startMilliseconds),
+            Variable<int>(review.endMilliseconds),
+            Variable<int>(normalizedIsSkipped ? 1 : 0),
+            Variable<String>(review.rating.name),
+            Variable<String>(review.reflection),
+            Variable<int>(_dateToMillis(updatedAt)),
+            Variable<String>(review.id),
+            Variable<String>(review.surgeryRecordId),
+            Variable<String>(review.step.storageId),
           ],
         );
         if (affected != 1) {
-          throw SurgicalStepReviewNotFoundException(updated.id);
+          throw SurgicalStepReviewNotFoundException(review.id);
         }
         final recordAffected = await _database.customUpdate(
           '''
 UPDATE surgery_records
-SET review_status = ?, updated_at = ?
+SET review_status = ?,
+    review_schema_version = CASE
+      WHEN ? = 1 THEN 1 ELSE review_schema_version
+    END,
+    updated_at = ?
 WHERE id = ?
 ''',
           variables: <Variable<Object>>[
             Variable<String>(ReviewStatus.reviewed.name),
-            Variable<int>(_dateToMillis(DateTime.now())),
-            Variable<String>(updated.surgeryRecordId),
+            Variable<int>(timingChanged ? 1 : 0),
+            Variable<int>(_dateToMillis(updatedAt)),
+            Variable<String>(review.surgeryRecordId),
           ],
         );
         if (recordAffected != 1) {
-          throw SurgeryRecordNotFoundException(updated.surgeryRecordId);
+          throw SurgeryRecordNotFoundException(review.surgeryRecordId);
         }
+        return existing.copyWith(
+          startMilliseconds: review.startMilliseconds,
+          endMilliseconds: review.endMilliseconds,
+          clearStart: review.startMilliseconds == null,
+          clearEnd: review.endMilliseconds == null,
+          isSkipped: normalizedIsSkipped,
+          rating: review.rating,
+          reflection: review.reflection,
+          updatedAt: updatedAt,
+        );
       });
-      return updated;
     });
   }
 
@@ -897,8 +1102,8 @@ WHERE id = ?
       '''
 INSERT OR IGNORE INTO surgical_step_reviews (
   id, surgery_record_id, step, start_milliseconds, end_milliseconds,
-  rating, reflection, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  is_skipped, rating, reflection, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''',
       <Object?>[
         _uuid.v4(),
@@ -906,6 +1111,7 @@ INSERT OR IGNORE INTO surgical_step_reviews (
         step.storageId,
         null,
         null,
+        0,
         StepRating.unreviewed.name,
         '',
         _dateToMillis(now),
@@ -924,6 +1130,7 @@ INSERT OR IGNORE INTO surgical_step_reviews (
       reviewStatus: ReviewStatus.values.byName(
         row.read<String>('review_status'),
       ),
+      reviewSchemaVersion: row.read<int?>('review_schema_version'),
       videoPath: row.read<String?>('video_path'),
       videoDisplayName: row.read<String?>('video_display_name'),
       caseMemo: row.read<String?>('case_memo') ?? '',
@@ -939,6 +1146,7 @@ INSERT OR IGNORE INTO surgical_step_reviews (
       step: SurgicalStep.fromStorageId(row.read<String>('step'))!,
       startMilliseconds: row.read<int?>('start_milliseconds'),
       endMilliseconds: row.read<int?>('end_milliseconds'),
+      isSkipped: row.read<int>('is_skipped') == 1,
       rating: StepRating.values.byName(row.read<String>('rating')),
       reflection: row.read<String>('reflection'),
       createdAt: _millisToDate(row.read<int>('created_at')),

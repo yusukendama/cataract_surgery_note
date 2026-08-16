@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS surgery_records (
   surgery_date INTEGER NOT NULL,
   eye_side TEXT NOT NULL,
   review_status TEXT NOT NULL,
+  review_schema_version INTEGER NULL,
   video_path TEXT NULL,
   video_display_name TEXT NULL,
   case_memo TEXT NOT NULL DEFAULT '',
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS surgical_step_reviews (
   step TEXT NOT NULL,
   start_milliseconds INTEGER NULL,
   end_milliseconds INTEGER NULL,
+  is_skipped INTEGER NOT NULL DEFAULT 0,
   rating TEXT NOT NULL,
   reflection TEXT NOT NULL,
   created_at INTEGER NOT NULL,
@@ -56,24 +58,28 @@ CREATE INDEX IF NOT EXISTS idx_surgical_step_reviews_record
 ON surgical_step_reviews(surgery_record_id)
 ''');
       await _ensureColumn('surgery_records', 'video_path', 'TEXT NULL');
-      await _ensureColumn(
-        'surgery_records',
-        'video_display_name',
-        'TEXT NULL',
-      );
+      await _ensureColumn('surgery_records', 'video_display_name', 'TEXT NULL');
       await _ensureColumn(
         'surgery_records',
         'case_memo',
         "TEXT NOT NULL DEFAULT ''",
       );
+      await _ensureColumn(
+        'surgery_records',
+        'review_schema_version',
+        'INTEGER NULL',
+      );
+      await _ensureColumn(
+        'surgical_step_reviews',
+        'is_skipped',
+        'INTEGER NOT NULL DEFAULT 0',
+      );
     },
   );
 
   /// Adds [column] to [table] when upgrading a database created by an older
-  /// schema. Existing installs may predate either the video columns (from
-  /// before the 12-step refactor) or the case memo column (added alongside
-  /// the in-app video review feature), so each column is checked
-  /// independently rather than assuming a single prior schema shape.
+  /// schema. Existing installs can predate different optional columns, so each
+  /// one is checked independently instead of assuming a single prior shape.
   Future<void> _ensureColumn(String table, String column, String ddl) async {
     final info = await customSelect('PRAGMA table_info($table)').get();
     final exists = info.any((row) => row.data['name'] == column);

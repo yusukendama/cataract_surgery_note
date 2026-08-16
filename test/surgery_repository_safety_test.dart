@@ -93,6 +93,200 @@ BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END
     expect(committed.reflection, '保持すべき反省点');
   });
 
+  test('saveStepTimingはversion更新失敗時に時刻・skip・症例状態を全rollbackする', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.right,
+    );
+    final review = await repository.ensureStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    final skipped = await repository.saveStepSkipped(
+      review: review,
+      isSkipped: true,
+      expectedVideoPath: null,
+    );
+    await _setRecordReviewTracking(
+      database,
+      record.id,
+      reviewStatus: ReviewStatus.draft,
+      reviewSchemaVersion: null,
+    );
+    await database.customStatement('''
+CREATE TRIGGER fail_timing_record_version_update
+BEFORE UPDATE ON surgery_records
+WHEN NEW.id = '${record.id}'
+BEGIN SELECT RAISE(ABORT, 'injected version update failure'); END
+''');
+
+    await expectLater(
+      repository.saveStepTiming(
+        review: skipped.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+        expectedVideoPath: null,
+      ),
+      throwsA(anything),
+    );
+
+    final persisted = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: review.step,
+    );
+    final persistedRecord = await repository.getRecord(record.id);
+    expect(persisted!.startMilliseconds, isNull);
+    expect(persisted.endMilliseconds, isNull);
+    expect(persisted.isSkipped, isTrue);
+    expect(persisted.recordingStatus, StepRecordingStatus.skipped);
+    expect(persistedRecord!.reviewSchemaVersion, isNull);
+    expect(persistedRecord.reviewStatus, ReviewStatus.draft);
+  });
+
+  test('saveStepSkippedは時刻消去とskip・旧症例移行を同時commitする', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.right,
+    );
+    final review = await repository.ensureStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    final timed = await repository.saveStepTiming(
+      review: review.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+      expectedVideoPath: null,
+    );
+    await _setRecordReviewTracking(
+      database,
+      record.id,
+      reviewStatus: ReviewStatus.draft,
+      reviewSchemaVersion: null,
+    );
+
+    final committed = await repository.saveStepSkipped(
+      review: timed,
+      isSkipped: true,
+      expectedVideoPath: null,
+    );
+    final persisted = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: review.step,
+    );
+    final persistedRecord = await repository.getRecord(record.id);
+
+    expect(committed.startMilliseconds, isNull);
+    expect(committed.endMilliseconds, isNull);
+    expect(committed.isSkipped, isTrue);
+    expect(committed.recordingStatus, StepRecordingStatus.skipped);
+    expect(persisted!.startMilliseconds, isNull);
+    expect(persisted.endMilliseconds, isNull);
+    expect(persisted.isSkipped, isTrue);
+    expect(persisted.recordingStatus, StepRecordingStatus.skipped);
+    expect(persistedRecord!.reviewStatus, ReviewStatus.reviewed);
+    expect(persistedRecord.reviewSchemaVersion, 1);
+  });
+
+  test('saveStepSkippedは症例更新失敗時に時刻消去とskipをrollbackする', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.left,
+    );
+    final review = await repository.ensureStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    final timed = await repository.saveStepTiming(
+      review: review.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+      expectedVideoPath: null,
+    );
+    await _setRecordReviewTracking(
+      database,
+      record.id,
+      reviewStatus: ReviewStatus.draft,
+      reviewSchemaVersion: null,
+    );
+    await database.customStatement('''
+CREATE TRIGGER fail_skip_record_update
+BEFORE UPDATE ON surgery_records
+WHEN NEW.id = '${record.id}'
+BEGIN SELECT RAISE(ABORT, 'injected record update failure'); END
+''');
+
+    await expectLater(
+      repository.saveStepSkipped(
+        review: timed,
+        isSkipped: true,
+        expectedVideoPath: null,
+      ),
+      throwsA(anything),
+    );
+
+    final persisted = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: review.step,
+    );
+    final persistedRecord = await repository.getRecord(record.id);
+    expect(persisted!.startMilliseconds, 100);
+    expect(persisted.endMilliseconds, 900);
+    expect(persisted.isSkipped, isFalse);
+    expect(persisted.recordingStatus, StepRecordingStatus.recorded);
+    expect(persistedRecord!.reviewStatus, ReviewStatus.draft);
+    expect(persistedRecord.reviewSchemaVersion, isNull);
+  });
+
+  test('saveStepSkippedはexpectedVideoPath競合時に何も更新しない', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.right,
+    );
+    final oldPath = 'videos/${record.id}/old.mp4';
+    final newPath = 'videos/${record.id}/new.mp4';
+    await repository.updateVideoReference(
+      surgeryRecordId: record.id,
+      videoPath: oldPath,
+      videoDisplayName: 'old.mp4',
+    );
+    final review = await repository.ensureStepReview(
+      surgeryRecordId: record.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    final timed = await repository.saveStepTiming(
+      review: review.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+      expectedVideoPath: oldPath,
+    );
+    await _setRecordReviewTracking(
+      database,
+      record.id,
+      reviewStatus: ReviewStatus.draft,
+      reviewSchemaVersion: null,
+    );
+    await repository.updateVideoReferenceIfCurrent(
+      surgeryRecordId: record.id,
+      expectedVideoPath: oldPath,
+      videoPath: newPath,
+      videoDisplayName: 'new.mp4',
+    );
+
+    await expectLater(
+      repository.saveStepSkipped(
+        review: timed,
+        isSkipped: true,
+        expectedVideoPath: oldPath,
+      ),
+      throwsA(isA<VideoReferenceConflictException>()),
+    );
+
+    final persisted = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: review.step,
+    );
+    final persistedRecord = await repository.getRecord(record.id);
+    expect(persisted!.startMilliseconds, 100);
+    expect(persisted.endMilliseconds, 900);
+    expect(persisted.isSkipped, isFalse);
+    expect(persistedRecord!.videoPath, newPath);
+    expect(persistedRecord.reviewStatus, ReviewStatus.draft);
+    expect(persistedRecord.reviewSchemaVersion, isNull);
+  });
+
   test('レビュー保存は時刻を上書きせずメモだけでstatusを変えない', () async {
     final record = await repository.createRecord(
       surgeryDate: DateTime(2026, 8, 15),
@@ -302,6 +496,184 @@ BEGIN SELECT RAISE(ABORT, 'injected review failure'); END
       expect(after[index]['rating'], before[index]['rating']);
       expect(after[index]['reflection'], before[index]['reflection']);
     }
+  });
+
+  test('動画置換と削除は時刻を消去しskipを保持してschema 1へ移行する', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.right,
+    );
+    final oldPath = 'videos/${record.id}/old.mp4';
+    final newPath = 'videos/${record.id}/new.mp4';
+    await repository.updateVideoReference(
+      surgeryRecordId: record.id,
+      videoPath: oldPath,
+      videoDisplayName: 'old.mp4',
+    );
+    final reviews = await repository.ensureStepReviews(record.id);
+    final skippedReview = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.capsulorhexis,
+    );
+    final timedReview = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.sidePortCreation,
+    );
+    await repository.saveStepSkipped(
+      review: skippedReview,
+      isSkipped: true,
+      expectedVideoPath: oldPath,
+    );
+    await repository.saveStepTiming(
+      review: timedReview.copyWith(
+        startMilliseconds: 100,
+        endMilliseconds: 900,
+      ),
+      expectedVideoPath: oldPath,
+    );
+    await _setRecordReviewTracking(
+      database,
+      record.id,
+      reviewStatus: ReviewStatus.reviewed,
+      reviewSchemaVersion: null,
+    );
+
+    await repository.replaceVideoReferenceAndClearTimings(
+      surgeryRecordId: record.id,
+      expectedVideoPath: oldPath,
+      videoPath: newPath,
+      videoDisplayName: 'new.mp4',
+    );
+
+    var persistedSkipped = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: skippedReview.step,
+    );
+    var persistedTimed = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: timedReview.step,
+    );
+    var persistedRecord = await repository.getRecord(record.id);
+    expect(persistedSkipped!.startMilliseconds, isNull);
+    expect(persistedSkipped.endMilliseconds, isNull);
+    expect(persistedSkipped.isSkipped, isTrue);
+    expect(persistedTimed!.startMilliseconds, isNull);
+    expect(persistedTimed.endMilliseconds, isNull);
+    expect(persistedTimed.isSkipped, isFalse);
+    expect(persistedRecord!.videoPath, newPath);
+    expect(persistedRecord.reviewSchemaVersion, 1);
+
+    await repository.saveStepTiming(
+      review: persistedTimed.copyWith(
+        startMilliseconds: 1200,
+        endMilliseconds: 1800,
+      ),
+      expectedVideoPath: newPath,
+    );
+    await _setRecordReviewTracking(
+      database,
+      record.id,
+      reviewStatus: ReviewStatus.reviewed,
+      reviewSchemaVersion: null,
+    );
+
+    await repository.replaceVideoReferenceAndClearTimings(
+      surgeryRecordId: record.id,
+      expectedVideoPath: newPath,
+      videoPath: null,
+      videoDisplayName: null,
+    );
+
+    persistedSkipped = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: skippedReview.step,
+    );
+    persistedTimed = await repository.getStepReview(
+      surgeryRecordId: record.id,
+      step: timedReview.step,
+    );
+    persistedRecord = await repository.getRecord(record.id);
+    expect(persistedSkipped!.startMilliseconds, isNull);
+    expect(persistedSkipped.endMilliseconds, isNull);
+    expect(persistedSkipped.isSkipped, isTrue);
+    expect(persistedTimed!.startMilliseconds, isNull);
+    expect(persistedTimed.endMilliseconds, isNull);
+    expect(persistedTimed.isSkipped, isFalse);
+    expect(persistedRecord!.videoPath, isNull);
+    expect(persistedRecord.reviewSchemaVersion, 1);
+  });
+
+  test('動画時刻消去は時刻なしskipだけ保持し時刻付きskipをfalseへ正規化する', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 15),
+      eyeSide: EyeSide.left,
+    );
+    final oldPath = 'videos/${record.id}/old.mp4';
+    await repository.updateVideoReference(
+      surgeryRecordId: record.id,
+      videoPath: oldPath,
+      videoDisplayName: 'old.mp4',
+    );
+    final reviews = await repository.ensureStepReviews(record.id);
+    final noTimingSkipped = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.capsulorhexis,
+    );
+    final validTimingSkipped = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.sidePortCreation,
+    );
+    final startOnlySkipped = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.ovdInjection,
+    );
+    final endOnlySkipped = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.mainPortCreation,
+    );
+    await _setRawTimingAndSkipped(database, noTimingSkipped.id);
+    await _setRawTimingAndSkipped(
+      database,
+      validTimingSkipped.id,
+      startMilliseconds: 100,
+      endMilliseconds: 900,
+    );
+    await _setRawTimingAndSkipped(
+      database,
+      startOnlySkipped.id,
+      startMilliseconds: 1200,
+    );
+    await _setRawTimingAndSkipped(
+      database,
+      endOnlySkipped.id,
+      endMilliseconds: 1800,
+    );
+
+    await repository.replaceVideoReferenceAndClearTimings(
+      surgeryRecordId: record.id,
+      expectedVideoPath: oldPath,
+      videoPath: 'videos/${record.id}/new.mp4',
+      videoDisplayName: 'new.mp4',
+    );
+
+    final persisted = <SurgicalStep, SurgicalStepReview>{};
+    for (final review in <SurgicalStepReview>[
+      noTimingSkipped,
+      validTimingSkipped,
+      startOnlySkipped,
+      endOnlySkipped,
+    ]) {
+      persisted[review.step] = (await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: review.step,
+      ))!;
+    }
+    for (final review in persisted.values) {
+      expect(review.startMilliseconds, isNull);
+      expect(review.endMilliseconds, isNull);
+    }
+    expect(persisted[noTimingSkipped.step]!.isSkipped, isTrue);
+    expect(
+      persisted[noTimingSkipped.step]!.recordingStatus,
+      StepRecordingStatus.skipped,
+    );
+    expect(persisted[validTimingSkipped.step]!.isSkipped, isFalse);
+    expect(persisted[startOnlySkipped.step]!.isSkipped, isFalse);
+    expect(persisted[endOnlySkipped.step]!.isSkipped, isFalse);
   });
 
   test('工程時刻消去失敗で新動画参照もrollbackする', () async {
@@ -585,4 +957,36 @@ ORDER BY id
   return rows
       .map((row) => Map<String, Object?>.from(row.data))
       .toList(growable: false);
+}
+
+Future<void> _setRecordReviewTracking(
+  AppDatabase database,
+  String recordId, {
+  required ReviewStatus reviewStatus,
+  required int? reviewSchemaVersion,
+}) {
+  return database.customStatement(
+    '''
+UPDATE surgery_records
+SET review_status = ?, review_schema_version = ?
+WHERE id = ?
+''',
+    <Object?>[reviewStatus.name, reviewSchemaVersion, recordId],
+  );
+}
+
+Future<void> _setRawTimingAndSkipped(
+  AppDatabase database,
+  String reviewId, {
+  int? startMilliseconds,
+  int? endMilliseconds,
+}) {
+  return database.customStatement(
+    '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?, is_skipped = 1
+WHERE id = ?
+''',
+    <Object?>[startMilliseconds, endMilliseconds, reviewId],
+  );
 }

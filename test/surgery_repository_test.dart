@@ -1,6 +1,7 @@
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
+import 'package:cataract_surgery_note/src/domain/surgery_trend.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -16,16 +17,19 @@ void main() {
     await repository.close();
   });
 
-  test('症例保存と再取得', () async {
+  test('新規症例は作成直後と再取得後ともレビューschema version 1である', () async {
     final record = await repository.createRecord(
       surgeryDate: DateTime(2026, 6, 29),
       eyeSide: EyeSide.right,
     );
 
+    expect(record.reviewSchemaVersion, 1);
+
     final restored = await repository.getRecord(record.id);
 
     expect(restored, isNotNull);
     expect(restored!.id, record.id);
+    expect(restored.reviewSchemaVersion, 1);
     expect(restored.eyeSide, EyeSide.right);
     expect(restored.surgeryDate.year, 2026);
     expect(restored.surgeryDate.month, 6);
@@ -352,5 +356,97 @@ WHERE id = ?
       (await repository.getRecord(reviewed.id))!.reviewStatus,
       ReviewStatus.reviewed,
     );
+  });
+
+  test('skipped工程は0秒にならずチャート点と平均へ混入しない', () async {
+    final previous = await repository.createRecord(
+      surgeryDate: DateTime(2026, 7, 13),
+      eyeSide: EyeSide.right,
+    );
+    final skipped = await repository.createRecord(
+      surgeryDate: DateTime(2026, 7, 14),
+      eyeSide: EyeSide.left,
+    );
+    final latest = await repository.createRecord(
+      surgeryDate: DateTime(2026, 7, 15),
+      eyeSide: EyeSide.right,
+    );
+
+    final previousReview = await repository.getStepReview(
+      surgeryRecordId: previous.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    await repository.saveStepReview(
+      previousReview!.copyWith(startMilliseconds: 1000, endMilliseconds: 11000),
+    );
+
+    final skippedReview = await repository.getStepReview(
+      surgeryRecordId: skipped.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    final timedSkippedReview = await repository.saveStepReview(
+      skippedReview!.copyWith(startMilliseconds: 2000, endMilliseconds: 22000),
+    );
+    await repository.saveStepSkipped(
+      review: timedSkippedReview,
+      isSkipped: true,
+      expectedVideoPath: null,
+    );
+
+    final latestReview = await repository.getStepReview(
+      surgeryRecordId: latest.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    await repository.saveStepReview(
+      latestReview!.copyWith(startMilliseconds: 3000, endMilliseconds: 33000),
+    );
+
+    final persistedSkipped = await repository.getStepReview(
+      surgeryRecordId: skipped.id,
+      step: SurgicalStep.capsulorhexis,
+    );
+    expect(persistedSkipped!.isSkipped, isTrue);
+    expect(persistedSkipped.startMilliseconds, isNull);
+    expect(persistedSkipped.endMilliseconds, isNull);
+    expect(persistedSkipped.duration, isNull);
+
+    final snapshot = await repository.fetchAnalysisSnapshot();
+    final measurements = snapshot.measurements.where(
+      (measurement) => measurement.step == SurgicalStep.capsulorhexis,
+    );
+
+    expect(measurements.map((measurement) => measurement.recordId), [
+      previous.id,
+      skipped.id,
+      latest.id,
+    ]);
+    expect(measurements.map((measurement) => measurement.duration), [
+      const Duration(seconds: 10),
+      null,
+      const Duration(seconds: 30),
+    ]);
+    expect(
+      measurements.any((measurement) => measurement.duration == Duration.zero),
+      isFalse,
+    );
+
+    final trend = const SurgeryTrendCalculator().calculate(
+      snapshot.measurements,
+      SurgicalStep.capsulorhexis,
+    );
+
+    expect(trend.points.map((point) => point.recordId), [
+      previous.id,
+      latest.id,
+    ]);
+    expect(trend.points.map((point) => point.duration), [
+      const Duration(seconds: 10),
+      const Duration(seconds: 30),
+    ]);
+    expect(trend.summary, isNotNull);
+    expect(trend.summary!.latest, const Duration(seconds: 30));
+    expect(trend.summary!.previousAverage, const Duration(seconds: 10));
+    expect(trend.summary!.difference, const Duration(seconds: 20));
+    expect(trend.summary!.comparisonCount, 1);
   });
 }
