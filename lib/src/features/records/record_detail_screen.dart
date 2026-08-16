@@ -109,6 +109,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     }
 
     return PopScope<void>(
+      key: const Key('record-detail-pop-scope'),
       canPop: !_hasPendingMutation,
       child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
@@ -194,21 +195,23 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
             ),
           ),
           const SizedBox(height: 32),
-          const _SectionTitle('危険操作'),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(
-              foregroundColor: Theme.of(context).colorScheme.error,
-              side: BorderSide(color: Theme.of(context).colorScheme.error),
+          Align(
+            alignment: Alignment.center,
+            child: TextButton.icon(
+              key: const Key('delete-record-button'),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                foregroundColor: Theme.of(context).colorScheme.error,
+              ),
+              onPressed: _hasPendingMutation ? null : _deleteRecord,
+              icon: _isDeleting
+                  ? const SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.delete_outline),
+              label: const Text('症例を削除'),
             ),
-            onPressed: _hasPendingMutation ? null : _deleteRecord,
-            icon: _isDeleting
-                ? const SizedBox.square(
-                    dimension: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.delete_outline),
-            label: const Text('症例を削除'),
           ),
         ],
       ),
@@ -238,7 +241,6 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
             title: record.videoDisplayName ?? '登録済みの動画',
             message: 'アプリ管理動画・利用可能',
           ),
-          const SizedBox(height: 8),
           const _BackupExclusionStatus(),
           const SizedBox(height: 12),
           _videoActionWrap([
@@ -825,10 +827,10 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
   Future<void> _deleteRecord() async {
     final confirmed = await showAppConfirmDialog(
       context: context,
-      title: '症例を削除',
+      title: 'この症例を削除しますか？',
       message:
-          'この症例、総手術時間を含む全工程記録、自己評価、反省点、症例メモを削除します。アプリ管理動画も削除しますが、旧形式の外部原本は削除しません。この操作は元に戻せません。',
-      confirmLabel: '症例を削除',
+          'この症例の記録（総手術時間、工程記録、自己評価、反省点、症例メモ）と、アプリ内に保存された動画を削除します。アプリ外の元動画は削除されません。この操作は元に戻せません。',
+      confirmLabel: '削除',
       isDestructive: true,
     );
     if (!confirmed || !mounted) {
@@ -888,29 +890,21 @@ class _BackupExclusionStatus extends ConsumerWidget {
             report.snapshotComplete &&
             report.backupExclusionVerified;
         if (verified) {
-          return Text(
-            'バックアップ除外を確認済みです。選択元の動画も別途保管してください。',
-            key: const Key('backup-exclusion-verified'),
-            style: Theme.of(context).textTheme.bodySmall,
-          );
+          return const SizedBox.shrink(key: Key('backup-exclusion-hidden'));
         }
-        return _BackupExclusionWarning(
-          onRetry: () => ref.invalidate(videoStorageMaintenanceProvider),
+        return Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: _BackupExclusionWarning(
+            onRetry: () => ref.invalidate(videoStorageMaintenanceProvider),
+          ),
         );
       },
-      loading: () => const Row(
-        key: Key('backup-exclusion-checking'),
-        children: [
-          SizedBox.square(
-            dimension: 18,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-          SizedBox(width: 8),
-          Expanded(child: Text('バックアップ除外を確認しています…')),
-        ],
-      ),
-      error: (_, _) => _BackupExclusionWarning(
-        onRetry: () => ref.invalidate(videoStorageMaintenanceProvider),
+      loading: () => const SizedBox.shrink(key: Key('backup-exclusion-hidden')),
+      error: (_, _) => Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: _BackupExclusionWarning(
+          onRetry: () => ref.invalidate(videoStorageMaintenanceProvider),
+        ),
       ),
     );
   }
