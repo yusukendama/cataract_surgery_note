@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../domain/surgery_models.dart';
 import '../domain/surgery_trend.dart';
 import 'app_database.dart';
+import 'onboarding_state_repository.dart';
 import 'protected_storage.dart';
 import 'record_video_service.dart';
 import 'surgery_repository.dart';
@@ -20,6 +21,16 @@ final appDatabaseProvider = Provider<AppDatabase>((ref) {
 
 final surgeryRepositoryProvider = Provider<SurgeryRepository>((ref) {
   return SurgeryRepository(ref.watch(appDatabaseProvider));
+});
+
+final onboardingStateRepositoryProvider = Provider<OnboardingStateRepository>((
+  ref,
+) {
+  return SharedPreferencesOnboardingStateRepository();
+});
+
+final onboardingRecordExistsProvider = FutureProvider<bool>((ref) {
+  return ref.watch(surgeryRepositoryProvider).hasAnyRecords();
 });
 
 final protectedStorageRepositoryProvider = Provider<ProtectedStorageRepository>(

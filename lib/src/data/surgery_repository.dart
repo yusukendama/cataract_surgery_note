@@ -106,6 +106,17 @@ class SurgeryRepository {
 
   String allocateRecordId() => _uuid.v4();
 
+  Future<bool> hasAnyRecords() async {
+    final row = await _database.customSelect('''
+SELECT EXISTS(
+  SELECT 1
+  FROM surgery_records
+  LIMIT 1
+) AS has_records
+''', readsFrom: const {}).getSingle();
+    return row.read<int>('has_records') != 0;
+  }
+
   Future<T> runRecordMutation<T>(
     String surgeryRecordId,
     Future<T> Function() action,

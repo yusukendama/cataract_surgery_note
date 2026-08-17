@@ -4,8 +4,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'src/data/app_database.dart';
+import 'src/data/onboarding_state_repository.dart';
 import 'src/data/protected_storage.dart';
 import 'src/data/providers.dart';
+import 'src/features/onboarding/onboarding_entry_gate.dart';
 import 'src/features/records/record_list_screen.dart';
 import 'src/theme/app_localization.dart';
 import 'src/theme/app_theme.dart';
@@ -42,11 +44,13 @@ Future<AppDatabase> _openProtectedDatabase({
 class ProtectedAppBootstrap extends StatefulWidget {
   const ProtectedAppBootstrap({
     this.protectedStorageRepository,
+    this.onboardingStateRepository,
     this.databaseOpener = _openProtectedDatabase,
     super.key,
   });
 
   final ProtectedStorageRepository? protectedStorageRepository;
+  final OnboardingStateRepository? onboardingStateRepository;
   final ProtectedDatabaseOpener databaseOpener;
 
   @override
@@ -102,6 +106,8 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
           protectedStorageRepositoryProvider.overrideWithValue(
             _protectedStorage,
           ),
+          if (widget.onboardingStateRepository case final repository?)
+            onboardingStateRepositoryProvider.overrideWithValue(repository),
         ],
         child: const MainApp(),
       );
@@ -366,7 +372,7 @@ class MainApp extends ConsumerWidget {
             : AppColors.launchLight;
         return ColoredBox(color: launchColor, child: child ?? const SizedBox());
       },
-      home: const RecordListScreen(),
+      home: const OnboardingEntryGate(child: RecordListScreen()),
     );
   }
 }

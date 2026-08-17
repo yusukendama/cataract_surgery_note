@@ -104,7 +104,9 @@ void main() {
     final picker = _CountingPendingVideoPicker();
     await pumpList(tester, picker);
 
-    await tester.tap(find.byTooltip('再登録できる動画の目安'));
+    await tester.tap(find.byTooltip('ヘルプ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('再登録できる動画の目安'));
     await tester.pumpAndSettle();
 
     expect(find.byType(VideoRegistrationGuidanceScreen), findsOneWidget);

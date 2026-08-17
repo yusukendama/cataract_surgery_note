@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cataract_surgery_note/main.dart';
+import 'package:cataract_surgery_note/src/data/onboarding_state_repository.dart';
 import 'package:cataract_surgery_note/src/data/providers.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/theme/app_localization.dart';
@@ -196,6 +197,9 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          onboardingStateRepositoryProvider.overrideWithValue(
+            const _CompletedOnboardingStateRepository(),
+          ),
           videoStorageMaintenanceProvider.overrideWith(
             (ref) => pendingMaintenance.future,
           ),
@@ -211,6 +215,17 @@ void main() {
     expect(app.supportedLocales, appSupportedLocales);
     expect(find.text('まだ症例がありません'), findsOneWidget);
   });
+}
+
+final class _CompletedOnboardingStateRepository
+    implements OnboardingStateRepository {
+  const _CompletedOnboardingStateRepository();
+
+  @override
+  Future<int?> readCompletedVersion() async => currentOnboardingVersion;
+
+  @override
+  Future<void> writeCompletedVersion(int version) async {}
 }
 
 class _SystemThemeStateProbe extends StatefulWidget {

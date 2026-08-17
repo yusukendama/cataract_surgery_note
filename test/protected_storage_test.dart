@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:cataract_surgery_note/main.dart';
 import 'package:cataract_surgery_note/src/data/app_database.dart';
+import 'package:cataract_surgery_note/src/data/onboarding_state_repository.dart';
 import 'package:cataract_surgery_note/src/data/protected_storage.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
@@ -174,6 +175,17 @@ final class _BootstrapTestDatabase extends AppDatabase {
     }
     await super.close();
   }
+}
+
+final class _CompletedOnboardingStateRepository
+    implements OnboardingStateRepository {
+  const _CompletedOnboardingStateRepository();
+
+  @override
+  Future<int?> readCompletedVersion() async => currentOnboardingVersion;
+
+  @override
+  Future<void> writeCompletedVersion(int version) async {}
 }
 
 VerifiedVideoCandidate _candidate() {
@@ -626,6 +638,8 @@ void main() {
       await tester.pumpWidget(
         ProtectedAppBootstrap(
           protectedStorageRepository: protection,
+          onboardingStateRepository:
+              const _CompletedOnboardingStateRepository(),
           databaseOpener: openDatabase,
         ),
       );

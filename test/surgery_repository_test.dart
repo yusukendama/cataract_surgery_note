@@ -17,6 +17,17 @@ void main() {
     await repository.close();
   });
 
+  test('症例の内容を読み込まず存在有無を判定する', () async {
+    expect(await repository.hasAnyRecords(), isFalse);
+
+    await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 17),
+      eyeSide: EyeSide.right,
+    );
+
+    expect(await repository.hasAnyRecords(), isTrue);
+  });
+
   test('新規症例は作成直後と再取得後ともレビューschema version 1である', () async {
     final record = await repository.createRecord(
       surgeryDate: DateTime(2026, 6, 29),

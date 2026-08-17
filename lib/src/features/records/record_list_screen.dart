@@ -14,6 +14,7 @@ import '../video_import/video_import_screen_flow.dart';
 import '../video_import/video_import_ui_flow.dart';
 import 'new_record_screen.dart';
 import 'record_detail_screen.dart';
+import 'record_list_help_button.dart';
 import 'record_month_group.dart';
 
 typedef NewRecordScreenBuilder =
@@ -77,7 +78,7 @@ class _RecordListScreenState extends ConsumerState<RecordListScreen> {
       appBar: AppBar(
         title: const Text('白内障執刀ノート'),
         actions: [
-          const VideoRegistrationHelpButton(),
+          const RecordListHelpButton(),
           IconButton(
             tooltip: '分析',
             onPressed: () {

@@ -5,6 +5,7 @@ import 'package:cataract_surgery_note/src/data/providers.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
+import 'package:cataract_surgery_note/src/features/onboarding/onboarding_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_detail_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_list_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_month_group.dart';
@@ -183,10 +184,21 @@ void main() {
     expect(find.byType(SliverPersistentHeader), findsNothing);
   });
 
-  testWidgets('動画選択前から再登録できる動画の目安を開ける', (tester) async {
+  testWidgets('ヘルプメニューから使い方と動画の目安を開ける', (tester) async {
     await pumpList(tester, const []);
 
-    await tester.tap(find.byTooltip('再登録できる動画の目安'));
+    await tester.tap(find.byTooltip('ヘルプ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('アプリの使い方'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(OnboardingScreen), findsOneWidget);
+    await tester.tap(find.byKey(const Key('onboarding-top-close')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('ヘルプ'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('再登録できる動画の目安'));
     await tester.pumpAndSettle();
 
     expect(find.byType(VideoRegistrationGuidanceScreen), findsOneWidget);
