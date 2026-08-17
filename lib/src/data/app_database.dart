@@ -19,9 +19,15 @@ enum DatabaseProtectionFatalReason {
 /// is emitted, every later query is rejected until the database is closed and
 /// reopened through [AppDatabase.openProtected].
 final class DatabaseProtectionFatalEvent {
-  const DatabaseProtectionFatalEvent({required this.reason});
+  const DatabaseProtectionFatalEvent({
+    required this.reason,
+    this.failureStage = FileProtectionFailureStage.unknown,
+  });
 
   final DatabaseProtectionFatalReason reason;
+  final FileProtectionFailureStage failureStage;
+
+  String get diagnosticCode => failureStage.diagnosticCode;
 }
 
 class AppDatabase extends GeneratedDatabase {
@@ -206,6 +212,9 @@ final class _DatabaseProtectionState {
         reason: error is ProtectedDataUnavailableException
             ? DatabaseProtectionFatalReason.protectedDataUnavailable
             : DatabaseProtectionFatalReason.verificationFailed,
+        failureStage: error is FileProtectionException
+            ? error.stage
+            : FileProtectionFailureStage.unknown,
       ),
     );
   }
@@ -375,9 +384,15 @@ final class _ProtectedDatabaseInterceptor extends QueryInterceptor {
     } on ProtectedDataUnavailableException catch (error) {
       _databaseProtectionState.markFatal(error);
       rethrow;
-    } on Object catch (error) {
+    } on FileProtectionException catch (error) {
       _databaseProtectionState.markFatal(error);
-      throw const FileProtectionException();
+      rethrow;
+    } on Object {
+      const mapped = FileProtectionException(
+        FileProtectionFailureStage.platformChannel,
+      );
+      _databaseProtectionState.markFatal(mapped);
+      throw mapped;
     }
   }
 
@@ -387,9 +402,15 @@ final class _ProtectedDatabaseInterceptor extends QueryInterceptor {
     } on ProtectedDataUnavailableException catch (error) {
       _databaseProtectionState.markFatal(error);
       rethrow;
-    } on Object catch (error) {
+    } on FileProtectionException catch (error) {
       _databaseProtectionState.markFatal(error);
-      throw const FileProtectionException();
+      rethrow;
+    } on Object {
+      const mapped = FileProtectionException(
+        FileProtectionFailureStage.databaseFile,
+      );
+      _databaseProtectionState.markFatal(mapped);
+      throw mapped;
     }
   }
 
@@ -399,9 +420,15 @@ final class _ProtectedDatabaseInterceptor extends QueryInterceptor {
     } on ProtectedDataUnavailableException catch (error) {
       _databaseProtectionState.markFatal(error);
       rethrow;
-    } on Object catch (error) {
+    } on FileProtectionException catch (error) {
       _databaseProtectionState.markFatal(error);
-      throw const FileProtectionException();
+      rethrow;
+    } on Object {
+      const mapped = FileProtectionException(
+        FileProtectionFailureStage.databaseFile,
+      );
+      _databaseProtectionState.markFatal(mapped);
+      throw mapped;
     }
   }
 

@@ -63,6 +63,7 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
   StreamSubscription<DatabaseProtectionFatalEvent>?
   _databaseProtectionSubscription;
   _BootstrapState _state = _BootstrapState.loading;
+  FileProtectionFailureStage _failureStage = FileProtectionFailureStage.unknown;
   bool _initializationActive = false;
   bool _deactivationActive = false;
   int _generation = 0;
@@ -75,7 +76,10 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
         MethodChannelProtectedStorageRepository();
     _availabilitySubscription = _protectedStorage.availabilityChanges.listen(
       _handleAvailabilityChanged,
-      onError: (_) => _deactivate(_BootstrapState.failed),
+      onError: (_) => _deactivate(
+        _BootstrapState.failed,
+        failureStage: FileProtectionFailureStage.platformChannel,
+      ),
     );
     unawaited(_initialize());
   }
@@ -104,6 +108,7 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
     }
     return _ProtectedStorageStartupScreen(
       state: _state,
+      failureStage: _failureStage,
       onRetry: _state == _BootstrapState.loading || _deactivationActive
           ? null
           : _initialize,
@@ -121,7 +126,10 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
     _database = null;
     _databaseProtectionSubscription = null;
     if (mounted) {
-      setState(() => _state = _BootstrapState.loading);
+      setState(() {
+        _state = _BootstrapState.loading;
+        _failureStage = FileProtectionFailureStage.unknown;
+      });
     }
     await staleProtectionSubscription?.cancel();
     await staleDatabase?.close();
@@ -152,7 +160,10 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
         await protectionSubscription.cancel();
         await database.close();
         if (mounted && generation == _generation) {
-          setState(() => _state = _BootstrapState.failed);
+          setState(() {
+            _state = _BootstrapState.failed;
+            _failureStage = FileProtectionFailureStage.unknown;
+          });
         }
         return;
       }
@@ -165,9 +176,19 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
       if (mounted) {
         setState(() => _state = _BootstrapState.locked);
       }
+    } on FileProtectionException catch (error) {
+      if (mounted) {
+        setState(() {
+          _state = _BootstrapState.failed;
+          _failureStage = error.stage;
+        });
+      }
     } on Object {
       if (mounted) {
-        setState(() => _state = _BootstrapState.failed);
+        setState(() {
+          _state = _BootstrapState.failed;
+          _failureStage = FileProtectionFailureStage.databaseOpen;
+        });
       }
     } finally {
       _initializationActive = false;
@@ -199,12 +220,17 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
           event.reason == DatabaseProtectionFatalReason.protectedDataUnavailable
               ? _BootstrapState.locked
               : _BootstrapState.failed,
+          failureStage: event.failureStage,
         );
       }),
     );
   }
 
-  Future<void> _deactivate(_BootstrapState nextState) async {
+  Future<void> _deactivate(
+    _BootstrapState nextState, {
+    FileProtectionFailureStage failureStage =
+        FileProtectionFailureStage.unknown,
+  }) async {
     final generation = ++_generation;
     final database = _database;
     final protectionSubscription = _databaseProtectionSubscription;
@@ -213,6 +239,7 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
       setState(() {
         _database = null;
         _state = nextState;
+        _failureStage = failureStage;
         _deactivationActive = true;
       });
     } else {
@@ -229,10 +256,12 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
 class _ProtectedStorageStartupScreen extends StatelessWidget {
   const _ProtectedStorageStartupScreen({
     required this.state,
+    required this.failureStage,
     required this.onRetry,
   });
 
   final _BootstrapState state;
+  final FileProtectionFailureStage failureStage;
   final Future<void> Function()? onRetry;
 
   @override
@@ -277,6 +306,15 @@ class _ProtectedStorageStartupScreen extends StatelessWidget {
                           : '動画と症例データの安全な保護を確認できませんでした。もう一度お試しください。',
                       textAlign: TextAlign.center,
                     ),
+                    if (!locked) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'エラーコード: ${failureStage.diagnosticCode}',
+                        key: const Key('protected-storage-error-code'),
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
                     const SizedBox(height: 24),
                     FilledButton(
                       onPressed: onRetry == null

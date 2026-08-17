@@ -57,6 +57,46 @@ void main() {
   );
 
   test(
+    'native protection stage maps to a non-sensitive diagnostic code',
+    () async {
+      const methodChannel = MethodChannel(
+        'test/protected-storage-stage-classification',
+      );
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(methodChannel, (call) async {
+        throw PlatformException(
+          code: 'file_protection_failed',
+          details: 'database_sidecar',
+        );
+      });
+      addTearDown(
+        () => messenger.setMockMethodCallHandler(methodChannel, null),
+      );
+      final repository = MethodChannelProtectedStorageRepository(
+        methodChannel: methodChannel,
+      );
+
+      await expectLater(
+        repository.verifyDatabaseFiles(),
+        throwsA(
+          isA<FileProtectionException>()
+              .having(
+                (error) => error.stage,
+                'stage',
+                FileProtectionFailureStage.databaseSidecar,
+              )
+              .having(
+                (error) => error.diagnosticCode,
+                'diagnosticCode',
+                'PS-DB-SIDECAR',
+              ),
+        ),
+      );
+    },
+  );
+
+  test(
     'native backup-exclusion failure maps to backupExclusionFailed',
     () async {
       final source = await _source(temporaryDirectory);

@@ -57,7 +57,7 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(fileValues.isExcludedFromBackup, true)
   }
 
-  func testProtectedStorageBootstrapAppliesCompleteProtection() throws {
+  func testProtectedStorageBootstrapAppliesCompleteProtectionToDatabase() throws {
     let fixture = try makeProtectedStorageFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
 
@@ -65,30 +65,16 @@ class RunnerTests: XCTestCase {
 
     XCTAssertEqual(paths.applicationSupportPath, fixture.support.path)
     XCTAssertEqual(paths.databasePath, fixture.manager.databaseURL.path)
-    try assertCompleteProtection(fixture.support)
-    try assertCompleteProtection(fixture.manager.videosURL)
     try assertCompleteProtection(fixture.documents)
     try assertCompleteProtection(fixture.manager.databaseURL)
+    XCTAssertFalse(
+      FileManager.default.fileExists(atPath: fixture.manager.videosURL.path)
+    )
   }
 
-  func testProtectedStorageBootstrapRepairsExistingManagedTreeAndSidecars() throws {
+  func testProtectedStorageBootstrapRepairsExistingDatabaseAndSidecars() throws {
     let fixture = try makeProtectedStorageFixture()
     defer { try? FileManager.default.removeItem(at: fixture.root) }
-    let recordDirectory = fixture.manager.videosURL.appendingPathComponent(
-      "11111111-1111-1111-1111-111111111111",
-      isDirectory: true
-    )
-    try FileManager.default.createDirectory(
-      at: recordDirectory,
-      withIntermediateDirectories: true
-    )
-    let managedVideo = recordDirectory.appendingPathComponent("managed.mp4")
-    XCTAssertTrue(
-      FileManager.default.createFile(
-        atPath: managedVideo.path,
-        contents: Data([0x00, 0x01])
-      )
-    )
     try FileManager.default.createDirectory(
       at: fixture.documents,
       withIntermediateDirectories: true
@@ -103,7 +89,7 @@ class RunnerTests: XCTestCase {
     let shm = URL(fileURLWithPath: fixture.manager.databaseURL.path + "-shm")
     XCTAssertTrue(FileManager.default.createFile(atPath: wal.path, contents: Data()))
     XCTAssertTrue(FileManager.default.createFile(atPath: shm.path, contents: Data()))
-    for url in [recordDirectory, managedVideo, fixture.manager.databaseURL, wal, shm] {
+    for url in [fixture.manager.databaseURL, wal, shm] {
       try FileManager.default.setAttributes(
         [.protectionKey: FileProtectionType.none],
         ofItemAtPath: url.path
@@ -112,15 +98,35 @@ class RunnerTests: XCTestCase {
 
     _ = try fixture.manager.prepareAppStorage()
 
-    for url in [recordDirectory, managedVideo, fixture.manager.databaseURL, wal, shm] {
+    for url in [fixture.manager.databaseURL, wal, shm] {
       try assertCompleteProtection(url)
     }
-    XCTAssertEqual(
-      try managedVideo.resourceValues(
-        forKeys: [.isExcludedFromBackupKey]
-      ).isExcludedFromBackup,
-      true
+  }
+
+  func testVideoTreeFailureDoesNotBlockProtectedDatabaseBootstrap() throws {
+    let fixture = try makeProtectedStorageFixture()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    try FileManager.default.createDirectory(
+      at: fixture.manager.videosURL,
+      withIntermediateDirectories: true
     )
+    let unexpected = fixture.manager.videosURL.appendingPathComponent(
+      "unexpected-root-file.mp4"
+    )
+    XCTAssertTrue(
+      FileManager.default.createFile(
+        atPath: unexpected.path,
+        contents: Data([0x00, 0x01])
+      )
+    )
+
+    let paths = try fixture.manager.prepareAppStorage()
+
+    XCTAssertEqual(paths.databasePath, fixture.manager.databaseURL.path)
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: fixture.manager.databaseURL.path)
+    )
+    XCTAssertTrue(FileManager.default.fileExists(atPath: unexpected.path))
   }
 
   func testProtectedStorageDoesNotStartWhenProtectedDataIsUnavailable() throws {
@@ -230,7 +236,20 @@ class RunnerTests: XCTestCase {
         + "INSERT INTO protected_test(value) VALUES (1);",
       on: database
     )
+    let wal = URL(fileURLWithPath: fixture.manager.databaseURL.path + "-wal")
+    let shm = URL(fileURLWithPath: fixture.manager.databaseURL.path + "-shm")
+    for sidecar in [wal, shm]
+    where FileManager.default.fileExists(atPath: sidecar.path) {
+      try FileManager.default.setAttributes(
+        [.protectionKey: FileProtectionType.none],
+        ofItemAtPath: sidecar.path
+      )
+    }
     try fixture.manager.verifyDatabaseFiles()
+    for sidecar in [wal, shm]
+    where FileManager.default.fileExists(atPath: sidecar.path) {
+      try assertCompleteProtection(sidecar)
+    }
 
     var logFrames = Int32()
     var checkpointedFrames = Int32()

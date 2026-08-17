@@ -327,6 +327,8 @@ final class VideoSourceAccessManager {
       default:
         result(FlutterMethodNotImplemented)
       }
+    } catch let error as StagedProtectedStorageError {
+      result(flutterError(for: error))
     } catch let error as ProtectedStorageError {
       result(flutterError(for: error))
     } catch {
@@ -352,24 +354,35 @@ final class VideoSourceAccessManager {
   }
 
   private func flutterError(for error: ProtectedStorageError) -> FlutterError {
+    flutterError(for: error, details: nil)
+  }
+
+  private func flutterError(for error: StagedProtectedStorageError) -> FlutterError {
+    flutterError(for: error.error, details: error.stage.rawValue)
+  }
+
+  private func flutterError(
+    for error: ProtectedStorageError,
+    details: String?
+  ) -> FlutterError {
     switch error {
     case .protectedDataUnavailable:
       return FlutterError(
         code: "protected_data_unavailable",
         message: "端末のロックを解除して、もう一度お試しください。",
-        details: nil
+        details: details
       )
     case .backupExclusionFailed:
       return FlutterError(
         code: "backup_exclusion_failed",
         message: "バックアップ除外属性を確認できませんでした。",
-        details: nil
+        details: details
       )
     case .invalidPath, .unexpectedItem, .fileProtectionFailed:
       return FlutterError(
         code: "file_protection_failed",
         message: "保存領域の保護属性を確認できませんでした。",
-        details: nil
+        details: details
       )
     }
   }

@@ -155,12 +155,16 @@ final class _BootstrapTestDatabase extends AppDatabase {
   void failProtection({
     DatabaseProtectionFatalReason reason =
         DatabaseProtectionFatalReason.verificationFailed,
+    FileProtectionFailureStage failureStage =
+        FileProtectionFailureStage.unknown,
   }) {
     if (_fatal) {
       return;
     }
     _fatal = true;
-    _fatalEvents.add(DatabaseProtectionFatalEvent(reason: reason));
+    _fatalEvents.add(
+      DatabaseProtectionFatalEvent(reason: reason, failureStage: failureStage),
+    );
   }
 
   @override
@@ -628,12 +632,15 @@ void main() {
       await pumpUntilVisible(find.text('新規症例'));
       final firstDatabase = openedDatabases.single;
 
-      firstDatabase.failProtection();
+      firstDatabase.failProtection(
+        failureStage: FileProtectionFailureStage.databaseSidecar,
+      );
       await pumpUntilVisible(find.text('保護されたデータを利用できません'));
       await pumpUntil(() => firstDatabase.isClosed);
 
       expect(firstDatabase.hasFatalProtectionFailure, isTrue);
       expect(firstDatabase.isClosed, isTrue);
+      expect(find.text('エラーコード: PS-DB-SIDECAR'), findsOneWidget);
       expect(find.text('もう一度試す'), findsOneWidget);
       expect(
         tester

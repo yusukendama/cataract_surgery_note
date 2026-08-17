@@ -22,13 +22,47 @@ class ProtectedDataUnavailableException implements Exception {
   String toString() => 'ProtectedDataUnavailableException';
 }
 
+/// Non-sensitive stage identifiers used to diagnose protection failures
+/// without exposing a sandbox path or native error description.
+enum FileProtectionFailureStage {
+  databaseDirectory('PS-DB-DIR'),
+  databaseFile('PS-DB-FILE'),
+  databaseSidecar('PS-DB-SIDECAR'),
+  managedVideoDirectory('PS-VIDEO-DIR'),
+  managedVideoFile('PS-VIDEO-FILE'),
+  platformChannel('PS-CHANNEL'),
+  databaseOpen('PS-DB-OPEN'),
+  unknown('PS-UNKNOWN');
+
+  const FileProtectionFailureStage(this.diagnosticCode);
+
+  final String diagnosticCode;
+
+  static FileProtectionFailureStage fromPlatformValue(Object? value) {
+    return switch (value) {
+      'database_directory' => databaseDirectory,
+      'database_file' => databaseFile,
+      'database_sidecar' => databaseSidecar,
+      'managed_video_directory' => managedVideoDirectory,
+      'managed_video_file' => managedVideoFile,
+      _ => unknown,
+    };
+  }
+}
+
 /// Raised when an exact NSFileProtectionComplete attribute cannot be applied or
 /// read back. Paths and native error descriptions are deliberately omitted.
 class FileProtectionException implements Exception {
-  const FileProtectionException();
+  const FileProtectionException([
+    this.stage = FileProtectionFailureStage.unknown,
+  ]);
+
+  final FileProtectionFailureStage stage;
+
+  String get diagnosticCode => stage.diagnosticCode;
 
   @override
-  String toString() => 'FileProtectionException';
+  String toString() => 'FileProtectionException($diagnosticCode)';
 }
 
 /// Raised when native storage protection succeeded but backup exclusion could
@@ -54,8 +88,12 @@ abstract interface class ProtectedDataRepository {
 }
 
 abstract interface class FileProtectionRepository {
-  /// Creates or repairs the known app-owned storage roots while the database is
-  /// closed, then returns the paths the Dart layer must use.
+  /// Creates or repairs the database storage family while Drift is closed,
+  /// then returns the paths the Dart layer must use.
+  ///
+  /// Managed videos are deliberately verified by video maintenance and on
+  /// direct access. A single video-tree failure must not prevent protected
+  /// case records and reviews from opening.
   Future<ProtectedStoragePaths> prepareAppStorage();
 
   /// Applies and reads back NSFileProtectionComplete for a managed-video
@@ -159,7 +197,9 @@ class MethodChannelProtectedStorageRepository
           if (error is PlatformException) {
             throw _mapPlatformException(error);
           }
-          throw const FileProtectionException();
+          throw const FileProtectionException(
+            FileProtectionFailureStage.platformChannel,
+          );
         })
         .asBroadcastStream();
   }
@@ -183,7 +223,9 @@ class MethodChannelProtectedStorageRepository
           applicationSupportPath.isEmpty ||
           databasePath is! String ||
           databasePath.isEmpty) {
-        throw const FileProtectionException();
+        throw const FileProtectionException(
+          FileProtectionFailureStage.platformChannel,
+        );
       }
       return ProtectedStoragePaths(
         applicationSupportPath: applicationSupportPath,
@@ -227,7 +269,9 @@ class MethodChannelProtectedStorageRepository
         arguments,
       );
       if (verified != true) {
-        throw const FileProtectionException();
+        throw const FileProtectionException(
+          FileProtectionFailureStage.platformChannel,
+        );
       }
     } on PlatformException catch (error) {
       throw _mapPlatformException(error);
@@ -241,6 +285,8 @@ class MethodChannelProtectedStorageRepository
     if (error.code == 'backup_exclusion_failed') {
       return const BackupExclusionException();
     }
-    return const FileProtectionException();
+    return FileProtectionException(
+      FileProtectionFailureStage.fromPlatformValue(error.details),
+    );
   }
 }

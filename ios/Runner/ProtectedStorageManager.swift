@@ -9,6 +9,19 @@ enum ProtectedStorageError: Error {
   case backupExclusionFailed
 }
 
+enum ProtectedStorageFailureStage: String {
+  case databaseDirectory = "database_directory"
+  case databaseFile = "database_file"
+  case databaseSidecar = "database_sidecar"
+  case managedVideoDirectory = "managed_video_directory"
+  case managedVideoFile = "managed_video_file"
+}
+
+struct StagedProtectedStorageError: Error {
+  let error: ProtectedStorageError
+  let stage: ProtectedStorageFailureStage
+}
+
 struct PreparedStoragePaths {
   let applicationSupportPath: String
   let databasePath: String
@@ -50,16 +63,14 @@ final class ProtectedStorageManager {
     documentsURL.appendingPathComponent(Self.databaseFileName, isDirectory: false)
   }
 
-  /// Runs only while Drift is closed. Existing app-owned data is converged to
-  /// complete protection before the database or a managed video can be used.
+  /// Runs only while Drift is closed. Only the database family is a bootstrap
+  /// dependency. Managed videos are converged by video maintenance and verified
+  /// again on direct access, so one malformed video entry cannot hide every
+  /// otherwise protected case record and review.
   func prepareAppStorage() throws -> PreparedStoragePaths {
     try requireProtectedDataAvailable()
 
-    try createProtectedDirectoryIfNeeded(applicationSupportURL)
-    try createProtectedDirectoryIfNeeded(videosURL)
-    try convergeManagedVideoTree()
-
-    try createProtectedDirectoryIfNeeded(documentsURL)
+    try prepareDatabaseDirectory()
     try prepareDatabaseFamily()
 
     return PreparedStoragePaths(
@@ -70,29 +81,39 @@ final class ProtectedStorageManager {
 
   func protectDirectoryAndVerify(path: String) throws {
     try requireProtectedDataAvailable()
-    let url = URL(fileURLWithPath: path, isDirectory: true)
-    try requireManagedVideoURL(url, expectedDirectory: true)
-    try applyAndVerifyCompleteProtection(to: url)
+    try perform(stage: .managedVideoDirectory) {
+      let url = URL(fileURLWithPath: path, isDirectory: true)
+      try requireManagedVideoURL(url, expectedDirectory: true)
+      try applyAndVerifyCompleteProtection(to: url)
+    }
   }
 
   func protectFileAndVerify(path: String, excludeFromBackup: Bool) throws {
     try requireProtectedDataAvailable()
-    let url = URL(fileURLWithPath: path, isDirectory: false)
-    try requireManagedVideoURL(url, expectedDirectory: false)
-    try applyAndVerifyCompleteProtection(to: url)
-    if excludeFromBackup {
-      try applyAndVerifyBackupExclusion(to: url)
+    try perform(stage: .managedVideoFile) {
+      let url = URL(fileURLWithPath: path, isDirectory: false)
+      try requireManagedVideoURL(url, expectedDirectory: false)
+      try applyAndVerifyCompleteProtection(to: url)
+      if excludeFromBackup {
+        try applyAndVerifyBackupExclusion(to: url)
+      }
     }
   }
 
-  /// Verification is intentionally read-only because Drift may own an open
-  /// SQLite connection. Repair is deferred until the next closed bootstrap.
+  /// Verifies the database family while Drift owns the connection. If SQLite
+  /// has created a sidecar with a weaker inherited class, repair its metadata
+  /// and read it back before returning protected data to Dart.
   func verifyDatabaseFiles() throws {
     try requireProtectedDataAvailable()
-    try verifyCompleteProtection(of: documentsURL)
-    try verifyCompleteProtection(of: databaseURL)
+    try perform(stage: .databaseFile) {
+      try requireRegularFileWithoutLink(databaseURL)
+      try verifyOrRepairCompleteProtection(of: databaseURL)
+    }
     for sidecar in existingDatabaseSidecars() {
-      try verifyCompleteProtection(of: sidecar)
+      try perform(stage: .databaseSidecar) {
+        try requireRegularFileWithoutLink(sidecar)
+        try verifyOrRepairCompleteProtection(of: sidecar)
+      }
     }
   }
 
@@ -105,23 +126,51 @@ final class ProtectedStorageManager {
     try applyAndVerifyBackupExclusion(to: url)
   }
 
-  private func prepareDatabaseFamily() throws {
-    if !fileManager.fileExists(atPath: databaseURL.path) {
-      let created = fileManager.createFile(
-        atPath: databaseURL.path,
-        contents: Data(),
-        attributes: [.protectionKey: FileProtectionType.complete]
-      )
-      guard created else {
-        throw ProtectedStorageError.fileProtectionFailed
+  private func prepareDatabaseDirectory() throws {
+    try perform(stage: .databaseDirectory) {
+      if !fileManager.fileExists(atPath: documentsURL.path) {
+        try fileManager.createDirectory(
+          at: documentsURL,
+          withIntermediateDirectories: true,
+          attributes: [.protectionKey: FileProtectionType.complete]
+        )
       }
+      try requireDirectoryWithoutLink(documentsURL)
     }
-    try requireRegularFileWithoutLink(databaseURL)
-    try applyAndVerifyCompleteProtection(to: databaseURL)
+
+    // Some iOS versions don't expose a stable protection attribute for the
+    // app's standard Documents directory. Apply it when possible, but gate
+    // access on the database file family below, whose contents are sensitive.
+    do {
+      try applyAndVerifyCompleteProtection(to: documentsURL)
+    } catch {
+      // Don't misclassify a lock transition as a tolerated directory
+      // read-back difference.
+      try requireProtectedDataAvailable()
+    }
+  }
+
+  private func prepareDatabaseFamily() throws {
+    try perform(stage: .databaseFile) {
+      if !fileManager.fileExists(atPath: databaseURL.path) {
+        let created = fileManager.createFile(
+          atPath: databaseURL.path,
+          contents: Data(),
+          attributes: [.protectionKey: FileProtectionType.complete]
+        )
+        guard created else {
+          throw ProtectedStorageError.fileProtectionFailed
+        }
+      }
+      try requireRegularFileWithoutLink(databaseURL)
+      try applyAndVerifyCompleteProtection(to: databaseURL)
+    }
 
     for sidecar in existingDatabaseSidecars() {
-      try requireRegularFileWithoutLink(sidecar)
-      try applyAndVerifyCompleteProtection(to: sidecar)
+      try perform(stage: .databaseSidecar) {
+        try requireRegularFileWithoutLink(sidecar)
+        try applyAndVerifyCompleteProtection(to: sidecar)
+      }
     }
   }
 
@@ -130,62 +179,6 @@ final class ProtectedStorageManager {
       let url = URL(fileURLWithPath: databaseURL.path + suffix)
       return fileManager.fileExists(atPath: url.path) ? url : nil
     }
-  }
-
-  private func convergeManagedVideoTree() throws {
-    try applyAndVerifyCompleteProtection(to: videosURL)
-    try applyAndVerifyBackupExclusion(to: videosURL)
-
-    var enumerationFailed = false
-    guard let enumerator = fileManager.enumerator(
-      at: videosURL,
-      includingPropertiesForKeys: [
-        .isDirectoryKey,
-        .isRegularFileKey,
-        .isSymbolicLinkKey,
-      ],
-      options: [],
-      errorHandler: { _, _ in
-        enumerationFailed = true
-        return false
-      }
-    ) else {
-      throw ProtectedStorageError.fileProtectionFailed
-    }
-
-    for case let url as URL in enumerator {
-      let values = try url.resourceValues(
-        forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
-      )
-      guard values.isSymbolicLink != true else {
-        throw ProtectedStorageError.invalidPath
-      }
-      if values.isDirectory == true {
-        try requireManagedVideoURL(url, expectedDirectory: true)
-        try applyAndVerifyCompleteProtection(to: url)
-      } else if values.isRegularFile == true {
-        try requireManagedVideoURL(url, expectedDirectory: false)
-        try applyAndVerifyCompleteProtection(to: url)
-        try applyAndVerifyBackupExclusion(to: url)
-      } else {
-        throw ProtectedStorageError.unexpectedItem
-      }
-    }
-    guard !enumerationFailed else {
-      throw ProtectedStorageError.fileProtectionFailed
-    }
-  }
-
-  private func createProtectedDirectoryIfNeeded(_ url: URL) throws {
-    if !fileManager.fileExists(atPath: url.path) {
-      try fileManager.createDirectory(
-        at: url,
-        withIntermediateDirectories: true,
-        attributes: [.protectionKey: FileProtectionType.complete]
-      )
-    }
-    try requireDirectoryWithoutLink(url)
-    try applyAndVerifyCompleteProtection(to: url)
   }
 
   private func requireManagedVideoURL(
@@ -248,6 +241,14 @@ final class ProtectedStorageManager {
     }
   }
 
+  private func verifyOrRepairCompleteProtection(of url: URL) throws {
+    do {
+      try verifyCompleteProtection(of: url)
+    } catch {
+      try applyAndVerifyCompleteProtection(to: url)
+    }
+  }
+
   private func verifyCompleteProtection(of url: URL) throws {
     do {
       let attributes = try fileManager.attributesOfItem(atPath: url.path)
@@ -297,6 +298,27 @@ final class ProtectedStorageManager {
   private func requireProtectedDataAvailable() throws {
     guard protectedDataAvailable() else {
       throw ProtectedStorageError.protectedDataUnavailable
+    }
+  }
+
+  private func perform<T>(
+    stage: ProtectedStorageFailureStage,
+    _ operation: () throws -> T
+  ) throws -> T {
+    do {
+      return try operation()
+    } catch let error as StagedProtectedStorageError {
+      throw error
+    } catch let error as ProtectedStorageError {
+      if case .protectedDataUnavailable = error {
+        throw error
+      }
+      throw StagedProtectedStorageError(error: error, stage: stage)
+    } catch {
+      throw StagedProtectedStorageError(
+        error: .fileProtectionFailed,
+        stage: stage
+      )
     }
   }
 }
