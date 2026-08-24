@@ -516,6 +516,22 @@ void main() {
     await selectMetric(tester, SurgicalStep.capsulorhexis);
   }
 
+  Future<void> revealSelectedCardButton(WidgetTester tester) async {
+    final button = find.byKey(const Key('analysis-open-selected'));
+    await tester.dragUntilVisible(
+      button,
+      find.byKey(const Key('analysis-content')),
+      const Offset(0, -200),
+    );
+    await tester.pump();
+  }
+
+  Future<void> tapSelectedCardButton(WidgetTester tester) async {
+    await revealSelectedCardButton(tester);
+    final button = find.byKey(const Key('analysis-open-selected'));
+    await tester.tap(button);
+  }
+
   Future<void> pumpUntilCondition(
     WidgetTester tester,
     bool Function() condition, {
@@ -530,7 +546,10 @@ void main() {
     expect(condition(), isTrue, reason: '非同期条件が期限内に成立しませんでした。');
   }
 
-  Future<void> activateDirectPoint(WidgetTester tester, String recordId) async {
+  Future<void> openProcessVideoFromSelectedCard(
+    WidgetTester tester,
+    String recordId,
+  ) async {
     var chart = tester.widget<SurgeryTrendChart>(
       find.byType(SurgeryTrendChart),
     );
@@ -540,11 +559,7 @@ void main() {
     chart.onPointSelected(point);
     await tester.pump();
 
-    chart = tester.widget<SurgeryTrendChart>(find.byType(SurgeryTrendChart));
-    point = chart.points.singleWhere(
-      (candidate) => candidate.recordId == recordId,
-    );
-    chart.onPointActivated!(point);
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await pumpUntilCondition(
       tester,
@@ -665,6 +680,36 @@ void main() {
     expect(find.text('2026年7月20日 左眼'), findsOneWidget);
     expect(find.text('総手術時間：1分05秒'), findsOneWidget);
     expect(find.text('症例詳細を見る'), findsOneWidget);
+  });
+
+  testWidgets('個別工程の詳細ボタンは選択中の症例と工程を読み上げる', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await pumpAnalysis(
+      tester,
+      SurgeryAnalysisSnapshot(
+        recordCount: 1,
+        measurements: [
+          measurement(
+            id: 'semantic-selected',
+            date: DateTime(2026, 7, 20),
+            step: SurgicalStep.capsulorhexis,
+            end: 65000,
+          ),
+        ],
+      ),
+    );
+    await selectCccMetric(tester);
+    await revealSelectedCardButton(tester);
+
+    final button = tester.getSemantics(
+      find.byKey(const Key('analysis-open-selected')),
+    );
+    expect(button.label, '症例詳細を見る');
+    expect(button.hint, contains('2026年7月20日'));
+    expect(button.hint, contains('右眼'));
+    expect(button.hint, contains('CCCの工程動画'));
+    expect(button.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+    semantics.dispose();
   });
 
   SurgeryAnalysisSnapshot manyCases(int count) {
@@ -1409,7 +1454,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -1449,7 +1494,7 @@ void main() {
       );
       await selectCccMetric(tester);
 
-      await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+      await tapSelectedCardButton(tester);
       await tester.pump();
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -1482,7 +1527,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -1558,7 +1603,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await selectCccMetric(tester);
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
@@ -1614,7 +1659,7 @@ void main() {
         expectedVideoPath: null,
       );
     });
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
@@ -1646,7 +1691,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -1706,10 +1751,7 @@ void main() {
       reason: '活性化前のグラフは再取得せず旧値を保持する',
     );
 
-    final target = find.byKey(Key('analysis-direct-point-${records.last.id}'));
-    await tester.ensureVisible(target);
-    await tester.pump();
-    await tester.tap(target);
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await pumpUntilCondition(
       tester,
@@ -1776,14 +1818,15 @@ void main() {
     final scrollController = tester
         .widget<ListView>(find.byKey(const Key('analysis-content')))
         .controller!;
-    final scrollOffsetBeforeOpen = scrollController.position.maxScrollExtent
-        .clamp(0.0, 120.0)
-        .toDouble();
-    expect(scrollOffsetBeforeOpen, greaterThan(0));
-    scrollController.jumpTo(scrollOffsetBeforeOpen);
+    scrollController.jumpTo(
+      scrollController.position.maxScrollExtent.clamp(0.0, 120.0).toDouble(),
+    );
     await tester.pump();
+    await revealSelectedCardButton(tester);
+    final scrollOffsetBeforeOpen = scrollController.offset;
+    expect(scrollOffsetBeforeOpen, greaterThan(0));
 
-    await activateDirectPoint(tester, records[1].id);
+    await openProcessVideoFromSelectedCard(tester, records[1].id);
     expect(repository.analysisReadCount, 1);
     final accessibilityEventCountBeforeReturn = accessibilityEvents.length;
     await tester.pageBack();
@@ -1842,20 +1885,19 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    final chart = tester.widget<SurgeryTrendChart>(
-      find.byType(SurgeryTrendChart),
-    );
-    final targetPoint = chart.points.single;
     final scrollController = tester
         .widget<ListView>(find.byKey(const Key('analysis-content')))
         .controller!;
     final previousMaximum = scrollController.position.maxScrollExtent;
     expect(previousMaximum, greaterThan(0));
+    expect(
+      tester.widget<SurgeryTrendChart>(find.byType(SurgeryTrendChart)).points,
+      hasLength(1),
+    );
     scrollController.jumpTo(previousMaximum);
     await tester.pump();
-    expect(find.text('あと1件記録すると推移を確認できます'), findsOneWidget);
 
-    chart.onPointActivated!(targetPoint);
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await pumpUntilCondition(
       tester,
@@ -1904,7 +1946,10 @@ void main() {
         .widget<ListView>(find.byKey(const Key('analysis-content')))
         .controller!;
     final newMaximum = restoredController.position.maxScrollExtent;
-    expect(find.text('あと1件記録すると推移を確認できます'), findsNothing);
+    expect(
+      tester.widget<SurgeryTrendChart>(find.byType(SurgeryTrendChart)).points,
+      hasLength(2),
+    );
     expect(newMaximum, lessThan(previousMaximum));
     expect(restoredController.offset, closeTo(newMaximum, 1));
     expect(
@@ -1936,7 +1981,7 @@ void main() {
     expect(find.text('0:03'), findsOneWidget);
     expect(find.text('+0:03'), findsOneWidget);
 
-    await activateDirectPoint(tester, records.last.id);
+    await openProcessVideoFromSelectedCard(tester, records.last.id);
     await tester.runAsync(() async {
       final review = (await repository.getStepReview(
         surgeryRecordId: records.last.id,
@@ -1966,6 +2011,11 @@ void main() {
           .duration,
       const Duration(seconds: 1),
     );
+    tester
+        .widget<ListView>(find.byKey(const Key('analysis-content')))
+        .controller!
+        .jumpTo(0);
+    await tester.pump();
     expect(find.text('0:01'), findsOneWidget);
     expect(find.text('0:03'), findsOneWidget);
     expect(find.text('-0:02'), findsOneWidget);
@@ -1989,7 +2039,7 @@ void main() {
       videoService: service,
     );
     await selectCccMetric(tester);
-    await activateDirectPoint(tester, records.last.id);
+    await openProcessVideoFromSelectedCard(tester, records.last.id);
 
     await tester.runAsync(() async {
       final review = (await repository.getStepReview(
@@ -2041,7 +2091,7 @@ void main() {
       videoService: service,
     );
     await selectCccMetric(tester);
-    await activateDirectPoint(tester, records.single.id);
+    await openProcessVideoFromSelectedCard(tester, records.single.id);
 
     await tester.runAsync(() async {
       final review = (await repository.getStepReview(
@@ -2117,13 +2167,14 @@ void main() {
     final scrollController = tester
         .widget<ListView>(find.byKey(const Key('analysis-content')))
         .controller!;
-    final scrollOffsetBeforeOpen = scrollController.position.maxScrollExtent
-        .clamp(0.0, 120.0)
-        .toDouble();
-    expect(scrollOffsetBeforeOpen, greaterThan(0));
-    scrollController.jumpTo(scrollOffsetBeforeOpen);
+    scrollController.jumpTo(
+      scrollController.position.maxScrollExtent.clamp(0.0, 120.0).toDouble(),
+    );
     await tester.pump();
-    await activateDirectPoint(tester, records[1].id);
+    await revealSelectedCardButton(tester);
+    final scrollOffsetBeforeOpen = scrollController.offset;
+    expect(scrollOffsetBeforeOpen, greaterThan(0));
+    await openProcessVideoFromSelectedCard(tester, records[1].id);
 
     repository.failNextAnalysisRead(StateError('制御可能な復帰reload失敗'));
     await tester.pageBack();
@@ -2187,7 +2238,7 @@ void main() {
       );
       await selectMetric(tester, step);
 
-      await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+      await tapSelectedCardButton(tester);
       await tester.pump();
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -2253,7 +2304,14 @@ void main() {
     await selectCccMetric(tester);
 
     for (final record in records) {
-      await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+      final chart = tester.widget<SurgeryTrendChart>(
+        find.byType(SurgeryTrendChart),
+      );
+      chart.onPointSelected(
+        chart.points.singleWhere((point) => point.recordId == record.id),
+      );
+      await tester.pump();
+      await tapSelectedCardButton(tester);
       await tester.pump();
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -2296,7 +2354,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -2341,7 +2399,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -2376,7 +2434,7 @@ void main() {
       );
       await selectCccMetric(tester);
 
-      await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+      await tapSelectedCardButton(tester);
       await tester.pump();
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -2458,7 +2516,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -2507,7 +2565,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -2540,8 +2598,8 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    final point = find.byKey(Key('analysis-direct-point-${record.id}'));
-    await tester.tap(point);
+    final button = find.byKey(const Key('analysis-open-selected'));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     // The preflight is still pending, so busy must be present on the first
     // frame after activation rather than one frame later.
@@ -2553,7 +2611,7 @@ void main() {
     );
     expect(service.inspectionCount, 1);
 
-    await tester.tap(point, warnIfMissed: false);
+    await tester.tap(button, warnIfMissed: false);
     await tester.pump();
     expect(service.inspectionCount, 1);
 
@@ -2674,11 +2732,10 @@ void main() {
         .widget<RefreshIndicator>(find.byType(RefreshIndicator))
         .onRefresh;
 
-    // Start the first activation and exercise callbacks from the still-mounted
+    // Start the first button activation and exercise callbacks from the still-mounted
     // old widget tree before a pump can rebuild it with enabled=false.
-    chart.onPointActivated!(chart.points.first);
+    staleOpenDetails?.call();
     staleChart.onPointSelected(staleChart.points.last);
-    staleChart.onPointActivated!(staleChart.points.last);
     staleGraphSemantics.properties.onIncrease?.call();
     staleNext?.call();
     staleOpenDetails?.call();
@@ -2693,7 +2750,7 @@ void main() {
     expect(find.byKey(const Key('analysis-direct-jump-busy')), findsOneWidget);
 
     await tester.tap(
-      find.byKey(Key('analysis-direct-point-${records.last.id}')),
+      find.byKey(const Key('analysis-open-selected')),
       warnIfMissed: false,
     );
     await tester.tap(
@@ -2805,7 +2862,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     final busy = find.byKey(const Key('analysis-direct-jump-busy'));
     expect(busy, findsOneWidget);
@@ -2871,7 +2928,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     await selectCccMetric(tester);
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 10)),
@@ -2983,7 +3040,9 @@ void main() {
     var chart = tester.widget<SurgeryTrendChart>(
       find.byType(SurgeryTrendChart),
     );
-    chart.onPointActivated!(chart.points.first);
+    chart.onPointSelected(chart.points.first);
+    await tester.pump();
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -3014,9 +3073,11 @@ void main() {
       chart.points.map((point) => point.recordId),
       contains(records.last.id),
     );
-    chart.onPointActivated!(
+    chart.onPointSelected(
       chart.points.singleWhere((point) => point.recordId == records.last.id),
     );
+    await tester.pump();
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 10)),
@@ -3063,10 +3124,10 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('動画状態確認Futureの例外では分析に留まり再試行を案内する', (tester) async {
-    final (database, repository, record) = await createDirectCase(
+  testWidgets('動画確認失敗後に選択を変えた再試行は現在の症例を開く', (tester) async {
+    final (database, repository, records) = await createDirectTrendCases(
       tester,
-      videoPath: 'videos/direct/inspection-retry.mp4',
+      count: 2,
     );
     _installAnalysisVideoPlatform();
     final service = _DirectJumpVideoService(
@@ -3081,8 +3142,15 @@ void main() {
       videoService: service,
     );
     await selectCccMetric(tester);
+    final chart = tester.widget<SurgeryTrendChart>(
+      find.byType(SurgeryTrendChart),
+    );
+    chart.onPointSelected(
+      chart.points.singleWhere((point) => point.recordId == records.first.id),
+    );
+    await tester.pump();
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
@@ -3094,6 +3162,10 @@ void main() {
     expect(find.text('動画の状態を確認できませんでした。もう一度お試しください。'), findsOneWidget);
     expect(find.text('再試行'), findsOneWidget);
     expect(service.inspectionCount, 1);
+
+    await tester.tap(find.byKey(const Key('analysis-select-next')));
+    await tester.pump();
+    expect(find.text('2 / 2 症例目'), findsOneWidget);
 
     service.clearInspectionError();
     service.videoStateKind = RecordVideoStateKind.availableManaged;
@@ -3110,7 +3182,7 @@ void main() {
     final destination = tester.widget<StepReviewScreen>(
       find.byType(StepReviewScreen),
     );
-    expect(destination.recordId, record.id);
+    expect(destination.recordId, records.last.id);
     expect(
       destination.initialStepStorageId,
       SurgicalStep.capsulorhexis.storageId,
@@ -3152,7 +3224,7 @@ void main() {
           );
     });
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(() => repository.deleteRecord(record.id));
     pending.complete(
@@ -3201,7 +3273,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => repository.updateVideoReferenceIfCurrent(
@@ -3247,7 +3319,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(find.byKey(Key('analysis-direct-point-${record.id}')));
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(() async {
       final review = (await repository.getStepReview(
@@ -3307,9 +3379,7 @@ void main() {
     );
     await selectCccMetric(tester);
 
-    await tester.tap(
-      find.byKey(const Key('analysis-direct-point-deleted-record')),
-    );
+    await tapSelectedCardButton(tester);
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
