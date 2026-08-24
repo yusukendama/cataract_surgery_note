@@ -10,16 +10,15 @@ import 'date_label_layout.dart';
 import 'duration_axis_scale.dart';
 
 const double _minimumChartHeight = 320;
-const double _directJumpTargetSize = 44;
+const double _minimumPlotWidth = 44;
 const double _minimumVisibleMarkerSpacing = 6;
-const double _distanceComparisonTolerance = 1e-9;
 
 class SurgeryTrendChart extends StatelessWidget {
   const SurgeryTrendChart({
     required this.points,
     required this.selectedRecordId,
     required this.onPointSelected,
-    this.onPointActivated,
+    this.showProcessVideoHint = false,
     this.enabled = true,
     this.focusTargetKey,
     super.key,
@@ -28,7 +27,7 @@ class SurgeryTrendChart extends StatelessWidget {
   final List<SurgeryTrendPoint> points;
   final String? selectedRecordId;
   final ValueChanged<SurgeryTrendPoint> onPointSelected;
-  final ValueChanged<SurgeryTrendPoint>? onPointActivated;
+  final bool showProcessVideoHint;
   final bool enabled;
   final Key? focusTargetKey;
 
@@ -77,10 +76,7 @@ class SurgeryTrendChart extends StatelessWidget {
                     decreasedValue: selectedIndex > 0
                         ? _semanticValue(selectedIndex - 1)
                         : _semanticValue(selectedIndex),
-                    hint: _semanticHint(
-                      selectedIndex,
-                      hasDirectActivation: onPointActivated != null,
-                    ),
+                    hint: _semanticHint(selectedIndex),
                     // VoiceOverでadjustable controlとして一貫して操作できるよう、
                     // 端点でもactionは残し、不可能な方向は状態を変えない。
                     onIncrease: !enabled
@@ -97,9 +93,6 @@ class SurgeryTrendChart extends StatelessWidget {
                               onPointSelected(points[selectedIndex - 1]);
                             }
                           },
-                    onTap: !enabled || onPointActivated == null
-                        ? null
-                        : () => onPointActivated!(selectedPoint),
                     child: SizedBox(
                       height: chartHeight,
                       child: Stack(
@@ -124,31 +117,16 @@ class SurgeryTrendChart extends StatelessWidget {
                                   ? () => onPointSelected(points[index])
                                   : null,
                             ),
-                          if (onPointActivated != null)
-                            _DirectActivationLayer(
-                              points: points,
-                              geometry: geometry,
-                              selectedIndex: selectedIndex,
-                              enabled: enabled,
-                              onActivate: (index) {
-                                final point = points[index];
-                                onPointSelected(point);
-                                onPointActivated!(point);
-                              },
-                            ),
                         ],
                       ),
                     ),
                   ),
                 ),
-                if (onPointActivated != null) ...[
+                if (showProcessVideoHint) ...[
                   const SizedBox(height: 8),
                   Text(
-                    geometry.slotWidth < _minimumVisibleMarkerSpacing
-                        ? '表示中の点を避けてグラフをタップし症例を選び、表示された点をタップすると'
-                              '工程動画を確認します。'
-                        : '表示されている点をタップすると、その工程の動画を確認します。'
-                              '事前確認で動画または記録位置を利用できない場合は症例詳細を開きます。',
+                    'グラフをタップして症例を選び、「症例詳細を見る」から'
+                    '選択した工程の動画を確認します。',
                     key: const Key('analysis-chart-direct-hint'),
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -177,13 +155,12 @@ class SurgeryTrendChart extends StatelessWidget {
         '${point.step.label}、${formatProcedureDuration(point.duration)}';
   }
 
-  String _semanticHint(int index, {required bool hasDirectActivation}) {
+  String _semanticHint(int index) {
     final selectionHint = _selectionSemanticHint(index);
-    if (!hasDirectActivation) {
+    if (!showProcessVideoHint) {
       return selectionHint;
     }
-    return '$selectionHint。上下スワイプで症例を選択し、'
-        'ダブルタップでこの工程の動画を開きます';
+    return '$selectionHint。選択後、症例詳細を見るボタンからこの工程の動画を開けます';
   }
 
   String _selectionSemanticHint(int index) {
@@ -247,123 +224,6 @@ class _PointTarget extends StatelessWidget {
   }
 }
 
-class _DirectActivationLayer extends StatelessWidget {
-  const _DirectActivationLayer({
-    required this.points,
-    required this.geometry,
-    required this.selectedIndex,
-    required this.enabled,
-    required this.onActivate,
-  });
-
-  final List<SurgeryTrendPoint> points;
-  final _ChartGeometry geometry;
-  final int selectedIndex;
-  final bool enabled;
-  final ValueChanged<int> onActivate;
-
-  @override
-  Widget build(BuildContext context) {
-    final targets = <_DirectActivationTarget>[
-      for (var index = 0; index < points.length; index++)
-        if (_isMarkerDrawn(
-          slotWidth: geometry.slotWidth,
-          selected: index == selectedIndex,
-        ))
-          _DirectActivationTarget(
-            index: index,
-            markerCenter: geometry.offsetFor(index, points[index]),
-            bounds: geometry.directJumpBounds(index, points[index]),
-          ),
-    ];
-    return Positioned.fill(
-      child: GestureDetector(
-        behavior: HitTestBehavior.deferToChild,
-        onTapUp: !enabled
-            ? null
-            : (details) {
-                final index = _resolveActivationIndex(
-                  position: details.localPosition,
-                  targets: targets,
-                  selectedIndex: selectedIndex,
-                );
-                if (index != null) {
-                  onActivate(index);
-                }
-              },
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            for (final target in targets)
-              Positioned.fromRect(
-                rect: target.bounds,
-                child: ColoredBox(
-                  key: Key(
-                    'analysis-direct-point-${points[target.index].recordId}',
-                  ),
-                  color: Colors.transparent,
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _DirectActivationTarget {
-  const _DirectActivationTarget({
-    required this.index,
-    required this.markerCenter,
-    required this.bounds,
-  });
-
-  final int index;
-  final Offset markerCenter;
-  final Rect bounds;
-}
-
-int? _resolveActivationIndex({
-  required Offset position,
-  required List<_DirectActivationTarget> targets,
-  required int selectedIndex,
-}) {
-  _DirectActivationTarget? best;
-  var bestDistanceSquared = double.infinity;
-  for (final target in targets) {
-    if (!_containsHalfOpen(target.bounds, position)) {
-      continue;
-    }
-    final delta = target.markerCenter - position;
-    final distanceSquared = delta.dx * delta.dx + delta.dy * delta.dy;
-    if (best == null ||
-        distanceSquared < bestDistanceSquared - _distanceComparisonTolerance) {
-      best = target;
-      bestDistanceSquared = distanceSquared;
-      continue;
-    }
-    if ((distanceSquared - bestDistanceSquared).abs() >
-        _distanceComparisonTolerance) {
-      continue;
-    }
-    final targetIsSelected = target.index == selectedIndex;
-    final bestIsSelected = best.index == selectedIndex;
-    if ((targetIsSelected && !bestIsSelected) ||
-        (targetIsSelected == bestIsSelected && target.index > best.index)) {
-      best = target;
-      bestDistanceSquared = distanceSquared;
-    }
-  }
-  return best?.index;
-}
-
-bool _containsHalfOpen(Rect bounds, Offset position) {
-  return position.dx >= bounds.left &&
-      position.dx < bounds.right &&
-      position.dy >= bounds.top &&
-      position.dy < bounds.bottom;
-}
-
 bool _isMarkerDrawn({required double slotWidth, required bool selected}) {
   return selected || slotWidth >= _minimumVisibleMarkerSpacing;
 }
@@ -414,14 +274,14 @@ class _ChartGeometry {
         .map(textWidth)
         .fold<double>(0, math.max);
     final plotRight = width - 24;
-    final maximumPlotLeft = math.max(0.0, plotRight - _directJumpTargetSize);
+    final maximumPlotLeft = math.max(0.0, plotRight - _minimumPlotWidth);
     return _ChartGeometry(
       width: width,
       height: height,
       durationAxis: durationAxis,
       pointCount: points.length,
       // Corrupt legacy durations can produce extremely long labels. Preserve
-      // the 44px interaction plot and let the painter clip the label instead
+      // a usable plot and let the painter clip the label instead
       // of allowing label width to collapse or invert the plot.
       plotLeft: math.min(math.max(56.0, widestAxisLabel + 16), maximumPlotLeft),
       plotTop: math.max(16, labelHeight / 2 + 8),
@@ -462,24 +322,6 @@ class _ChartGeometry {
         ? width
         : (xFor(index) + xFor(index + 1)) / 2;
     return Rect.fromLTWH(left, 0, math.max(0, right - left), height);
-  }
-
-  Rect directJumpBounds(int index, SurgeryTrendPoint point) {
-    assert(plotWidth >= _directJumpTargetSize);
-    assert(plotBottom - plotTop >= _directJumpTargetSize);
-    final center = offsetFor(index, point);
-    final left = (center.dx - _directJumpTargetSize / 2)
-        .clamp(plotLeft, plotRight - _directJumpTargetSize)
-        .toDouble();
-    final top = (center.dy - _directJumpTargetSize / 2)
-        .clamp(plotTop, plotBottom - _directJumpTargetSize)
-        .toDouble();
-    return Rect.fromLTWH(
-      left,
-      top,
-      _directJumpTargetSize,
-      _directJumpTargetSize,
-    );
   }
 
   @override

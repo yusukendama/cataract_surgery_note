@@ -7,17 +7,20 @@ import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
 import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
+import 'package:cataract_surgery_note/src/features/analysis/analysis_screen.dart';
 import 'package:cataract_surgery_note/src/features/review/step_review_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:intl/date_symbol_data_local.dart';
 import 'package:video_player/video_player.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('iOS固定動画で保存済み位置へ±100ms以内にseekして停止する', (tester) async {
+  testWidgets('グラフで症例選択後に詳細ボタンから工程位置へseekして停止する', (tester) async {
+    await initializeDateFormatting('ja_JP');
     final fixtureDirectory = await Directory.systemTemp.createTemp(
       'cataract-direct-jump-',
     );
@@ -69,21 +72,57 @@ void main() {
             _FixtureVideoStorage(fixture),
           ),
         ],
-        child: MaterialApp(
-          home: StepReviewScreen(
-            recordId: record.id,
-            initialStepStorageId: SurgicalStep.capsulorhexis.storageId,
-          ),
-        ),
+        child: const MaterialApp(home: AnalysisScreen()),
       ),
     );
 
-    for (var attempt = 0; attempt < 200; attempt++) {
-      await tester.pump(const Duration(milliseconds: 100));
-      if (find.text('CCCの開始位置へ移動しました').evaluate().isNotEmpty) {
-        break;
-      }
+    await _pumpUntil(
+      tester,
+      () => find
+          .byKey(const Key('analysis-metric-selector'))
+          .evaluate()
+          .isNotEmpty,
+    );
+    await tester.tap(find.byKey(const Key('analysis-metric-selector')));
+    await tester.pumpAndSettle();
+    final cccMetric = find.byKey(
+      Key('analysis-metric-${SurgicalStep.capsulorhexis.storageId}'),
+    );
+    if (cccMetric.evaluate().isEmpty) {
+      await tester.dragUntilVisible(
+        cccMetric,
+        find.byType(ListView).last,
+        const Offset(0, -200),
+      );
     }
+    await tester.tap(cccMetric);
+    await tester.pumpAndSettle();
+
+    final graphPoint = find.byKey(Key('analysis-point-${record.id}'));
+    expect(graphPoint, findsOneWidget);
+    await tester.tap(graphPoint);
+    await tester.pump();
+
+    expect(find.byType(AnalysisScreen), findsOneWidget);
+    expect(find.byType(StepReviewScreen), findsNothing);
+    expect(find.byType(VideoPlayer), findsNothing);
+
+    final detailButton = find.byKey(const Key('analysis-open-selected'));
+    await tester.dragUntilVisible(
+      detailButton,
+      find.byKey(const Key('analysis-content')),
+      const Offset(0, -200),
+    );
+    await tester.pump();
+    await tester.tap(detailButton);
+
+    await _pumpUntil(
+      tester,
+      () =>
+          find.byType(StepReviewScreen).evaluate().isNotEmpty &&
+          find.text('CCCの開始位置へ移動しました').evaluate().isNotEmpty,
+      maximumAttempts: 200,
+    );
 
     final visibleTexts = tester
         .widgetList<Text>(find.byType(Text))
@@ -92,7 +131,7 @@ void main() {
         .toList(growable: false);
     expect(
       find.text('CCCの開始位置へ移動しました'),
-      findsOneWidget,
+      findsWidgets,
       reason: 'Visible text after waiting: $visibleTexts',
     );
     final slider = tester.widget<Slider>(
@@ -131,6 +170,17 @@ void main() {
     expect(find.byIcon(Icons.play_arrow), findsOneWidget);
     expect(find.byIcon(Icons.pause), findsNothing);
   }, skip: !Platform.isIOS);
+}
+
+Future<void> _pumpUntil(
+  WidgetTester tester,
+  bool Function() condition, {
+  int maximumAttempts = 100,
+}) async {
+  for (var attempt = 0; attempt < maximumAttempts && !condition(); attempt++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+  expect(condition(), isTrue, reason: '非同期条件が期限内に成立しませんでした。');
 }
 
 class _FixtureVideoStorage implements VideoStorageRepository {

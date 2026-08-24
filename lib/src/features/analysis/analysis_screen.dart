@@ -116,15 +116,13 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
               points: trend.points,
               selectedRecordId: effectiveSelectedRecordId,
               enabled: !_directJumpBusy,
+              showProcessVideoHint: !_selectedStep.isTotalSurgeryTime,
               onPointSelected: (point) {
                 if (_directJumpBusy) {
                   return;
                 }
                 setState(() => _selectedRecordId = point.recordId);
               },
-              onPointActivated: _selectedStep.isTotalSurgeryTime
-                  ? null
-                  : _activateDirectJump,
             ),
             if (trend.points.length == 1) ...[
               const SizedBox(height: 8),
@@ -145,7 +143,15 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
                     : null,
                 onOpenDetails: _directJumpBusy
                     ? null
-                    : () => _openRecord(trend.points[selectedIndex]),
+                    : () {
+                        final point = trend.points[selectedIndex];
+                        if (_selectedStep.isTotalSurgeryTime) {
+                          _openRecord(point).ignore();
+                        } else {
+                          _activateDirectJump(point).ignore();
+                        }
+                      },
+                opensProcessVideo: !_selectedStep.isTotalSurgeryTime,
               ),
             ],
             const SizedBox(height: 12),
@@ -243,7 +249,6 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     } on Object {
       _finishDirectJumpWithMessage(
         generation,
-        point: point,
         message: '症例を確認できませんでした。もう一度お試しください。',
         retryable: true,
       );
@@ -268,7 +273,6 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     } on Object {
       _finishDirectJumpWithMessage(
         generation,
-        point: point,
         message: '動画の状態を確認できませんでした。もう一度お試しください。',
         retryable: true,
       );
@@ -310,7 +314,6 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       if (latestRecord.videoPath != record.videoPath) {
         _finishDirectJumpWithMessage(
           generation,
-          point: point,
           message: '動画が更新されました。もう一度お試しください。',
           retryable: true,
         );
@@ -319,7 +322,6 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     } on Object {
       _finishDirectJumpWithMessage(
         generation,
-        point: point,
         message: '症例を確認できませんでした。もう一度お試しください。',
         retryable: true,
       );
@@ -408,7 +410,6 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
 
   void _finishDirectJumpWithMessage(
     int generation, {
-    required SurgeryTrendPoint point,
     required String message,
     required bool retryable,
   }) {
@@ -421,8 +422,26 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       message: message,
       tone: AppFeedbackTone.failure,
       actionLabel: retryable ? '再試行' : null,
-      onAction: retryable ? () => _activateDirectJump(point) : null,
+      onAction: retryable ? _retryDirectJumpForCurrentSelection : null,
     );
+  }
+
+  void _retryDirectJumpForCurrentSelection() {
+    if (!mounted || _directJumpBusy || _selectedStep.isTotalSurgeryTime) {
+      return;
+    }
+    final snapshot =
+        ref.read(surgeryAnalysisProvider).asData?.value ??
+        _lastStableAnalysisSnapshot;
+    if (snapshot == null) {
+      return;
+    }
+    final trend = _calculator.calculate(snapshot.measurements, _selectedStep);
+    final selectedIndex = _selectedIndexFor(trend.points);
+    if (selectedIndex < 0) {
+      return;
+    }
+    _activateDirectJump(trend.points[selectedIndex]).ignore();
   }
 
   Future<void> _handleMissingRecord(int generation) async {
@@ -727,6 +746,7 @@ class _SelectedPointCard extends StatelessWidget {
     required this.onSelectPrevious,
     required this.onSelectNext,
     required this.onOpenDetails,
+    required this.opensProcessVideo,
   });
 
   final SurgeryTrendPoint point;
@@ -735,6 +755,7 @@ class _SelectedPointCard extends StatelessWidget {
   final VoidCallback? onSelectPrevious;
   final VoidCallback? onSelectNext;
   final VoidCallback? onOpenDetails;
+  final bool opensProcessVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -761,13 +782,45 @@ class _SelectedPointCard extends StatelessWidget {
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 12),
-            FilledButton.tonalIcon(
-              onPressed: onOpenDetails,
-              icon: const Icon(Icons.open_in_new),
-              label: const Text('症例詳細を見る'),
-            ),
+            if (opensProcessVideo) ...[
+              Text(
+                '選択中の「${point.step.label}」の工程動画を開きます。',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+            _buildOpenButton(date),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildOpenButton(String date) {
+    final button = FilledButton.tonalIcon(
+      onPressed: onOpenDetails,
+      icon: const Icon(Icons.open_in_new),
+      label: const Text('症例詳細を見る'),
+    );
+    if (!opensProcessVideo) {
+      return KeyedSubtree(
+        key: const Key('analysis-open-selected'),
+        child: button,
+      );
+    }
+    return KeyedSubtree(
+      key: const Key('analysis-open-selected'),
+      child: Semantics(
+        container: true,
+        excludeSemantics: true,
+        button: true,
+        enabled: onOpenDetails != null,
+        label: '症例詳細を見る',
+        hint: '$date、${point.eyeSide.label}、${point.step.label}の工程動画を開きます',
+        onTap: onOpenDetails,
+        child: button,
       ),
     );
   }
