@@ -10,18 +10,27 @@ import 'date_label_layout.dart';
 import 'duration_axis_scale.dart';
 
 const double _minimumChartHeight = 320;
+const double _directJumpTargetSize = 44;
+const double _minimumVisibleMarkerSpacing = 6;
+const double _distanceComparisonTolerance = 1e-9;
 
 class SurgeryTrendChart extends StatelessWidget {
   const SurgeryTrendChart({
     required this.points,
     required this.selectedRecordId,
     required this.onPointSelected,
+    this.onPointActivated,
+    this.enabled = true,
+    this.focusTargetKey,
     super.key,
   });
 
   final List<SurgeryTrendPoint> points;
   final String? selectedRecordId;
   final ValueChanged<SurgeryTrendPoint> onPointSelected;
+  final ValueChanged<SurgeryTrendPoint>? onPointActivated;
+  final bool enabled;
+  final Key? focusTargetKey;
 
   @override
   Widget build(BuildContext context) {
@@ -41,68 +50,114 @@ class SurgeryTrendChart extends StatelessWidget {
       children: [
         Text('推移', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
-        Semantics(
-          key: const Key('analysis-trend-adjustable'),
-          container: true,
-          excludeSemantics: true,
-          label: '${selectedPoint.step.label}の推移',
-          value: _semanticValue(selectedIndex),
-          increasedValue: selectedIndex < points.length - 1
-              ? _semanticValue(selectedIndex + 1)
-              : _semanticValue(selectedIndex),
-          decreasedValue: selectedIndex > 0
-              ? _semanticValue(selectedIndex - 1)
-              : _semanticValue(selectedIndex),
-          hint: _semanticHint(selectedIndex),
-          // VoiceOverでadjustable controlとして一貫して操作できるよう、
-          // 端点でもactionは残し、不可能な方向は状態を変えない。
-          onIncrease: () {
-            if (selectedIndex < points.length - 1) {
-              onPointSelected(points[selectedIndex + 1]);
-            }
-          },
-          onDecrease: () {
-            if (selectedIndex > 0) {
-              onPointSelected(points[selectedIndex - 1]);
-            }
-          },
-          child: SizedBox(
-            height: chartHeight,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final geometry = _ChartGeometry.fromPoints(
-                  width: constraints.maxWidth,
-                  height: chartHeight,
-                  points: points,
-                  textScaler: textScaler,
-                  textStyle: textStyle,
-                  textDirection: textDirection,
-                );
-                return Stack(
-                  children: [
-                    CustomPaint(
-                      size: Size(constraints.maxWidth, chartHeight),
-                      painter: _TrendChartPainter(
-                        points: points,
-                        geometry: geometry,
-                        selectedRecordId: selectedPoint.recordId,
-                        colorScheme: Theme.of(context).colorScheme,
-                        textStyle: textStyle,
-                        textScaler: textScaler,
-                        textDirection: textDirection,
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final geometry = _ChartGeometry.fromPoints(
+              width: constraints.maxWidth,
+              height: chartHeight,
+              points: points,
+              textScaler: textScaler,
+              textStyle: textStyle,
+              textDirection: textDirection,
+            );
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                KeyedSubtree(
+                  key: const Key('analysis-trend-adjustable'),
+                  child: Semantics(
+                    key: focusTargetKey,
+                    container: true,
+                    excludeSemantics: true,
+                    label: '${selectedPoint.step.label}の推移',
+                    value: _semanticValue(selectedIndex),
+                    increasedValue: selectedIndex < points.length - 1
+                        ? _semanticValue(selectedIndex + 1)
+                        : _semanticValue(selectedIndex),
+                    decreasedValue: selectedIndex > 0
+                        ? _semanticValue(selectedIndex - 1)
+                        : _semanticValue(selectedIndex),
+                    hint: _semanticHint(
+                      selectedIndex,
+                      hasDirectActivation: onPointActivated != null,
+                    ),
+                    // VoiceOverでadjustable controlとして一貫して操作できるよう、
+                    // 端点でもactionは残し、不可能な方向は状態を変えない。
+                    onIncrease: !enabled
+                        ? null
+                        : () {
+                            if (selectedIndex < points.length - 1) {
+                              onPointSelected(points[selectedIndex + 1]);
+                            }
+                          },
+                    onDecrease: !enabled
+                        ? null
+                        : () {
+                            if (selectedIndex > 0) {
+                              onPointSelected(points[selectedIndex - 1]);
+                            }
+                          },
+                    onTap: !enabled || onPointActivated == null
+                        ? null
+                        : () => onPointActivated!(selectedPoint),
+                    child: SizedBox(
+                      height: chartHeight,
+                      child: Stack(
+                        children: [
+                          CustomPaint(
+                            size: Size(constraints.maxWidth, chartHeight),
+                            painter: _TrendChartPainter(
+                              points: points,
+                              geometry: geometry,
+                              selectedRecordId: selectedPoint.recordId,
+                              colorScheme: Theme.of(context).colorScheme,
+                              textStyle: textStyle,
+                              textScaler: textScaler,
+                              textDirection: textDirection,
+                            ),
+                          ),
+                          for (var index = 0; index < points.length; index++)
+                            _PointTarget(
+                              point: points[index],
+                              bounds: geometry.hitTargetBounds(index),
+                              onTap: enabled
+                                  ? () => onPointSelected(points[index])
+                                  : null,
+                            ),
+                          if (onPointActivated != null)
+                            _DirectActivationLayer(
+                              points: points,
+                              geometry: geometry,
+                              selectedIndex: selectedIndex,
+                              enabled: enabled,
+                              onActivate: (index) {
+                                final point = points[index];
+                                onPointSelected(point);
+                                onPointActivated!(point);
+                              },
+                            ),
+                        ],
                       ),
                     ),
-                    for (var index = 0; index < points.length; index++)
-                      _PointTarget(
-                        point: points[index],
-                        bounds: geometry.hitTargetBounds(index),
-                        onTap: () => onPointSelected(points[index]),
-                      ),
-                  ],
-                );
-              },
-            ),
-          ),
+                  ),
+                ),
+                if (onPointActivated != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    geometry.slotWidth < _minimumVisibleMarkerSpacing
+                        ? '表示中の点を避けてグラフをタップし症例を選び、表示された点をタップすると'
+                              '工程動画を確認します。'
+                        : '表示されている点をタップすると、その工程の動画を確認します。'
+                              '事前確認で動画または記録位置を利用できない場合は症例詳細を開きます。',
+                    key: const Key('analysis-chart-direct-hint'),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
         ),
       ],
     );
@@ -122,7 +177,16 @@ class SurgeryTrendChart extends StatelessWidget {
         '${point.step.label}、${formatProcedureDuration(point.duration)}';
   }
 
-  String _semanticHint(int index) {
+  String _semanticHint(int index, {required bool hasDirectActivation}) {
+    final selectionHint = _selectionSemanticHint(index);
+    if (!hasDirectActivation) {
+      return selectionHint;
+    }
+    return '$selectionHint。上下スワイプで症例を選択し、'
+        'ダブルタップでこの工程の動画を開きます';
+  }
+
+  String _selectionSemanticHint(int index) {
     if (points.length == 1) {
       return 'この指標の症例は1件だけです';
     }
@@ -160,7 +224,7 @@ class _PointTarget extends StatelessWidget {
 
   final SurgeryTrendPoint point;
   final Rect bounds;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -181,6 +245,127 @@ class _PointTarget extends StatelessWidget {
       ),
     );
   }
+}
+
+class _DirectActivationLayer extends StatelessWidget {
+  const _DirectActivationLayer({
+    required this.points,
+    required this.geometry,
+    required this.selectedIndex,
+    required this.enabled,
+    required this.onActivate,
+  });
+
+  final List<SurgeryTrendPoint> points;
+  final _ChartGeometry geometry;
+  final int selectedIndex;
+  final bool enabled;
+  final ValueChanged<int> onActivate;
+
+  @override
+  Widget build(BuildContext context) {
+    final targets = <_DirectActivationTarget>[
+      for (var index = 0; index < points.length; index++)
+        if (_isMarkerDrawn(
+          slotWidth: geometry.slotWidth,
+          selected: index == selectedIndex,
+        ))
+          _DirectActivationTarget(
+            index: index,
+            markerCenter: geometry.offsetFor(index, points[index]),
+            bounds: geometry.directJumpBounds(index, points[index]),
+          ),
+    ];
+    return Positioned.fill(
+      child: GestureDetector(
+        behavior: HitTestBehavior.deferToChild,
+        onTapUp: !enabled
+            ? null
+            : (details) {
+                final index = _resolveActivationIndex(
+                  position: details.localPosition,
+                  targets: targets,
+                  selectedIndex: selectedIndex,
+                );
+                if (index != null) {
+                  onActivate(index);
+                }
+              },
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            for (final target in targets)
+              Positioned.fromRect(
+                rect: target.bounds,
+                child: ColoredBox(
+                  key: Key(
+                    'analysis-direct-point-${points[target.index].recordId}',
+                  ),
+                  color: Colors.transparent,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DirectActivationTarget {
+  const _DirectActivationTarget({
+    required this.index,
+    required this.markerCenter,
+    required this.bounds,
+  });
+
+  final int index;
+  final Offset markerCenter;
+  final Rect bounds;
+}
+
+int? _resolveActivationIndex({
+  required Offset position,
+  required List<_DirectActivationTarget> targets,
+  required int selectedIndex,
+}) {
+  _DirectActivationTarget? best;
+  var bestDistanceSquared = double.infinity;
+  for (final target in targets) {
+    if (!_containsHalfOpen(target.bounds, position)) {
+      continue;
+    }
+    final delta = target.markerCenter - position;
+    final distanceSquared = delta.dx * delta.dx + delta.dy * delta.dy;
+    if (best == null ||
+        distanceSquared < bestDistanceSquared - _distanceComparisonTolerance) {
+      best = target;
+      bestDistanceSquared = distanceSquared;
+      continue;
+    }
+    if ((distanceSquared - bestDistanceSquared).abs() >
+        _distanceComparisonTolerance) {
+      continue;
+    }
+    final targetIsSelected = target.index == selectedIndex;
+    final bestIsSelected = best.index == selectedIndex;
+    if ((targetIsSelected && !bestIsSelected) ||
+        (targetIsSelected == bestIsSelected && target.index > best.index)) {
+      best = target;
+      bestDistanceSquared = distanceSquared;
+    }
+  }
+  return best?.index;
+}
+
+bool _containsHalfOpen(Rect bounds, Offset position) {
+  return position.dx >= bounds.left &&
+      position.dx < bounds.right &&
+      position.dy >= bounds.top &&
+      position.dy < bounds.bottom;
+}
+
+bool _isMarkerDrawn({required double slotWidth, required bool selected}) {
+  return selected || slotWidth >= _minimumVisibleMarkerSpacing;
 }
 
 class _ChartGeometry {
@@ -228,12 +413,17 @@ class _ChartGeometry {
         .map(durationAxis.labelFor)
         .map(textWidth)
         .fold<double>(0, math.max);
+    final plotRight = width - 24;
+    final maximumPlotLeft = math.max(0.0, plotRight - _directJumpTargetSize);
     return _ChartGeometry(
       width: width,
       height: height,
       durationAxis: durationAxis,
       pointCount: points.length,
-      plotLeft: math.max(56, widestAxisLabel + 16),
+      // Corrupt legacy durations can produce extremely long labels. Preserve
+      // the 44px interaction plot and let the painter clip the label instead
+      // of allowing label width to collapse or invert the plot.
+      plotLeft: math.min(math.max(56.0, widestAxisLabel + 16), maximumPlotLeft),
       plotTop: math.max(16, labelHeight / 2 + 8),
       plotBottomInset: math.max(42, labelHeight + 20),
     );
@@ -272,6 +462,24 @@ class _ChartGeometry {
         ? width
         : (xFor(index) + xFor(index + 1)) / 2;
     return Rect.fromLTWH(left, 0, math.max(0, right - left), height);
+  }
+
+  Rect directJumpBounds(int index, SurgeryTrendPoint point) {
+    assert(plotWidth >= _directJumpTargetSize);
+    assert(plotBottom - plotTop >= _directJumpTargetSize);
+    final center = offsetFor(index, point);
+    final left = (center.dx - _directJumpTargetSize / 2)
+        .clamp(plotLeft, plotRight - _directJumpTargetSize)
+        .toDouble();
+    final top = (center.dy - _directJumpTargetSize / 2)
+        .clamp(plotTop, plotBottom - _directJumpTargetSize)
+        .toDouble();
+    return Rect.fromLTWH(
+      left,
+      top,
+      _directJumpTargetSize,
+      _directJumpTargetSize,
+    );
   }
 
   @override
@@ -420,6 +628,9 @@ class _TrendChartPainter extends CustomPainter {
 
   /// 点間隔に応じたデータ点の描き方。null は「点を描かず折れ線のみ」。
   _DotStyle? _dotStyleFor({required double slotWidth, required bool selected}) {
+    if (!_isMarkerDrawn(slotWidth: slotWidth, selected: selected)) {
+      return null;
+    }
     if (selected) {
       return _DotStyle(
         radius: 7,
@@ -433,10 +644,7 @@ class _TrendChartPainter extends CustomPainter {
     if (slotWidth >= 12) {
       return _DotStyle(radius: 3.5, ringWidth: 1.5, fill: colorScheme.surface);
     }
-    if (slotWidth >= 6) {
-      return _DotStyle(radius: 2, ringWidth: 0, fill: colorScheme.primary);
-    }
-    return null;
+    return _DotStyle(radius: 2, ringWidth: 0, fill: colorScheme.primary);
   }
 
   void _paintDateLabels(Canvas canvas) {

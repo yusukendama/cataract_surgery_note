@@ -28,6 +28,32 @@ class RecordVideoState {
   final Object? error;
 }
 
+/// The file selected for playback and the exact managed reference produced by
+/// a successful legacy migration, when one occurred.
+///
+/// Callers must compare [normalizedLegacyVideoPath] with a fresh record before
+/// treating a reference change as the same-video migration exception. The
+/// record may have been replaced again after the migration CAS committed.
+class ResolvedRecordVideo {
+  const ResolvedRecordVideo({
+    required this.file,
+    this.normalizedLegacyVideoPath,
+  });
+
+  final File? file;
+  final String? normalizedLegacyVideoPath;
+}
+
+class _LegacyVideoMigrationResult {
+  const _LegacyVideoMigrationResult({
+    required this.record,
+    required this.committedVideoPath,
+  });
+
+  final SurgeryRecord record;
+  final String committedVideoPath;
+}
+
 class RecordVideoService {
   RecordVideoService({
     required SurgeryRepository surgeryRepository,
@@ -321,6 +347,12 @@ class RecordVideoService {
   Future<SurgeryRecord> migrateLegacyVideoForRecord(
     SurgeryRecord record,
   ) async {
+    return (await _migrateLegacyVideoForRecord(record)).record;
+  }
+
+  Future<_LegacyVideoMigrationResult> _migrateLegacyVideoForRecord(
+    SurgeryRecord record,
+  ) async {
     final current = await _requireRecord(record.id);
     if (current.videoPath != record.videoPath) {
       throw VideoReferenceConflictException(
@@ -371,10 +403,14 @@ class RecordVideoService {
     // The legacy external original is deliberately never deleted.
     await _finishImportWithoutThrowing(storedVideo.relativePath);
     await _maintainWithoutThrowing();
-    return _committedRecordFallback(
+    final committedRecord = await _committedRecordFallback(
       before: current,
       videoPath: storedVideo.relativePath,
       videoDisplayName: storedVideo.originalFileName,
+    );
+    return _LegacyVideoMigrationResult(
+      record: committedRecord,
+      committedVideoPath: storedVideo.relativePath,
     );
   }
 
@@ -428,32 +464,60 @@ class RecordVideoService {
     }
   }
 
-  Future<File?> resolveVideoForRecord(SurgeryRecord record) async {
+  Future<ResolvedRecordVideo> resolveVideoForRecordWithMetadata(
+    SurgeryRecord record,
+  ) async {
     final state = await inspectVideoState(record);
     if (state.kind == RecordVideoStateKind.availableManaged) {
-      return state.file;
+      return ResolvedRecordVideo(file: state.file);
     }
     if (state.kind != RecordVideoStateKind.availableLegacy) {
-      return null;
+      return const ResolvedRecordVideo(file: null);
     }
 
     // Migration is a best-effort optimization. Failure must never prevent the
     // existing external original from being played.
     try {
-      final migrated = await migrateLegacyVideoForRecord(record);
-      final migratedPath = migrated.videoPath;
-      if (migratedPath != null) {
-        final resolved = await _videoStorageRepository.resolveVideo(
-          migratedPath,
+      final migration = await _migrateLegacyVideoForRecord(record);
+      final migratedPath = migration.committedVideoPath;
+      final resolved = await _videoStorageRepository.resolveVideo(migratedPath);
+      if (resolved != null) {
+        return ResolvedRecordVideo(
+          file: resolved,
+          normalizedLegacyVideoPath: migratedPath,
         );
-        if (resolved != null) {
-          return resolved;
-        }
       }
     } on Object {
-      return state.file;
+      return ResolvedRecordVideo(file: state.file);
     }
-    return state.file;
+    return ResolvedRecordVideo(file: state.file);
+  }
+
+  Future<File?> resolveVideoForRecord(SurgeryRecord record) async {
+    final resolution = await resolveVideoForRecordWithMetadata(record);
+    final file = resolution.file;
+    if (file == null) {
+      return null;
+    }
+
+    // A legacy migration can commit A -> B and then lose a race to an
+    // independent replacement C before resolution completes. The metadata API
+    // exposes B so consistency-sensitive callers can make their own decision;
+    // this compatibility API has no way to return the reference together with
+    // the file, so fail closed unless a fresh DB read still names that file.
+    final resolvedVideoPath =
+        resolution.normalizedLegacyVideoPath ?? record.videoPath;
+    try {
+      final latest = await _surgeryRepository.getRecord(record.id);
+      if (latest?.videoPath != resolvedVideoPath) {
+        return null;
+      }
+    } on Object {
+      // Returning an unverified file could bind playback to a replaced or
+      // deleted video. Callers may refresh and resolve the latest record again.
+      return null;
+    }
+    return file;
   }
 
   Future<SurgeryRecord> removeVideoForRecord(

@@ -124,6 +124,22 @@ SELECT EXISTS(
     return _mutationCoordinator.run(surgeryRecordId, action);
   }
 
+  /// Runs a consistency-sensitive operation while serializing application
+  /// mutations for this record and holding one database transaction.
+  ///
+  /// Direct video jumps use this for the final record/step validation and the
+  /// one-time seek handoff, so a timing edit, deletion, or video replacement
+  /// cannot interleave between the validation reads and the request.
+  Future<T> runRecordTransaction<T>(
+    String surgeryRecordId,
+    Future<T> Function() action,
+  ) {
+    return runRecordMutation(
+      surgeryRecordId,
+      () => _database.transaction(action),
+    );
+  }
+
   Future<List<SurgeryRecord>> watchableListSnapshot() async {
     final rows = await _database.customSelect('''
 SELECT * FROM surgery_records

@@ -46,6 +46,68 @@ class _RecordingBackupExclusion implements BackupExclusionRepository {
   }
 }
 
+class _ReplaceDuringCommittedReadRepository extends SurgeryRepository {
+  _ReplaceDuringCommittedReadRepository(
+    super.database, {
+    required this.replacementPath,
+  }) : _database = database;
+
+  final AppDatabase _database;
+  final String replacementPath;
+  String? migratedPath;
+  var didReplace = false;
+
+  @override
+  Future<SurgeryRecord?> getRecord(String id) async {
+    final record = await super.getRecord(id);
+    final path = record?.videoPath;
+    if (!didReplace &&
+        record != null &&
+        classifyVideoPath(recordId: id, videoPath: path).kind ==
+            VideoPathKind.managed) {
+      didReplace = true;
+      migratedPath = path;
+      await _database.customStatement(
+        '''
+UPDATE surgery_records
+SET video_path = ?, video_display_name = ?
+WHERE id = ? AND video_path = ?
+''',
+        <Object?>[replacementPath, 'replacement.mp4', id, path],
+      );
+      return super.getRecord(id);
+    }
+    return record;
+  }
+}
+
+enum _FinalRecordReadFailure { missing, exception }
+
+class _FailNextRecordReadRepository extends SurgeryRepository {
+  _FailNextRecordReadRepository(super.database, {required this.failure});
+
+  final _FinalRecordReadFailure failure;
+  var _armed = false;
+  var didFailRead = false;
+
+  void arm() => _armed = true;
+
+  @override
+  Future<SurgeryRecord?> getRecord(String id) {
+    if (!_armed) {
+      return super.getRecord(id);
+    }
+    _armed = false;
+    didFailRead = true;
+    return switch (failure) {
+      _FinalRecordReadFailure.missing => Future<SurgeryRecord?>.value(),
+      _FinalRecordReadFailure.exception => Future<SurgeryRecord?>.error(
+        StateError('制御可能な最終record read例外'),
+      ),
+    };
+  }
+}
+
 void main() {
   late Directory temporaryDirectory;
   late Directory supportDirectory;
@@ -135,6 +197,97 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
     expect(await source.exists(), isTrue);
   });
 
+  test('動画解決wrapperは通常managed参照と一致するfileを返す', () async {
+    final source = await _source(temporaryDirectory, 'managed-resolve.mp4');
+    final record = await _recordWithReview(surgeryRepository);
+    final attached = (await service.attachVideoToRecord(
+      surgeryRecordId: record.id,
+      candidate: await verifiedVideoCandidateForFile(source),
+    )).value;
+    final beforeRows = await _stepRows(database, record.id);
+
+    final resolved = await service.resolveVideoForRecord(attached);
+
+    final persisted = (await surgeryRepository.getRecord(record.id))!;
+    final expected = await videoStorageRepository.resolveVideo(
+      persisted.videoPath!,
+    );
+    expect(resolved, isNotNull);
+    expect(resolved!.path, expected!.path);
+    expect(persisted.videoPath, attached.videoPath);
+    expect(await _stepRows(database, record.id), beforeRows);
+  });
+
+  for (final failure in _FinalRecordReadFailure.values) {
+    test(
+      '動画解決wrapperはmanaged解決後の最終read ${failure.name}をnullへfail-closedする',
+      () async {
+        final source = await _source(
+          temporaryDirectory,
+          'managed-final-read-${failure.name}.mp4',
+        );
+        final record = await _recordWithReview(surgeryRepository);
+        final attached = (await service.attachVideoToRecord(
+          surgeryRecordId: record.id,
+          candidate: await verifiedVideoCandidateForFile(source),
+        )).value;
+        final beforeRows = await _stepRows(database, record.id);
+        final controlledRepository = _FailNextRecordReadRepository(
+          database,
+          failure: failure,
+        )..arm();
+        final controlledService = RecordVideoService(
+          surgeryRepository: controlledRepository,
+          videoStorageRepository: videoStorageRepository,
+          videoImportPreflight: const PassThroughVideoImportPreflight(),
+        );
+
+        final resolved = await controlledService.resolveVideoForRecord(
+          attached,
+        );
+
+        expect(controlledRepository.didFailRead, isTrue);
+        expect(resolved, isNull);
+        expect(
+          (await surgeryRepository.getRecord(record.id))!.videoPath,
+          attached.videoPath,
+        );
+        expect(await _stepRows(database, record.id), beforeRows);
+        expect(await source.exists(), isTrue);
+      },
+    );
+  }
+
+  test('動画解決wrapperはlegacy移行成功後のmanaged参照と一致するfileを返す', () async {
+    final source = await _source(temporaryDirectory, 'legacy-resolve.mp4');
+    final record = await _recordWithReview(surgeryRepository);
+    await surgeryRepository.updateVideoReference(
+      surgeryRecordId: record.id,
+      videoPath: source.path,
+      videoDisplayName: 'legacy-resolve.mp4',
+    );
+    final legacyRecord = (await surgeryRepository.getRecord(record.id))!;
+    final beforeRows = await _stepRows(database, record.id);
+
+    final resolved = await service.resolveVideoForRecord(legacyRecord);
+
+    final persisted = (await surgeryRepository.getRecord(record.id))!;
+    expect(
+      classifyVideoPath(
+        recordId: record.id,
+        videoPath: persisted.videoPath,
+      ).kind,
+      VideoPathKind.managed,
+    );
+    final expected = await videoStorageRepository.resolveVideo(
+      persisted.videoPath!,
+    );
+    expect(resolved, isNotNull);
+    expect(resolved!.path, expected!.path);
+    expect(await source.exists(), isTrue);
+    expect(await _stepRows(database, record.id), beforeRows);
+  });
+
   test('旧schema症例の旧絶対path移行は時刻・skip・schema未移行を保持する', () async {
     final source = await _source(temporaryDirectory, 'legacy.mp4');
     final record = await _legacyRecordWithTimingAndSkipped(
@@ -206,6 +359,77 @@ BEGIN SELECT RAISE(ABORT, 'injected record failure'); END
       (await surgeryRepository.getRecord(record.id))!.videoPath,
       source.path,
     );
+    expect(await _stepRows(database, record.id), beforeRows);
+  });
+
+  test('legacy移行commit後の再差し替えでも正規化metadataは移行CASの参照を返す', () async {
+    final source = await _source(temporaryDirectory, 'legacy-race.mp4');
+    final record = await _recordWithReview(surgeryRepository);
+    await surgeryRepository.updateVideoReference(
+      surgeryRecordId: record.id,
+      videoPath: source.path,
+      videoDisplayName: 'legacy-race.mp4',
+    );
+    final withLegacyPath = (await surgeryRepository.getRecord(record.id))!;
+    final replacementPath = 'videos/${record.id}/replacement.mp4';
+    final racingRepository = _ReplaceDuringCommittedReadRepository(
+      database,
+      replacementPath: replacementPath,
+    );
+    final racingService = RecordVideoService(
+      surgeryRepository: racingRepository,
+      videoStorageRepository: videoStorageRepository,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
+    );
+
+    final resolved = await racingService.resolveVideoForRecordWithMetadata(
+      withLegacyPath,
+    );
+
+    expect(racingRepository.didReplace, isTrue);
+    expect(racingRepository.migratedPath, isNotNull);
+    expect(resolved.normalizedLegacyVideoPath, racingRepository.migratedPath);
+    expect(resolved.normalizedLegacyVideoPath, isNot(replacementPath));
+    expect(resolved.file, isNotNull);
+    expect(await resolved.file!.exists(), isTrue);
+    expect(
+      (await surgeryRepository.getRecord(record.id))!.videoPath,
+      replacementPath,
+    );
+    expect(await source.exists(), isTrue);
+  });
+
+  test('動画解決wrapperはlegacy移行直後に別参照へ差し替わると旧fileを返さない', () async {
+    final source = await _source(temporaryDirectory, 'legacy-wrapper-race.mp4');
+    final record = await _recordWithReview(surgeryRepository);
+    await surgeryRepository.updateVideoReference(
+      surgeryRecordId: record.id,
+      videoPath: source.path,
+      videoDisplayName: 'legacy-wrapper-race.mp4',
+    );
+    final withLegacyPath = (await surgeryRepository.getRecord(record.id))!;
+    final beforeRows = await _stepRows(database, record.id);
+    final replacementPath = 'videos/${record.id}/replacement.mp4';
+    final racingRepository = _ReplaceDuringCommittedReadRepository(
+      database,
+      replacementPath: replacementPath,
+    );
+    final racingService = RecordVideoService(
+      surgeryRepository: racingRepository,
+      videoStorageRepository: videoStorageRepository,
+      videoImportPreflight: const PassThroughVideoImportPreflight(),
+    );
+
+    final resolved = await racingService.resolveVideoForRecord(withLegacyPath);
+
+    expect(racingRepository.didReplace, isTrue);
+    expect(racingRepository.migratedPath, isNotNull);
+    expect(resolved, isNull);
+    expect(
+      (await surgeryRepository.getRecord(record.id))!.videoPath,
+      replacementPath,
+    );
+    expect(await source.exists(), isTrue);
     expect(await _stepRows(database, record.id), beforeRows);
   });
 

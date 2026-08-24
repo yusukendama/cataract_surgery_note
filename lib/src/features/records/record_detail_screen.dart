@@ -20,14 +20,42 @@ import '../video_import/video_timeline_identity_dialog.dart';
 
 enum _VideoMutation { attach, relink, replace }
 
-class RecordDetailScreen extends ConsumerWidget {
-  const RecordDetailScreen({required this.recordId, super.key});
+class RecordDetailScreen extends ConsumerStatefulWidget {
+  const RecordDetailScreen({
+    required this.recordId,
+    this.initialNotice,
+    super.key,
+  });
 
   final String recordId;
+  final String? initialNotice;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final record = ref.watch(surgeryRecordProvider(recordId));
+  ConsumerState<RecordDetailScreen> createState() => _RecordDetailScreenState();
+}
+
+class _RecordDetailScreenState extends ConsumerState<RecordDetailScreen> {
+  @override
+  void initState() {
+    super.initState();
+    final notice = widget.initialNotice;
+    if (notice != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || ModalRoute.of(context)?.isCurrent != true) {
+          return;
+        }
+        showAppSnackBar(
+          context,
+          message: notice,
+          tone: AppFeedbackTone.warning,
+        );
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final record = ref.watch(surgeryRecordProvider(widget.recordId));
 
     return Scaffold(
       appBar: AppBar(
@@ -47,7 +75,7 @@ class RecordDetailScreen extends ConsumerWidget {
         },
         error: (_, _) => AppErrorState(
           message: '症例詳細を読み込めませんでした。',
-          onRetry: () => ref.invalidate(surgeryRecordProvider(recordId)),
+          onRetry: () => ref.invalidate(surgeryRecordProvider(widget.recordId)),
         ),
         loading: () => const Center(child: CircularProgressIndicator()),
       ),

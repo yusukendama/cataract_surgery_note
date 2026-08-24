@@ -4,6 +4,8 @@ const _thirtySeconds = Duration(seconds: 30);
 const _oneMinute = Duration(minutes: 1);
 const _threeMinutes = Duration(minutes: 3);
 const _fiveMinutes = Duration(minutes: 5);
+const _maximumDurationMicroseconds = 9223372036854775807;
+const _maximumTickCount = 12;
 
 /// 手術時間グラフの縦軸スケール。
 ///
@@ -28,12 +30,17 @@ class DurationAxisScale {
         : maximumDuration < _threeMinutes
         ? _thirtySeconds
         : _oneMinute;
-    final intervalCount =
-        maximumDuration.inMicroseconds ~/ interval.inMicroseconds + 1;
+    final maximumMicroseconds = maximumDuration.inMicroseconds;
+    final intervalMicroseconds = interval.inMicroseconds;
+    final intervalCount = maximumMicroseconds ~/ intervalMicroseconds + 1;
+    final canRoundUp =
+        intervalCount <= _maximumDurationMicroseconds ~/ intervalMicroseconds;
 
     return DurationAxisScale._(
       interval: interval,
-      maximum: interval * intervalCount,
+      maximum: canRoundUp
+          ? Duration(microseconds: intervalMicroseconds * intervalCount)
+          : maximumDuration,
     );
   }
 
@@ -43,12 +50,40 @@ class DurationAxisScale {
   Duration get minimum => Duration.zero;
 
   List<Duration> get ticks {
-    final tickCount = maximum.inMicroseconds ~/ interval.inMicroseconds;
-    return List.generate(
-      tickCount + 1,
-      (index) => interval * index,
-      growable: false,
-    );
+    final maximumMicroseconds = maximum.inMicroseconds;
+    final intervalMicroseconds = interval.inMicroseconds;
+    final regularIntervalCount = maximumMicroseconds ~/ intervalMicroseconds;
+    final hasIrregularMaximum = maximumMicroseconds % intervalMicroseconds != 0;
+    final fullTickCount =
+        regularIntervalCount + 1 + (hasIrregularMaximum ? 1 : 0);
+
+    if (fullTickCount <= _maximumTickCount) {
+      return List<Duration>.unmodifiable([
+        for (var index = 0; index <= regularIntervalCount; index++)
+          Duration(microseconds: intervalMicroseconds * index),
+        if (hasIrregularMaximum) maximum,
+      ]);
+    }
+
+    // Keep the normal scale unchanged, but sample a bounded number of its
+    // regular grid lines for corrupted or otherwise extreme stored values.
+    // Reserve the last slot for a non-aligned maximum when rounding upward is
+    // impossible at Duration's signed 64-bit limit.
+    final regularTickCount = _maximumTickCount - (hasIrregularMaximum ? 1 : 0);
+    final divisor = regularTickCount - 1;
+    return List<Duration>.unmodifiable([
+      for (var slot = 0; slot < regularTickCount; slot++)
+        Duration(
+          microseconds:
+              _scaledIndex(
+                value: regularIntervalCount,
+                multiplier: slot,
+                divisor: divisor,
+              ) *
+              intervalMicroseconds,
+        ),
+      if (hasIrregularMaximum) maximum,
+    ]);
   }
 
   /// 0.0〜1.0の縦軸上の位置を返す。入力値そのものは丸めない。
@@ -81,4 +116,18 @@ class DurationAxisScale {
 
   @override
   int get hashCode => Object.hash(interval, maximum);
+}
+
+/// Returns `(value * multiplier) ~/ divisor` without overflowing [int].
+///
+/// Callers pass `0 <= multiplier <= divisor`: the first product stays within
+/// [value], while the remainder product is bounded by `divisor * divisor`.
+int _scaledIndex({
+  required int value,
+  required int multiplier,
+  required int divisor,
+}) {
+  final quotient = value ~/ divisor;
+  final remainder = value % divisor;
+  return quotient * multiplier + (remainder * multiplier) ~/ divisor;
 }

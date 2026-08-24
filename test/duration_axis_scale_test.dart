@@ -112,6 +112,41 @@ void main() {
       expect(axis.maximum, greaterThan(duration));
     });
 
+    test('巨大な時間でも目盛り数を有限に保ち最大値を軸内へ収める', () {
+      const duration = Duration(milliseconds: 9223372036854775);
+      final axis = DurationAxisScale.forMaximum(
+        step: SurgicalStep.totalSurgeryTime,
+        maximumDuration: duration,
+      );
+
+      expect(axis.maximum, duration);
+      expect(axis.ticks, hasLength(12));
+      expect(axis.ticks.first, Duration.zero);
+      expect(axis.ticks.last, duration);
+      expect(axis.ticks.toSet(), hasLength(axis.ticks.length));
+      expect(
+        axis.ticks.indexed
+            .skip(1)
+            .every((entry) => axis.ticks[entry.$1 - 1] < entry.$2),
+        isTrue,
+      );
+      expect(axis.ratioFor(duration), 1);
+    });
+
+    test('丸め上げ可能な巨大値でも従来間隔上の目盛りを12件以下に間引く', () {
+      const duration = Duration(days: 100000);
+      final axis = DurationAxisScale.forMaximum(
+        step: SurgicalStep.nucleusRemoval,
+        maximumDuration: duration,
+      );
+
+      expect(axis.interval, const Duration(minutes: 1));
+      expect(axis.maximum, greaterThan(duration));
+      expect(axis.ticks.length, lessThanOrEqualTo(12));
+      expect(axis.ticks.first, Duration.zero);
+      expect(axis.ticks.last, axis.maximum);
+    });
+
     test('負の最大時間は受け付けない', () {
       expect(
         () => DurationAxisScale.forMaximum(
