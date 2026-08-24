@@ -53,6 +53,16 @@ flutter run
 
 最低対応OSはiOS／iPadOS 15.0です。iPhoneとiPadの縦横表示、およびiPadのウインドウリサイズを対象とします。
 
+## iOS Archive
+
+アプリのversionとbuild番号は`pubspec.yaml`の`version`を正とし、iOS向けのversion名は`N.N.N`形式にします。Runner targetの`Verify Flutter Version` Build Phaseが、Xcodeで実際に使われる値との一致をArchive時に確認します。
+
+番号が一致しない場合、最初のArchiveは生成設定を同期して安全に停止します。XcodeはArchive開始時の設定を保持するため、表示された案内に従ってもう一度Archiveしてください。古い番号のままArchiveを成功させることはありません。最初から1回でArchiveする場合は、事前に`tool/sync_ios_xcode_config.sh`を実行します。
+
+同期後も一致エラーが続く場合は、Xcodeを閉じて`ios/Runner.xcworkspace`を開き直します。それでも再発する場合は、SchemeやBuild Settingsで`FLUTTER_BUILD_NAME`／`FLUTTER_BUILD_NUMBER`を上書きしていないか確認します。
+
+初回clone後など`ios/Flutter/Generated.xcconfig`がない場合は、先に`flutter pub get`を実行してください。`Generated.xcconfig`と`flutter_export_environment.sh`は端末固有情報を含む生成物なので、直接編集またはGit管理しません。
+
 ## デザイン基盤
 
 共有するブランド色、Light／Dark配色、余白、角丸、モーション、意味色は`lib/src/theme`に集約します。新しいトークンは複数機能で同じ意味を持つ場合に追加し、動画比率やグラフ寸法など機能固有の値は利用箇所に置きます。

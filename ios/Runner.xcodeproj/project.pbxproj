@@ -205,6 +205,7 @@
 			buildConfigurationList = 97C147051CF9000F007C117D /* Build configuration list for PBXNativeTarget "Runner" */;
 			buildPhases = (
 				D47171080C675BF0AFEA38E6 /* [CP] Check Pods Manifest.lock */,
+				C0D3A0012C00000000000001 /* Verify Flutter Version */,
 				9740EEB61CF901F6004384FC /* Run Script */,
 				97C146EA1CF9000F007C117D /* Sources */,
 				97C146EB1CF9000F007C117D /* Frameworks */,
@@ -286,6 +287,25 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		C0D3A0012C00000000000001 /* Verify Flutter Version */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"${SRCROOT}/../pubspec.yaml",
+				"${SRCROOT}/../tool/sync_ios_xcode_config.sh",
+				"${SRCROOT}/../tool/verify_ios_build_version.sh",
+			);
+			name = "Verify Flutter Version";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "/bin/sh \"${SRCROOT}/../tool/verify_ios_build_version.sh\"";
+			showEnvVarsInLog = 0;
+		};
 		3B06AD1E1E4923F5004D2608 /* Thin Binary */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
