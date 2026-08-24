@@ -512,15 +512,19 @@ class _VideoImportPersistentErrorNoticeState
 }
 
 class VideoRegistrationHelpButton extends StatelessWidget {
-  const VideoRegistrationHelpButton({super.key});
+  const VideoRegistrationHelpButton({this.enabled = true, super.key});
+
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
     return IconButton(
       tooltip: '再登録できる動画の目安',
-      onPressed: () {
-        unawaited(openVideoRegistrationGuidance(context));
-      },
+      onPressed: enabled
+          ? () {
+              unawaited(openVideoRegistrationGuidance(context));
+            }
+          : null,
       icon: const Icon(Icons.help_outline),
     );
   }

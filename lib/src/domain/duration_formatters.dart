@@ -1,3 +1,8 @@
+// A Duration stores microseconds in a signed 64-bit integer on native Dart.
+// Validate millisecond values before invoking its constructor, which multiplies
+// them by 1,000 and may otherwise overflow.
+const _maximumDurationMilliseconds = 9223372036854775;
+
 Duration? procedureDurationBetween(
   int? startMilliseconds,
   int? endMilliseconds,
@@ -7,18 +12,31 @@ Duration? procedureDurationBetween(
       endMilliseconds <= startMilliseconds) {
     return null;
   }
-  return Duration(milliseconds: endMilliseconds - startMilliseconds);
+
+  final difference =
+      BigInt.from(endMilliseconds) - BigInt.from(startMilliseconds);
+  if (difference > BigInt.from(_maximumDurationMilliseconds)) {
+    return null;
+  }
+
+  return Duration(milliseconds: difference.toInt());
 }
 
 String formatTimelineMilliseconds(int? milliseconds) {
   if (milliseconds == null) {
     return '未設定';
   }
-  final duration = Duration(milliseconds: milliseconds);
-  final minutes = duration.inMinutes;
-  final seconds = duration.inSeconds % 60;
-  final tenths = (duration.inMilliseconds % 1000) ~/ 100;
-  return '$minutes:${seconds.toString().padLeft(2, '0')}.$tenths';
+
+  // Format the integer directly. Constructing Duration first can overflow for
+  // valid SQLite signed 64-bit boundary values because Duration stores
+  // microseconds rather than milliseconds.
+  final value = BigInt.from(milliseconds);
+  final magnitude = value.abs();
+  final minutes = magnitude ~/ BigInt.from(60000);
+  final seconds = (magnitude ~/ BigInt.from(1000)) % BigInt.from(60);
+  final tenths = (magnitude % BigInt.from(1000)) ~/ BigInt.from(100);
+  final sign = value.isNegative ? '-' : '';
+  return '$sign$minutes:${seconds.toString().padLeft(2, '0')}.$tenths';
 }
 
 String formatProcedureDuration(Duration? duration) {

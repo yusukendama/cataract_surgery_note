@@ -12,7 +12,7 @@ class AnalysisMetricSelector extends StatelessWidget {
   });
 
   final SurgicalStep selectedStep;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {

@@ -145,4 +145,64 @@ void main() {
     expect(formatSignedMinutesSeconds(const Duration(seconds: 5)), '+0:05');
     expect(formatSignedMinutesSeconds(const Duration(seconds: -5)), '-0:05');
   });
+
+  test('SQLite INT64境界の差分をDuration生成前に安全に検証する', () {
+    const int64Min = -9223372036854775808;
+    const int64Max = 9223372036854775807;
+
+    expect(procedureDurationBetween(int64Min, int64Max), isNull);
+    expect(procedureDurationBetween(0, int64Max), isNull);
+    expect(procedureDurationBetween(int64Min, 0), isNull);
+    expect(
+      procedureDurationBetween(int64Max - 1, int64Max),
+      const Duration(milliseconds: 1),
+    );
+    expect(
+      procedureDurationBetween(int64Min, int64Min + 1),
+      const Duration(milliseconds: 1),
+    );
+  });
+
+  test('Durationに格納可能なミリ秒境界だけを受け付ける', () {
+    const maximumDurationMilliseconds = 9223372036854775;
+
+    expect(
+      procedureDurationBetween(0, maximumDurationMilliseconds),
+      const Duration(milliseconds: maximumDurationMilliseconds),
+    );
+    expect(
+      procedureDurationBetween(0, maximumDurationMilliseconds + 1),
+      isNull,
+    );
+  });
+
+  test('doubleの精度上限を超える有効値も平均を1ms単位で保持する', () {
+    const maximumDurationMilliseconds = 9223372036854775;
+    final data = calculator.calculate([
+      for (var index = 0; index < 6; index++)
+        measurement(
+          id: '$index',
+          surgeryDate: DateTime(2026, 7, index + 1),
+          end: maximumDurationMilliseconds,
+        ),
+    ], SurgicalStep.totalSurgeryTime);
+
+    expect(
+      data.summary!.previousAverage,
+      const Duration(milliseconds: maximumDurationMilliseconds),
+    );
+    expect(data.summary!.difference, Duration.zero);
+    expect(data.summary!.comparisonCount, 5);
+  });
+
+  test('タイムライン表示はSQLite INT64境界でもオーバーフローしない', () {
+    expect(
+      formatTimelineMilliseconds(-9223372036854775808),
+      '-153722867280912:55.8',
+    );
+    expect(
+      formatTimelineMilliseconds(9223372036854775807),
+      '153722867280912:55.8',
+    );
+  });
 }

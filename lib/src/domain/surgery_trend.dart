@@ -125,16 +125,21 @@ class SurgeryTrendCalculator {
       0,
       (sum, point) => sum + point.duration.inMilliseconds,
     );
-    final average = Duration(
-      milliseconds: (totalMilliseconds / comparisonPoints.length).round(),
-    );
+    final comparisonCount = comparisonPoints.length;
+    final averageQuotient = totalMilliseconds ~/ comparisonCount;
+    final averageRemainder = totalMilliseconds % comparisonCount;
+    // Durations are positive here. Round with integer arithmetic so valid
+    // values above double's exact-integer range do not lose a millisecond.
+    final roundedAverageMilliseconds =
+        averageQuotient + (averageRemainder * 2 >= comparisonCount ? 1 : 0);
+    final average = Duration(milliseconds: roundedAverageMilliseconds);
     return SurgeryTrendData(
       points: List.unmodifiable(points),
       summary: SurgeryTrendSummary(
         latest: latest,
         previousAverage: average,
         difference: latest - average,
-        comparisonCount: comparisonPoints.length,
+        comparisonCount: comparisonCount,
       ),
     );
   }

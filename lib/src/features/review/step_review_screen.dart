@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -25,47 +26,99 @@ class _ReviewVideoResolution {
     required this.record,
     required this.file,
     required this.videoState,
+    required this.sourceVideoPath,
+    required this.normalizedLegacyVideoPath,
   });
 
   final SurgeryRecord? record;
   final File? file;
   final RecordVideoState? videoState;
+  final String? sourceVideoPath;
+  final String? normalizedLegacyVideoPath;
 }
 
 final _reviewVideoResolutionProvider = FutureProvider.autoDispose
     .family<_ReviewVideoResolution, String>((ref, recordId) async {
-      final record = await ref.watch(surgeryRecordProvider(recordId).future);
+      final repository = ref.watch(surgeryRepositoryProvider);
+      final record = await repository.getRecord(recordId);
       if (record == null) {
         return const _ReviewVideoResolution(
           record: null,
           file: null,
           videoState: null,
+          sourceVideoPath: null,
+          normalizedLegacyVideoPath: null,
         );
       }
       final service = ref.watch(recordVideoServiceProvider);
       var videoState = await service.inspectVideoState(record);
       var file = videoState.file;
-      var committedRecord = record;
+      String? normalizedLegacyVideoPath;
       if (videoState.kind == RecordVideoStateKind.availableLegacy) {
-        file = await service.resolveVideoForRecord(record);
-        committedRecord =
-            await ref.read(surgeryRepositoryProvider).getRecord(recordId) ??
-            record;
-        if (committedRecord.videoPath != record.videoPath) {
-          videoState = await service.inspectVideoState(committedRecord);
-          file = videoState.file ?? file;
-        }
+        final resolved = await service.resolveVideoForRecordWithMetadata(
+          record,
+        );
+        file = resolved.file;
+        normalizedLegacyVideoPath = resolved.normalizedLegacyVideoPath;
+      }
+      // Always re-read after asynchronous inspection/resolution. This keeps a
+      // non-legacy replacement just as safe as a legacy migration race.
+      final committedRecord = await repository.getRecord(recordId);
+      if (committedRecord != null &&
+          committedRecord.videoPath != record.videoPath) {
+        videoState = await service.inspectVideoState(committedRecord);
+        // A file resolved for the old reference must never be rebound to a
+        // concurrently committed, different video reference.
+        file = videoState.file;
       }
       return _ReviewVideoResolution(
         record: committedRecord,
         file: file,
         videoState: videoState,
+        sourceVideoPath: record.videoPath,
+        normalizedLegacyVideoPath: normalizedLegacyVideoPath,
       );
-    });
+    }, retry: (retryCount, error) => null);
 
 enum _LeaveAction { cancel, discard, save }
 
 enum _VideoSelectionAction { attach, relink, replace }
+
+enum _DirectJumpStatus { pending, consumed, abandoned, retryable }
+
+class _DirectJumpSnapshot {
+  const _DirectJumpSnapshot({
+    required this.recordId,
+    required this.step,
+    required this.startMilliseconds,
+    required this.videoPath,
+    this.didNormalizeLegacyReference = false,
+  });
+
+  final String recordId;
+  final SurgicalStep step;
+  final int startMilliseconds;
+  final String videoPath;
+  final bool didNormalizeLegacyReference;
+
+  _DirectJumpSnapshot withNormalizedVideoPath(String value) {
+    return _DirectJumpSnapshot(
+      recordId: recordId,
+      step: step,
+      startMilliseconds: startMilliseconds,
+      videoPath: value,
+      didNormalizeLegacyReference: true,
+    );
+  }
+}
+
+class _DirectSeekCompletion {
+  const _DirectSeekCompletion.success() : error = null;
+
+  const _DirectSeekCompletion.failure(this.error);
+
+  final Object? error;
+}
 
 typedef SuccessHapticFeedback = Future<void> Function();
 
@@ -77,11 +130,13 @@ const _maximumVideoHeight = 280.0;
 class StepReviewScreen extends ConsumerStatefulWidget {
   const StepReviewScreen({
     required this.recordId,
+    this.initialStepStorageId,
     this.successHapticFeedback,
     super.key,
   });
 
   final String recordId;
+  final String? initialStepStorageId;
 
   /// Kept injectable so timing feedback can be verified without platform
   /// channels in widget tests.
@@ -122,6 +177,8 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   bool _isApplyingProviderState = false;
   bool _recordWasDeleted = false;
   bool _recordProviderResolved = false;
+  int _videoResolutionApplicationGeneration = 0;
+  final Set<String?> _directJumpObservedVideoPaths = <String?>{};
   bool _leaveDialogIsOpen = false;
 
   String _savedCaseMemo = '';
@@ -135,8 +192,39 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   bool _recordRefreshPendingAfterCommit = false;
   bool _reviewsRefreshPendingAfterCommit = false;
 
+  late final SurgicalStep? _directJumpStep;
+  _DirectJumpStatus? _directJumpStatus;
+  _DirectJumpSnapshot? _directJumpSnapshot;
+  SurgicalStepReview? _directFreshTargetReview;
+  String? _directJumpMessage;
+  String? _directSeekFailureMessage;
+  bool _directFreshReadComplete = false;
+  bool _directInitialReviewMerged = false;
+  bool _dataListenersStarted = false;
+  bool _videoResolutionListenerStarted = false;
+  bool _initialSeekValidationInFlight = false;
+  bool _initialSeekRequestInFlight = false;
+  bool _directRetryValidationInFlight = false;
+  bool _suppressDirectSeekCompletion = false;
+  bool _directJumpSuccessAnnounced = false;
+  bool _directVideoResolutionDecisionPending = false;
+  bool _hasConsumedVideoReference = false;
+  String? _consumedVideoReference;
+  bool _manualVideoRecoveryRequired = false;
+  bool _resumeNormalLoadWhenRouteCurrent = false;
+  bool _refreshDiscardedDataWhenRouteCurrent = false;
+  bool _normalLoadResumeScheduled = false;
+  bool _inactiveDirectDiscardScheduled = false;
+  int _directJumpGeneration = 0;
+
   bool get _hasPendingWrite =>
       _savingStep != null || _isSavingReview || _isSavingVideo;
+
+  bool get _hasDirectJumpIntent => _directJumpStep != null;
+
+  bool get _isDirectJumpPreparing =>
+      _directJumpStatus == _DirectJumpStatus.pending ||
+      _initialSeekRequestInFlight;
 
   bool get _hasUsableVideoPosition {
     final controller = _videoController;
@@ -146,6 +234,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
         _videoErrorMessage == null &&
         !_videoProviderLoading &&
         _videoProviderError == null &&
+        !_isDirectJumpPreparing &&
         _videoBoundReference == _latestRecord?.videoPath;
   }
 
@@ -170,14 +259,116 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   @override
   void initState() {
     super.initState();
+    final requestedStep = widget.initialStepStorageId == null
+        ? null
+        : SurgicalStep.fromStorageId(widget.initialStepStorageId!);
+    _directJumpStep = activeIndividualSurgicalSteps.contains(requestedStep)
+        ? requestedStep
+        : null;
+    final directJumpStep = _directJumpStep;
+    final directJumpIndex = directJumpStep == null
+        ? 0
+        : surgicalStepsInDisplayOrder.indexOf(directJumpStep);
     _tabController = TabController(
       length: surgicalStepsInDisplayOrder.length + 1,
       vsync: this,
+      initialIndex: directJumpIndex,
     );
     _videoImportFlow = VideoImportUiFlow(
       picker: ref.read(surgeryVideoPickerProvider),
       preflight: ref.read(videoImportPreflightProvider),
     );
+    if (_hasDirectJumpIntent) {
+      _directJumpStatus = _DirectJumpStatus.pending;
+      unawaited(_prepareDirectJump());
+    } else {
+      _startDataListeners();
+      _startVideoResolutionListener();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final routeIsCurrent = ModalRoute.isCurrentOf(context) == true;
+    final status = _directJumpStatus;
+    final hasActiveConsumedOperation =
+        status == _DirectJumpStatus.consumed &&
+        (_initialSeekValidationInFlight ||
+            _initialSeekRequestInFlight ||
+            _videoProviderLoading);
+    if (!routeIsCurrent &&
+        !_inactiveDirectDiscardScheduled &&
+        (status == _DirectJumpStatus.pending ||
+            (status == _DirectJumpStatus.retryable &&
+                _directRetryValidationInFlight) ||
+            hasActiveConsumedOperation)) {
+      _inactiveDirectDiscardScheduled = true;
+      final observedGeneration = _directJumpGeneration;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _inactiveDirectDiscardScheduled = false;
+        if (!mounted || observedGeneration != _directJumpGeneration) {
+          return;
+        }
+        final currentStatus = _directJumpStatus;
+        if (currentStatus == _DirectJumpStatus.pending ||
+            (currentStatus == _DirectJumpStatus.retryable &&
+                _directRetryValidationInFlight) ||
+            (currentStatus == _DirectJumpStatus.consumed &&
+                (_initialSeekValidationInFlight ||
+                    _initialSeekRequestInFlight ||
+                    _videoProviderLoading))) {
+          _discardDirectJumpForInactiveRoute(currentStatus!);
+        }
+      });
+    }
+    if (routeIsCurrent) {
+      final controller = _videoController;
+      if (controller != null &&
+          controller.value.hasError &&
+          _videoErrorMessage == null) {
+        _onVideoControllerValueChanged(controller, _videoControllerGeneration);
+      }
+    }
+    _scheduleNormalLoadResumeIfCurrent(routeIsCurrent: routeIsCurrent);
+  }
+
+  void _scheduleNormalLoadResumeIfCurrent({bool? routeIsCurrent}) {
+    if ((!_resumeNormalLoadWhenRouteCurrent &&
+            !_refreshDiscardedDataWhenRouteCurrent) ||
+        !(routeIsCurrent ?? ModalRoute.isCurrentOf(context) == true) ||
+        _normalLoadResumeScheduled) {
+      return;
+    }
+    _normalLoadResumeScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _normalLoadResumeScheduled = false;
+      if (!mounted ||
+          (!_resumeNormalLoadWhenRouteCurrent &&
+              !_refreshDiscardedDataWhenRouteCurrent) ||
+          ModalRoute.isCurrentOf(context) != true) {
+        return;
+      }
+      final shouldResumeNormalLoad = _resumeNormalLoadWhenRouteCurrent;
+      final shouldRefreshDiscardedData = _refreshDiscardedDataWhenRouteCurrent;
+      _resumeNormalLoadWhenRouteCurrent = false;
+      _refreshDiscardedDataWhenRouteCurrent = false;
+      if (shouldResumeNormalLoad) {
+        _startDataListeners();
+        _startVideoResolutionListener();
+      }
+      if (shouldRefreshDiscardedData) {
+        ref.invalidate(surgeryRecordProvider(widget.recordId));
+        ref.invalidate(stepReviewsProvider(widget.recordId));
+      }
+    });
+  }
+
+  void _startDataListeners() {
+    if (_dataListenersStarted) {
+      return;
+    }
+    _dataListenersStarted = true;
     ref.listenManual(
       surgeryRecordProvider(widget.recordId),
       _onRecordProviderChanged,
@@ -188,6 +379,13 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       _onReviewsProviderChanged,
       fireImmediately: true,
     );
+  }
+
+  void _startVideoResolutionListener() {
+    if (_videoResolutionListenerStarted) {
+      return;
+    }
+    _videoResolutionListenerStarted = true;
     ref.listenManual(
       _reviewVideoResolutionProvider(widget.recordId),
       _onVideoResolutionChanged,
@@ -195,8 +393,164 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     );
   }
 
+  Future<void> _prepareDirectJump() async {
+    final step = _directJumpStep;
+    if (step == null) {
+      return;
+    }
+    final generation = ++_directJumpGeneration;
+    try {
+      final repository = ref.read(surgeryRepositoryProvider);
+      final initialRecord = await repository.getRecord(widget.recordId);
+      if (!_isCurrentDirectJump(generation)) {
+        return;
+      }
+      final review = initialRecord == null
+          ? null
+          : await repository.getStepReview(
+              surgeryRecordId: widget.recordId,
+              step: step,
+            );
+      if (!_isCurrentDirectJump(generation)) {
+        return;
+      }
+      final record = initialRecord == null
+          ? null
+          : await repository.getRecord(widget.recordId);
+      if (!_isCurrentDirectJump(generation)) {
+        return;
+      }
+
+      setState(() {
+        _directFreshReadComplete = true;
+        _recordProviderResolved = true;
+        _latestRecord = record;
+        _directFreshTargetReview = review;
+        final startMilliseconds = review?.startMilliseconds;
+        final videoPath = record?.videoPath;
+        if (record == null) {
+          _directJumpStatus = _DirectJumpStatus.abandoned;
+          _directJumpMessage = '症例が削除されたため工程動画を開けませんでした。';
+        } else if (review == null || startMilliseconds == null) {
+          _directJumpStatus = _DirectJumpStatus.abandoned;
+          _directJumpMessage = '工程の記録位置が削除されたため自動で移動できませんでした。';
+        } else if (startMilliseconds < 0) {
+          _directJumpStatus = _DirectJumpStatus.abandoned;
+          _directJumpMessage = '記録位置が動画の範囲外のため自動で移動できませんでした。';
+        } else if (videoPath == null) {
+          _directJumpStatus = _DirectJumpStatus.abandoned;
+          _directJumpMessage = '動画を利用できないため工程位置へ移動できませんでした。';
+        } else {
+          _directJumpSnapshot = _DirectJumpSnapshot(
+            recordId: widget.recordId,
+            step: step,
+            startMilliseconds: startMilliseconds,
+            videoPath: videoPath,
+          );
+          _directJumpObservedVideoPaths
+            ..clear()
+            ..add(videoPath);
+          _directVideoResolutionDecisionPending = true;
+        }
+      });
+    } catch (_) {
+      if (!_isCurrentDirectJump(generation)) {
+        return;
+      }
+      setState(() {
+        _directFreshReadComplete = true;
+        _directVideoResolutionDecisionPending = false;
+        _directJumpStatus = _DirectJumpStatus.abandoned;
+        _directJumpMessage = '工程の記録位置を確認できませんでした。もう一度お試しください。';
+      });
+    }
+    if (!_isCurrentDirectJump(generation, requirePending: false)) {
+      return;
+    }
+    ref.invalidate(surgeryRecordProvider(widget.recordId));
+    ref.invalidate(stepReviewsProvider(widget.recordId));
+    _startDataListeners();
+    if (_directJumpSnapshot != null &&
+        _directJumpStatus == _DirectJumpStatus.pending) {
+      _startVideoResolutionListener();
+    } else {
+      setState(() {
+        _videoProviderLoading = false;
+        if (_latestRecord?.videoPath == null) {
+          _resolvedVideoState = const RecordVideoState(
+            RecordVideoStateKind.unregistered,
+          );
+        }
+      });
+    }
+  }
+
+  bool _isCurrentDirectJump(int generation, {bool requirePending = true}) {
+    final matches =
+        mounted &&
+        generation == _directJumpGeneration &&
+        (!requirePending || _directJumpStatus == _DirectJumpStatus.pending);
+    if (!matches) {
+      return false;
+    }
+    if (ModalRoute.of(context)?.isCurrent == true) {
+      return true;
+    }
+    final status = _directJumpStatus;
+    if (status == _DirectJumpStatus.pending ||
+        status == _DirectJumpStatus.consumed ||
+        status == _DirectJumpStatus.retryable) {
+      _discardDirectJumpForInactiveRoute(status!);
+    }
+    return false;
+  }
+
+  void _abandonDirectJump(
+    String message, {
+    bool requiresManualVideoRecovery = false,
+  }) {
+    if (_directJumpStatus != _DirectJumpStatus.pending &&
+        _directJumpStatus != _DirectJumpStatus.retryable) {
+      return;
+    }
+    _directJumpStatus = _DirectJumpStatus.abandoned;
+    _directVideoResolutionDecisionPending = false;
+    _directJumpMessage = message;
+    if (requiresManualVideoRecovery) {
+      _manualVideoRecoveryRequired = true;
+    }
+    _directJumpGeneration++;
+    _initialSeekValidationInFlight = false;
+    _initialSeekRequestInFlight = false;
+  }
+
+  void _markConsumedDirectJumpChanged(String message) {
+    if (_directJumpStatus != _DirectJumpStatus.consumed) {
+      return;
+    }
+    _directJumpMessage = message;
+    _suppressDirectSeekCompletion = true;
+  }
+
+  void _markDirectJumpRetryable({
+    String message = '動画を準備できませんでした。動画を再確認してください。',
+  }) {
+    if (_directJumpStatus != _DirectJumpStatus.pending) {
+      return;
+    }
+    _directJumpStatus = _DirectJumpStatus.retryable;
+    _directVideoResolutionDecisionPending = false;
+    _directJumpMessage = message;
+    _initialSeekValidationInFlight = false;
+    _initialSeekRequestInFlight = false;
+  }
+
   @override
   void dispose() {
+    _directJumpGeneration++;
+    if (_directJumpStatus == _DirectJumpStatus.pending) {
+      _directJumpStatus = _DirectJumpStatus.abandoned;
+    }
     _videoImportFlow.dispose();
     _videoImportOperationController.dispose();
     _tabController.dispose();
@@ -218,6 +572,20 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     if (next.isLoading) {
       return;
     }
+    if (_discardOrDeferDirectDataResultForInactiveRoute()) {
+      return;
+    }
+    if (next.hasValue) {
+      final deliveredVideoPath = next.value?.videoPath;
+      if (_directJumpSnapshot != null &&
+          (_directJumpStatus == _DirectJumpStatus.pending ||
+              _directJumpStatus == _DirectJumpStatus.retryable)) {
+        _directJumpObservedVideoPaths.add(deliveredVideoPath);
+      }
+    }
+    final previousRecord = _latestRecord;
+    var shouldDisposeVideo = false;
+    var shouldRefreshVideoResolution = false;
     setState(() {
       if (next.hasError) {
         _recordRefreshError = next.error;
@@ -231,17 +599,71 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       _recordRefreshPendingAfterCommit = false;
       final record = next.value;
       if (record == null) {
+        shouldDisposeVideo = true;
+        shouldRefreshVideoResolution = true;
         if (_draftInitialized) {
           _recordWasDeleted = true;
         } else {
           _latestRecord = null;
         }
+        if (_directJumpStatus == _DirectJumpStatus.pending ||
+            _directJumpStatus == _DirectJumpStatus.retryable) {
+          _abandonDirectJump('症例が削除されたため工程動画を開けませんでした。');
+        } else if (_directJumpStatus == _DirectJumpStatus.consumed) {
+          _markConsumedDirectJumpChanged('症例が削除されたため工程動画を開けませんでした。');
+          _manualVideoRecoveryRequired = true;
+          _directJumpGeneration++;
+        }
         return;
+      }
+      final snapshot = _directJumpSnapshot;
+      if (snapshot != null) {
+        if ((_directJumpStatus == _DirectJumpStatus.pending ||
+                _directJumpStatus == _DirectJumpStatus.retryable) &&
+            record.videoPath != snapshot.videoPath) {
+          if (_directJumpStatus == _DirectJumpStatus.pending &&
+              _directVideoResolutionDecisionPending) {
+            // A legacy migration may commit its managed reference before the
+            // resolver returns the exact same-video normalization metadata.
+            // Defer the decision to that authoritative result.
+          } else {
+            _abandonDirectJump(
+              '動画が更新されたため自動で移動できませんでした。',
+              requiresManualVideoRecovery: true,
+            );
+          }
+          shouldDisposeVideo = true;
+        } else if (_directJumpStatus == _DirectJumpStatus.consumed &&
+            record.videoPath != _currentConsumedVideoReference(snapshot)) {
+          _markConsumedDirectJumpChanged('動画が更新されました。動画を再確認してください。');
+          _acceptConsumedVideoReference(record.videoPath);
+          _manualVideoRecoveryRequired = true;
+          _directJumpGeneration++;
+          shouldDisposeVideo = true;
+        }
+      }
+      if (previousRecord != null &&
+          previousRecord.videoPath != record.videoPath &&
+          !(_directJumpStatus == _DirectJumpStatus.pending &&
+              _directVideoResolutionDecisionPending)) {
+        shouldRefreshVideoResolution = true;
       }
       _recordWasDeleted = false;
       _latestRecord = record;
       _synchronizeDraftIfPossible();
     });
+    if (shouldDisposeVideo) {
+      _disposeVideoController();
+    }
+    if (shouldRefreshVideoResolution) {
+      if (!_videoResolutionListenerStarted && next.value?.videoPath != null) {
+        _startVideoResolutionListener();
+      }
+      if (_videoResolutionListenerStarted) {
+        ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
+      }
+    }
+    _maybeApplyInitialSeek();
   }
 
   void _onReviewsProviderChanged(
@@ -254,6 +676,9 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     if (next.isLoading) {
       return;
     }
+    if (_discardOrDeferDirectDataResultForInactiveRoute()) {
+      return;
+    }
     setState(() {
       if (next.hasError) {
         _reviewsRefreshError = next.error;
@@ -264,9 +689,54 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       }
       _reviewsRefreshError = null;
       _reviewsRefreshPendingAfterCommit = false;
-      _latestReviews = next.value;
+      var reviews = next.value!;
+      final directFreshReview = _directFreshTargetReview;
+      if (!_directInitialReviewMerged && directFreshReview != null) {
+        final providerTarget = reviews
+            .where((review) => review.step == directFreshReview.step)
+            .firstOrNull;
+        // The invalidated provider normally completes after the direct read
+        // and is therefore authoritative. Only replace a demonstrably older
+        // cached row; an absent, equal-time-but-different, or newer row must be
+        // preserved so a concurrent timing change/deletion abandons the intent.
+        if (providerTarget != null &&
+            providerTarget.updatedAt.isBefore(directFreshReview.updatedAt)) {
+          reviews = [
+            for (final review in reviews)
+              if (review.step == directFreshReview.step)
+                directFreshReview
+              else
+                review,
+          ];
+        }
+        _directInitialReviewMerged = true;
+        _directFreshTargetReview = null;
+      }
+      if (_directJumpSnapshot case final snapshot?) {
+        final targetReview = reviews
+            .where((review) => review.step == snapshot.step)
+            .firstOrNull;
+        if (targetReview?.startMilliseconds != snapshot.startMilliseconds) {
+          if (_directJumpStatus == _DirectJumpStatus.pending ||
+              _directJumpStatus == _DirectJumpStatus.retryable) {
+            _abandonDirectJump(
+              targetReview?.startMilliseconds == null
+                  ? '工程の記録位置が削除されたため自動で移動できませんでした。'
+                  : '工程位置が更新されました。記録済み開始位置から確認してください。',
+            );
+          } else if (_directJumpStatus == _DirectJumpStatus.consumed) {
+            _markConsumedDirectJumpChanged(
+              targetReview?.startMilliseconds == null
+                  ? '工程の記録位置が削除されました。'
+                  : '工程位置が更新されました。記録済み開始位置から確認してください。',
+            );
+          }
+        }
+      }
+      _latestReviews = reviews;
       _synchronizeDraftIfPossible();
     });
+    _maybeApplyInitialSeek();
   }
 
   void _onVideoResolutionChanged(
@@ -276,60 +746,485 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     if (!mounted) {
       return;
     }
-    if (next.isLoading) {
-      setState(() => _videoProviderLoading = true);
+    // Supersede an earlier validation even when this notification is discarded
+    // for an inactive route; otherwise that older Future could still apply.
+    final applicationGeneration = ++_videoResolutionApplicationGeneration;
+    if (_discardDirectVideoResultForInactiveRoute()) {
       return;
     }
-    if (next.hasError) {
+    if (next.isLoading) {
       setState(() {
-        _videoProviderLoading = false;
-        _videoProviderError = next.error;
+        _videoProviderLoading = true;
       });
       return;
     }
-    final resolution = next.value!;
-    final committedRecord = resolution.record;
-    final file = resolution.file;
-    final previousVideoPath = _latestRecord?.videoPath;
-    if (file == null) {
-      _disposeVideoController();
-    } else {
-      _ensureVideoController(file, videoReference: committedRecord?.videoPath);
+    if (next.hasError) {
+      if (_abandonDirectJumpForObservedVideoChange()) {
+        return;
+      }
+      var shouldDisposeVideo = false;
+      setState(() {
+        _videoProviderLoading = false;
+        _videoProviderError = next.error;
+        _directVideoResolutionDecisionPending = false;
+        final snapshot = _directJumpSnapshot;
+        if (_directJumpStatus == _DirectJumpStatus.pending &&
+            snapshot != null &&
+            _latestRecord?.videoPath != snapshot.videoPath) {
+          _abandonDirectJump(
+            '動画が更新されたため自動で移動できませんでした。',
+            requiresManualVideoRecovery: true,
+          );
+          shouldDisposeVideo = true;
+        } else {
+          _markDirectJumpRetryable();
+        }
+      });
+      if (shouldDisposeVideo) {
+        _disposeVideoController();
+      }
+      return;
+    }
+    unawaited(
+      _validateAndApplyVideoResolution(next.value!, applicationGeneration),
+    );
+  }
+
+  Future<void> _validateAndApplyVideoResolution(
+    _ReviewVideoResolution resolution,
+    int applicationGeneration,
+  ) async {
+    SurgeryRecord? persistedRecord;
+    try {
+      persistedRecord = await ref
+          .read(surgeryRepositoryProvider)
+          .getRecord(widget.recordId);
+    } catch (error) {
+      if (!mounted ||
+          applicationGeneration != _videoResolutionApplicationGeneration) {
+        return;
+      }
+      if (_discardDirectVideoResultForInactiveRoute()) {
+        return;
+      }
+      if (_abandonDirectJumpForObservedVideoChange()) {
+        return;
+      }
+      setState(() {
+        _videoProviderLoading = false;
+        _videoProviderError = error;
+        _directVideoResolutionDecisionPending = false;
+        _markDirectJumpRetryable();
+      });
+      return;
+    }
+    if (!mounted ||
+        applicationGeneration != _videoResolutionApplicationGeneration) {
+      return;
+    }
+    if (_discardDirectVideoResultForInactiveRoute()) {
+      return;
+    }
+
+    final resolvedRecord = resolution.record;
+    final persistedPath = persistedRecord?.videoPath;
+    final resolutionStillCommitted =
+        (resolvedRecord == null && persistedRecord == null) ||
+        (resolvedRecord != null &&
+            persistedRecord != null &&
+            resolvedRecord.videoPath == persistedPath);
+    if (!resolutionStillCommitted) {
+      _rejectSupersededVideoResolution(persistedRecord);
+      return;
+    }
+
+    _applyValidatedVideoResolution(
+      _ReviewVideoResolution(
+        record: persistedRecord,
+        file: resolution.file,
+        videoState: resolution.videoState,
+        sourceVideoPath: resolution.sourceVideoPath,
+        normalizedLegacyVideoPath: resolution.normalizedLegacyVideoPath,
+      ),
+      applicationGeneration,
+    );
+  }
+
+  bool _discardDirectVideoResultForInactiveRoute() {
+    if (!mounted) {
+      return true;
+    }
+    final directStatus = _directJumpStatus;
+    if ((directStatus == _DirectJumpStatus.pending ||
+            directStatus == _DirectJumpStatus.consumed ||
+            (directStatus == _DirectJumpStatus.retryable &&
+                _directRetryValidationInFlight)) &&
+        ModalRoute.of(context)?.isCurrent != true) {
+      _discardDirectJumpForInactiveRoute(directStatus!);
+      return true;
+    }
+    return false;
+  }
+
+  bool _discardDirectControllerResultForInactiveRoute() {
+    if (!mounted) {
+      return true;
+    }
+    final directStatus = _directJumpStatus;
+    final hasActiveConsumedOperation =
+        directStatus == _DirectJumpStatus.consumed &&
+        (_initialSeekValidationInFlight || _initialSeekRequestInFlight);
+    if ((directStatus == _DirectJumpStatus.pending ||
+            (directStatus == _DirectJumpStatus.retryable &&
+                _directRetryValidationInFlight) ||
+            hasActiveConsumedOperation) &&
+        ModalRoute.isCurrentOf(context) != true) {
+      _discardDirectJumpForInactiveRoute(directStatus!);
+      return true;
+    }
+    return false;
+  }
+
+  bool _discardOrDeferDirectDataResultForInactiveRoute() {
+    if (!mounted) {
+      return true;
+    }
+    if (ModalRoute.isCurrentOf(context) == true) {
+      return false;
+    }
+    if (_discardDirectControllerResultForInactiveRoute() ||
+        _refreshDiscardedDataWhenRouteCurrent) {
+      _refreshDiscardedDataWhenRouteCurrent = true;
+      return true;
+    }
+    return false;
+  }
+
+  bool _abandonDirectJumpForObservedVideoChange() {
+    final snapshot = _directJumpSnapshot;
+    final observedDifferentPath =
+        snapshot != null &&
+        _directJumpObservedVideoPaths.any(
+          (videoPath) => videoPath != snapshot.videoPath,
+        );
+    if (_directJumpStatus != _DirectJumpStatus.pending ||
+        !observedDifferentPath) {
+      return false;
     }
     setState(() {
-      if (committedRecord == null) {
+      _videoProviderLoading = false;
+      _videoProviderError = null;
+      _resolvedVideoFile = null;
+      _abandonDirectJump(
+        '動画が更新されたため自動で移動できませんでした。',
+        requiresManualVideoRecovery: true,
+      );
+    });
+    _disposeVideoController();
+    return true;
+  }
+
+  void _rejectSupersededVideoResolution(SurgeryRecord? persistedRecord) {
+    final hasDirectIntent = _directJumpSnapshot != null;
+    var shouldDisposeVideo = false;
+    setState(() {
+      _videoProviderLoading = false;
+      _videoProviderError = null;
+      _resolvedVideoFile = null;
+      _resolvedVideoState = null;
+      _recordProviderResolved = true;
+      if (persistedRecord == null) {
         if (_draftInitialized) {
           _recordWasDeleted = true;
+        } else {
+          _latestRecord = null;
         }
       } else {
         _recordWasDeleted = false;
-        _latestRecord = committedRecord;
+        _latestRecord = persistedRecord;
         _synchronizeDraftIfPossible();
+      }
+      if (_directJumpStatus == _DirectJumpStatus.pending ||
+          _directJumpStatus == _DirectJumpStatus.retryable) {
+        _abandonDirectJump(
+          persistedRecord == null
+              ? '症例が削除されたため工程動画を開けませんでした。'
+              : '動画が更新されたため自動で移動できませんでした。',
+          requiresManualVideoRecovery: persistedRecord != null,
+        );
+        shouldDisposeVideo = true;
+      } else if (_directJumpStatus == _DirectJumpStatus.consumed) {
+        _markConsumedDirectJumpChanged(
+          persistedRecord == null
+              ? '症例が削除されたため工程動画を開けませんでした。'
+              : '動画が更新されました。動画を再確認してください。',
+        );
+        _acceptConsumedVideoReference(persistedRecord?.videoPath);
+        _manualVideoRecoveryRequired = true;
+        _directJumpGeneration++;
+        shouldDisposeVideo = true;
+      }
+    });
+    if (shouldDisposeVideo) {
+      _disposeVideoController();
+    }
+    ref.invalidate(surgeryRecordProvider(widget.recordId));
+    if (!hasDirectIntent) {
+      ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
+    }
+  }
+
+  void _applyValidatedVideoResolution(
+    _ReviewVideoResolution resolution,
+    int applicationGeneration,
+  ) {
+    if (!mounted ||
+        applicationGeneration != _videoResolutionApplicationGeneration) {
+      return;
+    }
+    final committedRecord = resolution.record;
+    final file = resolution.file;
+    if (committedRecord != null &&
+        (_recordWasDeleted ||
+            (_recordProviderResolved && _latestRecord == null))) {
+      // A record-provider deletion is authoritative over an older resolver
+      // result that completed around the same frame.
+      ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
+      return;
+    }
+    final previousVideoPath = _latestRecord?.videoPath;
+    var shouldDisposeVideo = file == null;
+    var shouldEnsureVideo = file != null;
+    var preserveNewerRecord = false;
+    var shouldRefreshResolutionAfterResult = false;
+    final currentRecord = _latestRecord;
+    final currentVideoPath = currentRecord?.videoPath;
+    final directSnapshot = _directJumpSnapshot;
+    final normalizedLegacyVideoPath = resolution.normalizedLegacyVideoPath;
+    if (normalizedLegacyVideoPath != null &&
+        committedRecord?.videoPath != normalizedLegacyVideoPath) {
+      // The migration produced a managed-B file, but B is no longer the
+      // committed reference. Never bind that stale file back to source A.
+      _rejectSupersededVideoResolution(committedRecord);
+      return;
+    }
+    final observedOnlyExpectedLegacyPaths =
+        normalizedLegacyVideoPath != null &&
+        _directJumpObservedVideoPaths.every(
+          (videoPath) =>
+              videoPath == resolution.sourceVideoPath ||
+              videoPath == normalizedLegacyVideoPath,
+        );
+    final observedUnexpectedDirectPath =
+        directSnapshot != null &&
+        (normalizedLegacyVideoPath != null
+            ? !observedOnlyExpectedLegacyPaths
+            : _directJumpObservedVideoPaths.any(
+                (videoPath) => videoPath != directSnapshot.videoPath,
+              ));
+    if (_directJumpStatus == _DirectJumpStatus.pending &&
+        observedUnexpectedDirectPath) {
+      // A direct jump never follows an A -> C -> A sequence. Returning to the
+      // captured path does not restore the immutable intent once an actual
+      // replacement was observed while resolution was in flight.
+      setState(() {
+        _videoProviderLoading = false;
+        _videoProviderError = null;
+        _resolvedVideoFile = null;
+        _resolvedVideoState = resolution.videoState;
+        _abandonDirectJump(
+          '動画が更新されたため自動で移動できませんでした。',
+          requiresManualVideoRecovery: true,
+        );
+      });
+      _disposeVideoController();
+      return;
+    }
+    final isUncontestedLegacyNormalization =
+        normalizedLegacyVideoPath != null &&
+        resolution.sourceVideoPath == currentVideoPath &&
+        committedRecord?.videoPath == normalizedLegacyVideoPath &&
+        (directSnapshot == null || observedOnlyExpectedLegacyPaths);
+    if (committedRecord != null &&
+        currentRecord != null &&
+        currentVideoPath != committedRecord.videoPath &&
+        !isUncontestedLegacyNormalization) {
+      // Never let a resolver result overwrite a different provider snapshot.
+      // This also rejects an unobserved A -> B -> A sequence: a non-legacy
+      // resolver cannot authoritatively change the reference it captured.
+      // Provider delivery order is the authority here; wall-clock updatedAt
+      // values are not a monotonic concurrency token. The sole exception is
+      // an exact, uncontested legacy A -> managed-B normalization.
+      ref.invalidate(surgeryRecordProvider(widget.recordId));
+      ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
+      return;
+    }
+    setState(() {
+      if (_directJumpStatus == _DirectJumpStatus.pending) {
+        _directVideoResolutionDecisionPending = false;
+      }
+      if (committedRecord == null) {
+        shouldDisposeVideo = true;
+        if (_draftInitialized) {
+          _recordWasDeleted = true;
+        } else {
+          _latestRecord = null;
+        }
+        if (_directJumpStatus == _DirectJumpStatus.pending ||
+            _directJumpStatus == _DirectJumpStatus.retryable) {
+          _abandonDirectJump('症例が削除されたため工程動画を開けませんでした。');
+        } else if (_directJumpStatus == _DirectJumpStatus.consumed) {
+          _markConsumedDirectJumpChanged('症例が削除されたため工程動画を開けませんでした。');
+          _manualVideoRecoveryRequired = true;
+          _directJumpGeneration++;
+        }
+      } else {
+        final snapshot = _directJumpSnapshot;
+        if (snapshot != null &&
+            _directJumpStatus == _DirectJumpStatus.pending) {
+          final normalizedLegacyReference =
+              resolution.normalizedLegacyVideoPath != null &&
+              !snapshot.didNormalizeLegacyReference &&
+              resolution.sourceVideoPath == snapshot.videoPath &&
+              committedRecord.videoPath == resolution.normalizedLegacyVideoPath;
+          if (normalizedLegacyReference) {
+            _directJumpSnapshot = snapshot.withNormalizedVideoPath(
+              committedRecord.videoPath!,
+            );
+            _directJumpObservedVideoPaths
+              ..clear()
+              ..add(committedRecord.videoPath);
+          }
+          final latestReferenceMatches = normalizedLegacyReference
+              ? _latestRecord?.videoPath == snapshot.videoPath ||
+                    _latestRecord?.videoPath == committedRecord.videoPath
+              : _latestRecord?.videoPath == snapshot.videoPath;
+          if ((!normalizedLegacyReference &&
+                  (resolution.sourceVideoPath != snapshot.videoPath ||
+                      committedRecord.videoPath != snapshot.videoPath)) ||
+              !latestReferenceMatches) {
+            _abandonDirectJump(
+              '動画が更新されたため自動で移動できませんでした。',
+              requiresManualVideoRecovery: true,
+            );
+            shouldDisposeVideo = true;
+            if (!latestReferenceMatches) {
+              preserveNewerRecord = true;
+              shouldRefreshResolutionAfterResult = true;
+            }
+          } else if (resolution.videoState?.kind ==
+                  RecordVideoStateKind.checkFailed ||
+              (file == null &&
+                  (resolution.videoState?.kind ==
+                          RecordVideoStateKind.availableManaged ||
+                      resolution.videoState?.kind ==
+                          RecordVideoStateKind.availableLegacy))) {
+            _markDirectJumpRetryable();
+            shouldEnsureVideo = false;
+          } else if (file == null ||
+              (resolution.videoState?.kind !=
+                      RecordVideoStateKind.availableManaged &&
+                  resolution.videoState?.kind !=
+                      RecordVideoStateKind.availableLegacy)) {
+            _abandonDirectJump('動画を利用できないため工程位置へ移動できませんでした。');
+            shouldDisposeVideo = true;
+          }
+        } else if (snapshot != null &&
+            _directJumpStatus == _DirectJumpStatus.consumed &&
+            committedRecord.videoPath !=
+                _currentConsumedVideoReference(snapshot)) {
+          _markConsumedDirectJumpChanged('動画が更新されました。動画を再確認してください。');
+          _acceptConsumedVideoReference(committedRecord.videoPath);
+          _manualVideoRecoveryRequired = true;
+          _directJumpGeneration++;
+          shouldDisposeVideo = true;
+          shouldEnsureVideo = false;
+        } else if (_manualVideoRecoveryRequired) {
+          shouldEnsureVideo = false;
+        } else if (_directJumpStatus == _DirectJumpStatus.retryable) {
+          shouldEnsureVideo = false;
+        }
+        _recordWasDeleted = false;
+        if (!preserveNewerRecord) {
+          _latestRecord = _mergeResolvedVideoRecord(
+            _latestRecord,
+            committedRecord,
+          );
+          _synchronizeDraftIfPossible();
+        }
       }
       _videoProviderLoading = false;
       _videoProviderError = null;
       _resolvedVideoFile = file;
       _resolvedVideoState = resolution.videoState;
     });
-    if (committedRecord != null &&
+    if (shouldDisposeVideo) {
+      _disposeVideoController();
+    } else if (shouldEnsureVideo && file != null && committedRecord != null) {
+      _ensureVideoController(file, videoReference: committedRecord.videoPath);
+    }
+    if (shouldRefreshResolutionAfterResult) {
+      ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
+    }
+    _maybeApplyInitialSeek();
+    if (!preserveNewerRecord &&
+        committedRecord != null &&
         committedRecord.videoPath != previousVideoPath) {
       ref.invalidate(surgeryRecordProvider(widget.recordId));
       ref.invalidate(surgeryRecordsProvider);
     }
   }
 
+  String? _currentConsumedVideoReference(_DirectJumpSnapshot snapshot) {
+    return _hasConsumedVideoReference
+        ? _consumedVideoReference
+        : snapshot.videoPath;
+  }
+
+  void _acceptConsumedVideoReference(String? videoPath) {
+    _hasConsumedVideoReference = true;
+    _consumedVideoReference = videoPath;
+  }
+
+  SurgeryRecord _mergeResolvedVideoRecord(
+    SurgeryRecord? current,
+    SurgeryRecord resolved,
+  ) {
+    if (current == null) {
+      return resolved;
+    }
+    if (current.videoPath == resolved.videoPath) {
+      // Video resolution is authoritative only for video availability. Keep
+      // fresher case metadata already delivered by the record provider.
+      return current;
+    }
+    return current.copyWith(
+      videoPath: resolved.videoPath,
+      videoDisplayName: resolved.videoDisplayName,
+      clearVideo: resolved.videoPath == null,
+      updatedAt: resolved.updatedAt.isAfter(current.updatedAt)
+          ? resolved.updatedAt
+          : current.updatedAt,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    _scheduleNormalLoadResumeIfCurrent(
+      routeIsCurrent: ModalRoute.isCurrentOf(context) == true,
+    );
     final record = _latestRecord;
     final reviews = _latestReviews;
 
     final Widget body;
     if (!_draftInitialized && _recordProviderResolved && record == null) {
-      body = _buildInitialLoadFailure('症例が見つかりません');
+      body = _buildInitialLoadFailure('症例が見つかりません', detail: _directJumpMessage);
     } else if (record == null || reviews == null || !_draftInitialized) {
       final initialError = _recordRefreshError ?? _reviewsRefreshError;
       body = initialError == null
-          ? const Center(child: CircularProgressIndicator())
+          ? (_isDirectJumpPreparing
+                ? _buildDirectJumpPreparingState()
+                : const Center(child: CircularProgressIndicator()))
           : _buildInitialLoadFailure('レビューを読み込めませんでした。');
     } else {
       body = _buildBody(record, reviews);
@@ -354,7 +1249,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
         appBar: AppBar(
           title: const Text('手術工程の時間記録'),
           actions: [
-            const VideoRegistrationHelpButton(),
+            VideoRegistrationHelpButton(enabled: !_isDirectJumpPreparing),
             Padding(
               padding: const EdgeInsets.only(right: 8),
               child: TextButton.icon(
@@ -501,11 +1396,14 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
                                         ? () => _endStep(byStep[step]!)
                                         : null,
                                     onReset:
-                                        !_hasPendingWrite && !_recordWasDeleted
+                                        !_isDirectJumpPreparing &&
+                                            !_hasPendingWrite &&
+                                            !_recordWasDeleted
                                         ? () => _resetStep(byStep[step]!)
                                         : null,
                                     onSkip:
                                         !step.isTotalSurgeryTime &&
+                                            !_isDirectJumpPreparing &&
                                             !_hasPendingWrite &&
                                             !_recordWasDeleted
                                         ? () => _skipStep(byStep[step]!)
@@ -611,7 +1509,25 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   }
 
   List<Widget> _buildReviewNotices(bool hasRefreshError) {
+    final directJumpMessage = _directJumpMessage;
+    final seekFailureMessage = _directSeekFailureMessage;
     final notices = <Widget>[
+      if (_isDirectJumpPreparing) _buildDirectJumpPreparingNotice(),
+      if (!_isDirectJumpPreparing && directJumpMessage != null)
+        _buildDirectJumpMessageNotice(
+          directJumpMessage,
+          noticeKey: const Key('direct-jump-primary-notice'),
+          semanticsKey: const Key('direct-jump-primary-message'),
+        ),
+      if (!_isDirectJumpPreparing &&
+          seekFailureMessage != null &&
+          seekFailureMessage != directJumpMessage)
+        _buildDirectJumpMessageNotice(
+          seekFailureMessage,
+          noticeKey: const Key('direct-jump-seek-failure-notice'),
+          semanticsKey: const Key('direct-jump-seek-failure-message'),
+          showVideoRetry: true,
+        ),
       if (_recordWasDeleted)
         _buildDeletedRecordNotice()
       else if (hasRefreshError)
@@ -635,6 +1551,108 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       return const [];
     }
     return notices;
+  }
+
+  Widget _buildDirectJumpPreparingState() {
+    final step = _directJumpStep;
+    return Center(
+      key: const Key('direct-jump-preparing-state'),
+      child: Semantics(
+        container: true,
+        liveRegion: true,
+        excludeSemantics: true,
+        label: '${step?.label ?? '工程'}を開いています',
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _buildDirectJumpProgressIndicator(),
+            const SizedBox(height: 12),
+            Text('${step?.label ?? '工程'}を開いています…'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDirectJumpPreparingNotice() {
+    final step = _directJumpStep;
+    return Card(
+      key: const Key('direct-jump-preparing-notice'),
+      child: Semantics(
+        container: true,
+        excludeSemantics: true,
+        label: '${step?.label ?? '工程'}を開いています',
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              _buildDirectJumpProgressIndicator(compact: true),
+              const SizedBox(width: 12),
+              Expanded(child: Text('${step?.label ?? '工程'}を開いています…')),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDirectJumpProgressIndicator({bool compact = false}) {
+    if (MediaQuery.disableAnimationsOf(context)) {
+      return Icon(
+        Icons.hourglass_top,
+        key: const Key('direct-jump-static-progress'),
+        size: compact ? 20 : 32,
+      );
+    }
+    if (compact) {
+      return const SizedBox.square(
+        key: Key('direct-jump-animated-progress'),
+        dimension: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    return const CircularProgressIndicator(
+      key: Key('direct-jump-animated-progress'),
+    );
+  }
+
+  Widget _buildDirectJumpMessageNotice(
+    String message, {
+    required Key noticeKey,
+    required Key semanticsKey,
+    bool showVideoRetry = false,
+  }) {
+    return Card(
+      key: noticeKey,
+      child: Column(
+        children: [
+          Semantics(
+            key: semanticsKey,
+            container: true,
+            liveRegion: true,
+            excludeSemantics: true,
+            label: message,
+            child: ListTile(
+              leading: const Icon(Icons.info_outline),
+              title: Text(message),
+            ),
+          ),
+          if (showVideoRetry)
+            Padding(
+              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 8),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  key: const Key('direct-seek-video-recheck'),
+                  onPressed: _refreshVideo,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('動画を再確認'),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   Widget _buildVideoSection(SurgeryRecord record) {
@@ -922,7 +1940,9 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
                     onSeekForward15: _hasUsableVideoPosition
                         ? () => _seekRelative(const Duration(seconds: 15))
                         : null,
-                    onTogglePlayback: _togglePlayback,
+                    onTogglePlayback: _hasUsableVideoPosition
+                        ? _togglePlayback
+                        : null,
                   ),
                 ],
               );
@@ -974,46 +1994,693 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     _videoErrorMessage = null;
     final controller = VideoPlayerController.file(file);
     _videoController = controller;
+    controller.addListener(
+      () => _onVideoControllerValueChanged(controller, generation),
+    );
     _videoSeekCoordinator = VideoSeekCoordinator(
       currentPosition: () => controller.value.position,
       videoDuration: () => controller.value.duration,
       seekTo: controller.seekTo,
     );
-    controller
-        .initialize()
-        .then((_) async {
-          if (!mounted ||
-              generation != _videoControllerGeneration ||
-              !identical(_videoController, controller)) {
-            return;
-          }
-          await controller.setPlaybackSpeed(_playbackSpeed);
-          if (mounted &&
-              generation == _videoControllerGeneration &&
-              identical(_videoController, controller)) {
-            setState(() {});
-          }
-        })
-        .catchError((Object error) {
-          if (mounted &&
-              generation == _videoControllerGeneration &&
-              identical(_videoController, controller)) {
-            setState(() {
-              _videoErrorMessage = '動画を再生できませんでした。動画ファイルを確認するか、別の動画を選択してください。';
-            });
-          }
-        });
+    unawaited(_initializeVideoController(controller, generation));
+  }
+
+  void _onVideoControllerValueChanged(
+    VideoPlayerController controller,
+    int generation,
+  ) {
+    if (!mounted ||
+        generation != _videoControllerGeneration ||
+        !identical(_videoController, controller) ||
+        !controller.value.hasError ||
+        _videoErrorMessage != null) {
+      return;
+    }
+    if (_discardDirectControllerResultForInactiveRoute()) {
+      return;
+    }
+    // A stable, already-consumed direct jump keeps its completed result. A
+    // later playback error is normal player recovery, but it must not mutate
+    // the covered route. didChangeDependencies re-applies it after this route
+    // becomes current again.
+    if (ModalRoute.isCurrentOf(context) != true) {
+      return;
+    }
+    final snapshot = _directJumpSnapshot;
+    final failedSeekSnapshot =
+        snapshot != null &&
+            _directJumpStatus == _DirectJumpStatus.consumed &&
+            _initialSeekRequestInFlight
+        ? snapshot
+        : null;
+    // Position ticks stay confined to the ValueListenableBuilder below the
+    // player. Only an error transition rebuilds the outer section so the
+    // recovery UI replaces the unusable player without rebuilding the form on
+    // every playback update.
+    setState(() {
+      if (failedSeekSnapshot != null) {
+        _videoErrorMessage =
+            '動画を再生できない状態になったため、自動移動の完了を確認できませんでした。'
+            '動画を再確認してください。';
+        _directSeekFailureMessage =
+            '${failedSeekSnapshot.step.label}の開始位置へ移動できませんでした。'
+            'シークバーまたは記録済み開始位置から確認してください。';
+        _suppressDirectSeekCompletion = true;
+        _initialSeekValidationInFlight = false;
+        _initialSeekRequestInFlight = false;
+        // A platform seek Future may never settle after a controller error.
+        // Invalidate its completion now while keeping the intent consumed.
+        _directJumpGeneration++;
+      } else {
+        _videoErrorMessage =
+            '動画の再生中にエラーが発生しました。'
+            'レビュー内容はそのまま編集できます。';
+        _markDirectJumpRetryable();
+      }
+    });
+  }
+
+  Future<void> _initializeVideoController(
+    VideoPlayerController controller,
+    int generation,
+  ) async {
+    try {
+      await controller.initialize();
+      if (!mounted ||
+          generation != _videoControllerGeneration ||
+          !identical(_videoController, controller)) {
+        return;
+      }
+      if (_discardDirectControllerResultForInactiveRoute()) {
+        return;
+      }
+      if (controller.value.hasError) {
+        throw StateError('Video initialization completed with an error.');
+      }
+      if (!controller.value.isInitialized) {
+        _finishUnavailableVideoDuration();
+        return;
+      }
+      await controller.setPlaybackSpeed(_playbackSpeed);
+      if (!mounted ||
+          generation != _videoControllerGeneration ||
+          !identical(_videoController, controller)) {
+        return;
+      }
+      if (_discardDirectControllerResultForInactiveRoute()) {
+        return;
+      }
+      if (controller.value.hasError) {
+        return;
+      }
+      if (!controller.value.isInitialized) {
+        _finishUnavailableVideoDuration();
+        return;
+      }
+      setState(() {});
+      _maybeApplyInitialSeek();
+    } catch (_) {
+      if (!mounted ||
+          generation != _videoControllerGeneration ||
+          !identical(_videoController, controller)) {
+        return;
+      }
+      if (_discardDirectControllerResultForInactiveRoute()) {
+        return;
+      }
+      setState(() {
+        _videoErrorMessage = '動画を再生できませんでした。動画ファイルを確認するか、別の動画を選択してください。';
+        _markDirectJumpRetryable();
+      });
+    }
+  }
+
+  void _finishUnavailableVideoDuration() {
+    setState(() {
+      _videoErrorMessage =
+          '動画の長さを取得できませんでした。'
+          '動画ファイルを確認するか、別の動画を選択してください。';
+      if (_directJumpStatus == _DirectJumpStatus.pending ||
+          _directJumpStatus == _DirectJumpStatus.retryable) {
+        _abandonDirectJump('動画の長さを取得できないため自動で移動できませんでした。');
+      }
+    });
   }
 
   void _disposeVideoController() {
     _videoControllerGeneration++;
-    _videoSeekCoordinator?.dispose();
-    _videoController?.dispose();
+    final seekCoordinator = _videoSeekCoordinator;
+    final controller = _videoController;
     _videoSeekCoordinator = null;
     _videoController = null;
     _loadedVideoPath = null;
     _videoBoundReference = null;
     _videoErrorMessage = null;
+    _initialSeekValidationInFlight = false;
+    _initialSeekRequestInFlight = false;
+    seekCoordinator?.dispose();
+    if (controller != null) {
+      // Detach the controller from the widget tree before physical disposal.
+      // A platform seek Future may complete after logical invalidation; giving
+      // ValueListenableBuilder one frame to remove its listener prevents that
+      // late value notification from targeting an already-disposed State.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_disposeVideoControllerSafely(controller));
+      });
+      // addPostFrameCallback alone does not request another frame when this is
+      // called from an existing post-frame callback.
+      WidgetsBinding.instance.scheduleFrame();
+    }
+  }
+
+  Future<void> _disposeVideoControllerSafely(
+    VideoPlayerController controller,
+  ) async {
+    try {
+      await controller.dispose();
+    } catch (_) {
+      // The controller has already been detached and its generation invalidated.
+    }
+  }
+
+  void _maybeApplyInitialSeek() {
+    final snapshot = _directJumpSnapshot;
+    final controller = _videoController;
+    final seekCoordinator = _videoSeekCoordinator;
+    final route = ModalRoute.of(context);
+    if (_directJumpStatus == _DirectJumpStatus.pending &&
+        route != null &&
+        !route.isCurrent) {
+      _discardDirectJumpForInactiveRoute(_DirectJumpStatus.pending);
+      return;
+    }
+    if (_directJumpStatus != _DirectJumpStatus.pending ||
+        snapshot == null ||
+        controller == null ||
+        seekCoordinator == null ||
+        _initialSeekValidationInFlight ||
+        _initialSeekRequestInFlight ||
+        !_draftInitialized ||
+        !controller.value.isInitialized ||
+        controller.value.hasError ||
+        _videoProviderLoading ||
+        _videoProviderError != null ||
+        _videoErrorMessage != null ||
+        _latestRecord?.videoPath != snapshot.videoPath ||
+        _videoBoundReference != snapshot.videoPath) {
+      return;
+    }
+
+    final directGeneration = _directJumpGeneration;
+    final controllerGeneration = _videoControllerGeneration;
+    _initialSeekValidationInFlight = true;
+    unawaited(
+      _revalidateAndApplyInitialSeek(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+      ),
+    );
+  }
+
+  bool _isCurrentDirectSeekCandidate({
+    required _DirectJumpSnapshot snapshot,
+    required VideoPlayerController controller,
+    required VideoSeekCoordinator seekCoordinator,
+    required int directGeneration,
+    required int controllerGeneration,
+    required _DirectJumpStatus status,
+  }) {
+    final matches =
+        mounted &&
+        _directJumpStatus == status &&
+        _directJumpGeneration == directGeneration &&
+        _videoControllerGeneration == controllerGeneration &&
+        identical(_directJumpSnapshot, snapshot) &&
+        identical(_videoController, controller) &&
+        identical(_videoSeekCoordinator, seekCoordinator) &&
+        _videoBoundReference == snapshot.videoPath;
+    if (!matches) {
+      return false;
+    }
+    if (ModalRoute.of(context)?.isCurrent == true) {
+      return true;
+    }
+    _discardDirectJumpForInactiveRoute(status);
+    return false;
+  }
+
+  void _discardDirectJumpForInactiveRoute(_DirectJumpStatus status) {
+    if (!mounted || _directJumpStatus != status) {
+      return;
+    }
+    var shouldDisposeVideo = false;
+    if (_dataListenersStarted) {
+      _refreshDiscardedDataWhenRouteCurrent = true;
+    }
+    setState(() {
+      if (status == _DirectJumpStatus.pending ||
+          status == _DirectJumpStatus.retryable) {
+        _directRetryValidationInFlight = false;
+        if (status == _DirectJumpStatus.pending &&
+            _directJumpSnapshot == null &&
+            !_dataListenersStarted) {
+          _resumeNormalLoadWhenRouteCurrent = true;
+          _directFreshReadComplete = true;
+        }
+        _abandonDirectJump(
+          '別の画面が開かれたため自動で移動しませんでした。'
+          '記録済み開始位置から確認してください。',
+          requiresManualVideoRecovery: true,
+        );
+        _videoProviderLoading = false;
+        shouldDisposeVideo = true;
+      } else if (status == _DirectJumpStatus.consumed) {
+        _suppressDirectSeekCompletion = true;
+        _manualVideoRecoveryRequired = true;
+        _directJumpGeneration++;
+        _initialSeekValidationInFlight = false;
+        _initialSeekRequestInFlight = false;
+        _directJumpMessage =
+            '別の画面が開かれたため自動移動の完了結果を破棄しました。'
+            '動画を再確認してください。';
+        shouldDisposeVideo = true;
+      }
+    });
+    if (shouldDisposeVideo) {
+      _disposeVideoController();
+    }
+    _scheduleNormalLoadResumeIfCurrent();
+  }
+
+  bool _isVideoReadyForDirectSeek(VideoPlayerController controller) {
+    return controller.value.isInitialized &&
+        !controller.value.hasError &&
+        !_videoProviderLoading &&
+        _videoProviderError == null &&
+        _videoErrorMessage == null;
+  }
+
+  Future<void> _revalidateAndApplyInitialSeek({
+    required _DirectJumpSnapshot snapshot,
+    required VideoPlayerController controller,
+    required VideoSeekCoordinator seekCoordinator,
+    required int directGeneration,
+    required int controllerGeneration,
+  }) async {
+    final repository = ref.read(surgeryRepositoryProvider);
+    Future<_DirectSeekCompletion>? seekCompletion;
+    Object? transactionError;
+    try {
+      await repository.runRecordTransaction(
+        snapshot.recordId,
+        () => _revalidateAndApplyInitialSeekInTransaction(
+          snapshot: snapshot,
+          controller: controller,
+          seekCoordinator: seekCoordinator,
+          directGeneration: directGeneration,
+          controllerGeneration: controllerGeneration,
+          onSeekIssued: (completion) => seekCompletion = completion,
+        ),
+      );
+    } catch (error) {
+      transactionError = error;
+    }
+
+    final completion = seekCompletion;
+    if (completion != null) {
+      await _completeInitialSeek(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        completion: completion,
+      );
+      return;
+    }
+
+    if (transactionError != null) {
+      if (!_isCurrentDirectSeekCandidate(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        status: _DirectJumpStatus.pending,
+      )) {
+        return;
+      }
+      setState(() {
+        _initialSeekValidationInFlight = false;
+        _abandonDirectJump('工程の最新情報を確認できなかったため自動で移動できませんでした。');
+      });
+    }
+  }
+
+  Future<void> _revalidateAndApplyInitialSeekInTransaction({
+    required _DirectJumpSnapshot snapshot,
+    required VideoPlayerController controller,
+    required VideoSeekCoordinator seekCoordinator,
+    required int directGeneration,
+    required int controllerGeneration,
+    required void Function(Future<_DirectSeekCompletion> completion)
+    onSeekIssued,
+  }) async {
+    SurgeryRecord? initialRecord;
+    SurgicalStepReview? initialReview;
+    SurgeryRecord? record;
+    SurgicalStepReview? review;
+    try {
+      final repository = ref.read(surgeryRepositoryProvider);
+      initialRecord = await repository.getRecord(snapshot.recordId);
+      if (!_isCurrentDirectSeekCandidate(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        status: _DirectJumpStatus.pending,
+      )) {
+        return;
+      }
+      initialReview = initialRecord == null
+          ? null
+          : await repository.getStepReview(
+              surgeryRecordId: snapshot.recordId,
+              step: snapshot.step,
+            );
+      if (!_isCurrentDirectSeekCandidate(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        status: _DirectJumpStatus.pending,
+      )) {
+        return;
+      }
+      record = await repository.getRecord(snapshot.recordId);
+      if (!_isCurrentDirectSeekCandidate(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        status: _DirectJumpStatus.pending,
+      )) {
+        return;
+      }
+      // Mirror the final record read. The surrounding record transaction keeps
+      // both values stable until the seek handoff, and this final review read
+      // also protects controlled/custom repositories that complete a record
+      // read only after changing the target timing.
+      review = record == null
+          ? null
+          : await repository.getStepReview(
+              surgeryRecordId: snapshot.recordId,
+              step: snapshot.step,
+            );
+    } catch (_) {
+      if (!_isCurrentDirectSeekCandidate(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        status: _DirectJumpStatus.pending,
+      )) {
+        return;
+      }
+      setState(() {
+        _initialSeekValidationInFlight = false;
+        _abandonDirectJump('工程の最新情報を確認できなかったため自動で移動できませんでした。');
+      });
+      return;
+    }
+
+    if (!_isCurrentDirectSeekCandidate(
+      snapshot: snapshot,
+      controller: controller,
+      seekCoordinator: seekCoordinator,
+      directGeneration: directGeneration,
+      controllerGeneration: controllerGeneration,
+      status: _DirectJumpStatus.pending,
+    )) {
+      return;
+    }
+
+    final initialRecordMatches = _recordMatchesDirectSnapshot(
+      initialRecord,
+      snapshot,
+    );
+    final finalRecordMatches = _recordMatchesDirectSnapshot(record, snapshot);
+    final initialReviewMatches = _reviewMatchesDirectSnapshot(
+      initialReview,
+      snapshot,
+    );
+    final finalReviewMatches = _reviewMatchesDirectSnapshot(review, snapshot);
+    final recordMatches = initialRecordMatches && finalRecordMatches;
+    final reviewMatches = initialReviewMatches && finalReviewMatches;
+    final shouldDisposeVideo = !recordMatches;
+    if (!recordMatches || !reviewMatches) {
+      setState(() {
+        _applyFreshDirectRead(record, review);
+        _initialSeekValidationInFlight = false;
+        if (initialRecord == null || record == null) {
+          _abandonDirectJump(
+            record == null
+                ? '症例が削除されたため工程動画を開けませんでした。'
+                : '症例の状態が更新されたため自動で移動できませんでした。',
+            requiresManualVideoRecovery: true,
+          );
+        } else if (!recordMatches) {
+          _abandonDirectJump(
+            '動画が更新されたため自動で移動できませんでした。',
+            requiresManualVideoRecovery: true,
+          );
+        } else if (initialReview?.startMilliseconds == null ||
+            review?.startMilliseconds == null) {
+          _abandonDirectJump('工程の記録位置が削除されたため自動で移動できませんでした。');
+        } else {
+          _abandonDirectJump('工程位置が更新されました。記録済み開始位置から確認してください。');
+        }
+      });
+      if (shouldDisposeVideo) {
+        _disposeVideoController();
+      }
+      return;
+    }
+
+    if (!_isVideoReadyForDirectSeek(controller)) {
+      setState(() {
+        _initialSeekValidationInFlight = false;
+        if (!controller.value.isInitialized || controller.value.hasError) {
+          _videoErrorMessage =
+              '動画を再生できない状態になったため自動で移動しませんでした。'
+              '動画を再確認してください。';
+          _markDirectJumpRetryable();
+        } else if (_videoProviderError != null || _videoErrorMessage != null) {
+          _markDirectJumpRetryable();
+        }
+      });
+      return;
+    }
+
+    setState(() => _applyFreshDirectRead(record, review));
+    final durationMilliseconds = controller.value.duration.inMilliseconds;
+    final startMilliseconds = snapshot.startMilliseconds;
+    if (durationMilliseconds <= 0 ||
+        startMilliseconds < 0 ||
+        startMilliseconds >= durationMilliseconds) {
+      setState(() {
+        _initialSeekValidationInFlight = false;
+        _abandonDirectJump('記録位置が動画の範囲外のため自動で移動できませんでした。');
+      });
+      return;
+    }
+
+    if (!_isCurrentDirectSeekCandidate(
+      snapshot: snapshot,
+      controller: controller,
+      seekCoordinator: seekCoordinator,
+      directGeneration: directGeneration,
+      controllerGeneration: controllerGeneration,
+      status: _DirectJumpStatus.pending,
+    )) {
+      return;
+    }
+
+    setState(() {
+      _initialSeekValidationInFlight = false;
+      _initialSeekRequestInFlight = true;
+      _directJumpStatus = _DirectJumpStatus.consumed;
+      _directVideoResolutionDecisionPending = false;
+    });
+
+    // Calling seekTo synchronously hands the request to the coordinator. Keep
+    // the transaction only through this handoff; waiting for the platform
+    // completion while holding the DB lock would block deletion/replacement.
+    onSeekIssued(
+      seekCoordinator
+          .seekTo(Duration(milliseconds: snapshot.startMilliseconds))
+          .then(
+            (_) => const _DirectSeekCompletion.success(),
+            onError: (Object error, StackTrace _) =>
+                _DirectSeekCompletion.failure(error),
+          ),
+    );
+  }
+
+  Future<void> _completeInitialSeek({
+    required _DirectJumpSnapshot snapshot,
+    required VideoPlayerController controller,
+    required VideoSeekCoordinator seekCoordinator,
+    required int directGeneration,
+    required int controllerGeneration,
+    required Future<_DirectSeekCompletion> completion,
+  }) async {
+    try {
+      final result = await completion;
+      if (result.error case final error?) {
+        throw error;
+      }
+      if (!_isCurrentDirectSeekCandidate(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        status: _DirectJumpStatus.consumed,
+      )) {
+        return;
+      }
+      if (!_isVideoReadyForDirectSeek(controller)) {
+        _finishConsumedDirectSeekUnavailable(snapshot, controller);
+        return;
+      }
+      await controller.pause();
+    } catch (_) {
+      if (!_isCurrentDirectSeekCandidate(
+        snapshot: snapshot,
+        controller: controller,
+        seekCoordinator: seekCoordinator,
+        directGeneration: directGeneration,
+        controllerGeneration: controllerGeneration,
+        status: _DirectJumpStatus.consumed,
+      )) {
+        return;
+      }
+      _finishConsumedDirectSeekUnavailable(snapshot, controller);
+      return;
+    }
+
+    if (!_isCurrentDirectSeekCandidate(
+      snapshot: snapshot,
+      controller: controller,
+      seekCoordinator: seekCoordinator,
+      directGeneration: directGeneration,
+      controllerGeneration: controllerGeneration,
+      status: _DirectJumpStatus.consumed,
+    )) {
+      return;
+    }
+    if (!_isVideoReadyForDirectSeek(controller)) {
+      _finishConsumedDirectSeekUnavailable(snapshot, controller);
+      return;
+    }
+    final shouldAnnounce =
+        !_suppressDirectSeekCompletion && !_directJumpSuccessAnnounced;
+    setState(() {
+      _initialSeekRequestInFlight = false;
+      if (shouldAnnounce) {
+        _directJumpSuccessAnnounced = true;
+      }
+    });
+    if (shouldAnnounce) {
+      _showMessage(
+        '${snapshot.step.label}の開始位置へ移動しました',
+        tone: AppFeedbackTone.success,
+      );
+    }
+  }
+
+  void _finishConsumedDirectSeekUnavailable(
+    _DirectJumpSnapshot snapshot,
+    VideoPlayerController controller,
+  ) {
+    setState(() {
+      _initialSeekRequestInFlight = false;
+      _directSeekFailureMessage =
+          '${snapshot.step.label}の開始位置へ移動できませんでした。'
+          'シークバーまたは記録済み開始位置から確認してください。';
+      if (!controller.value.isInitialized || controller.value.hasError) {
+        _videoErrorMessage =
+            '動画を再生できない状態になったため、自動移動の完了を確認できませんでした。'
+            '動画を再確認してください。';
+      }
+    });
+  }
+
+  bool _recordMatchesDirectSnapshot(
+    SurgeryRecord? record,
+    _DirectJumpSnapshot snapshot,
+  ) {
+    return record != null &&
+        record.id == snapshot.recordId &&
+        record.videoPath == snapshot.videoPath;
+  }
+
+  bool _reviewMatchesDirectSnapshot(
+    SurgicalStepReview? review,
+    _DirectJumpSnapshot snapshot,
+  ) {
+    return review != null &&
+        review.surgeryRecordId == snapshot.recordId &&
+        review.step == snapshot.step &&
+        review.startMilliseconds == snapshot.startMilliseconds;
+  }
+
+  void _applyFreshDirectRead(
+    SurgeryRecord? record,
+    SurgicalStepReview? review,
+  ) {
+    _recordProviderResolved = true;
+    if (record == null) {
+      if (_draftInitialized) {
+        _recordWasDeleted = true;
+      } else {
+        _latestRecord = null;
+      }
+    } else {
+      _recordWasDeleted = false;
+      _latestRecord = record;
+    }
+    final reviews = _latestReviews;
+    if (reviews == null) {
+      return;
+    }
+    if (review != null) {
+      _latestReviews = [
+        for (final current in reviews)
+          if (current.step == review.step) review else current,
+      ];
+    } else if (_directJumpSnapshot case final snapshot?) {
+      // A deleted row must not leave its old timing actionable in the UI while
+      // the compatibility provider recreates the missing empty row. Preserve
+      // notes in memory for draft safety, but clear the no-longer-persisted
+      // position immediately.
+      _latestReviews = [
+        for (final current in reviews)
+          if (current.step == snapshot.step)
+            current.copyWith(clearStart: true, clearEnd: true, isSkipped: false)
+          else
+            current,
+      ];
+    }
+    _synchronizeDraftIfPossible();
   }
 
   Future<void> _seekRelative(Duration offset) async {
@@ -1042,7 +2709,9 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
 
   void _togglePlayback() {
     final controller = _videoController;
-    if (controller == null || !controller.value.isInitialized) {
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        !_hasUsableVideoPosition) {
       return;
     }
     if (controller.value.isPlaying) {
@@ -1331,6 +3000,10 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
     setState(() {
       _latestRecord = outcome.value;
       _lastVideoImportError = null;
+      _manualVideoRecoveryRequired = false;
+      if (_directJumpStatus == _DirectJumpStatus.consumed) {
+        _acceptConsumedVideoReference(outcome.value.videoPath);
+      }
       if (clearsTimings) {
         _latestReviews = [
           for (final review in _latestReviews ?? const <SurgicalStepReview>[])
@@ -1339,6 +3012,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       }
       _markCommittedRefreshPending();
     });
+    _startVideoResolutionListener();
     _invalidateReviewData();
     ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
     ref.invalidate(videoStorageMaintenanceProvider);
@@ -1359,7 +3033,9 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   void _synchronizeDraftIfPossible() {
     final record = _latestRecord;
     final reviews = _latestReviews;
-    if (record == null || reviews == null) {
+    if (record == null ||
+        reviews == null ||
+        (_hasDirectJumpIntent && !_directFreshReadComplete)) {
       return;
     }
     if (!_draftInitialized) {
@@ -1380,17 +3056,19 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       _isApplyingProviderState = false;
       _draftInitialized = true;
       _isDirty = false;
-      final firstIncomplete = reviews.indexWhere(
-        (review) => review.step.isTotalSurgeryTime
-            ? !review.isCompleted
-            : !review.isProcessed,
-      );
-      if (firstIncomplete > 0) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted && _tabController.index == 0) {
-            _tabController.index = firstIncomplete;
-          }
-        });
+      if (!_hasDirectJumpIntent) {
+        final firstIncomplete = reviews.indexWhere(
+          (review) => review.step.isTotalSurgeryTime
+              ? !review.isCompleted
+              : !review.isProcessed,
+        );
+        if (firstIncomplete > 0) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _tabController.index == 0) {
+              _tabController.index = firstIncomplete;
+            }
+          });
+        }
       }
       return;
     }
@@ -1808,6 +3486,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   }
 
   void _refreshAll() {
+    _startVideoResolutionListener();
     ref.invalidate(stepReviewsProvider(widget.recordId));
     ref.invalidate(surgeryRecordProvider(widget.recordId));
     ref.invalidate(surgeryRecordsProvider);
@@ -1818,10 +3497,159 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   }
 
   void _refreshVideo() {
+    if (_directJumpStatus == _DirectJumpStatus.retryable) {
+      if (_directRetryValidationInFlight) {
+        return;
+      }
+      _directRetryValidationInFlight = true;
+      unawaited(
+        _retryDirectJumpVideo().whenComplete(() {
+          _directRetryValidationInFlight = false;
+        }),
+      );
+      return;
+    }
+    if (_videoErrorMessage != null ||
+        _directSeekFailureMessage != null ||
+        _manualVideoRecoveryRequired) {
+      _disposeVideoController();
+      setState(() {
+        _manualVideoRecoveryRequired = false;
+        _videoProviderLoading = true;
+      });
+    }
+    _startVideoResolutionListener();
     ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
   }
 
-  Widget _buildInitialLoadFailure(String message) {
+  Future<void> _retryDirectJumpVideo() async {
+    final snapshot = _directJumpSnapshot;
+    if (snapshot == null || _directJumpStatus != _DirectJumpStatus.retryable) {
+      return;
+    }
+    final validationGeneration = _directJumpGeneration;
+    SurgeryRecord? initialRecord;
+    SurgicalStepReview? initialReview;
+    SurgeryRecord? record;
+    SurgicalStepReview? review;
+    try {
+      final repository = ref.read(surgeryRepositoryProvider);
+      initialRecord = await repository.getRecord(snapshot.recordId);
+      if (!_isCurrentDirectJumpRetry(snapshot, validationGeneration)) {
+        return;
+      }
+      initialReview = initialRecord == null
+          ? null
+          : await repository.getStepReview(
+              surgeryRecordId: snapshot.recordId,
+              step: snapshot.step,
+            );
+      if (!_isCurrentDirectJumpRetry(snapshot, validationGeneration)) {
+        return;
+      }
+      record = await repository.getRecord(snapshot.recordId);
+      if (!_isCurrentDirectJumpRetry(snapshot, validationGeneration)) {
+        return;
+      }
+      review = record == null
+          ? null
+          : await repository.getStepReview(
+              surgeryRecordId: snapshot.recordId,
+              step: snapshot.step,
+            );
+    } catch (_) {
+      if (_isCurrentDirectJumpRetry(snapshot, validationGeneration)) {
+        setState(() {
+          _directJumpMessage = '工程の最新情報を確認できませんでした。もう一度お試しください。';
+        });
+      }
+      return;
+    }
+
+    if (!_isCurrentDirectJumpRetry(snapshot, validationGeneration)) {
+      return;
+    }
+
+    final initialRecordMatches = _recordMatchesDirectSnapshot(
+      initialRecord,
+      snapshot,
+    );
+    final finalRecordMatches = _recordMatchesDirectSnapshot(record, snapshot);
+    final initialReviewMatches = _reviewMatchesDirectSnapshot(
+      initialReview,
+      snapshot,
+    );
+    final finalReviewMatches = _reviewMatchesDirectSnapshot(review, snapshot);
+    final recordMatches = initialRecordMatches && finalRecordMatches;
+    final reviewMatches = initialReviewMatches && finalReviewMatches;
+    if (!recordMatches || !reviewMatches) {
+      final shouldDisposeVideo = !recordMatches;
+      setState(() {
+        _applyFreshDirectRead(record, review);
+        if (initialRecord == null || record == null) {
+          _abandonDirectJump(
+            record == null
+                ? '症例が削除されたため工程動画を開けませんでした。'
+                : '症例の状態が更新されたため自動で移動できませんでした。',
+            requiresManualVideoRecovery: true,
+          );
+        } else if (!recordMatches) {
+          _abandonDirectJump(
+            '動画が更新されたため自動で移動できませんでした。',
+            requiresManualVideoRecovery: true,
+          );
+        } else if (initialReview?.startMilliseconds == null ||
+            review?.startMilliseconds == null) {
+          _abandonDirectJump('工程の記録位置が削除されたため自動で移動できませんでした。');
+        } else {
+          _abandonDirectJump('工程位置が更新されました。記録済み開始位置から確認してください。');
+        }
+      });
+      if (shouldDisposeVideo) {
+        _disposeVideoController();
+      }
+      return;
+    }
+
+    _directJumpGeneration++;
+    _disposeVideoController();
+    setState(() {
+      _applyFreshDirectRead(record, review);
+      _directJumpStatus = _DirectJumpStatus.pending;
+      _directVideoResolutionDecisionPending = true;
+      _directJumpMessage = null;
+      _directSeekFailureMessage = null;
+      _videoProviderError = null;
+      _videoProviderLoading = true;
+      _suppressDirectSeekCompletion = false;
+      _initialSeekValidationInFlight = false;
+      _initialSeekRequestInFlight = false;
+    });
+    ref.invalidate(surgeryRecordProvider(widget.recordId));
+    ref.invalidate(stepReviewsProvider(widget.recordId));
+    ref.invalidate(_reviewVideoResolutionProvider(widget.recordId));
+  }
+
+  bool _isCurrentDirectJumpRetry(
+    _DirectJumpSnapshot snapshot,
+    int validationGeneration,
+  ) {
+    final matches =
+        mounted &&
+        _directJumpStatus == _DirectJumpStatus.retryable &&
+        validationGeneration == _directJumpGeneration &&
+        identical(_directJumpSnapshot, snapshot);
+    if (!matches) {
+      return false;
+    }
+    if (ModalRoute.of(context)?.isCurrent == true) {
+      return true;
+    }
+    _discardDirectJumpForInactiveRoute(_DirectJumpStatus.retryable);
+    return false;
+  }
+
+  Widget _buildInitialLoadFailure(String message, {String? detail}) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -1831,6 +3659,17 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
             const Icon(Icons.error_outline, size: 40),
             const SizedBox(height: 12),
             Text(message, textAlign: TextAlign.center),
+            if (detail != null) ...[
+              const SizedBox(height: 8),
+              Semantics(
+                key: const Key('direct-jump-initial-failure-announcement'),
+                container: true,
+                liveRegion: true,
+                label: detail,
+                excludeSemantics: true,
+                child: Text(detail, textAlign: TextAlign.center),
+              ),
+            ],
             const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: _refreshAll,
@@ -2049,7 +3888,7 @@ class VideoTransportControls extends StatelessWidget {
   final VoidCallback? onSeekForward5;
   final VoidCallback? onSeekBackward15;
   final VoidCallback? onSeekForward15;
-  final VoidCallback onTogglePlayback;
+  final VoidCallback? onTogglePlayback;
 
   @override
   Widget build(BuildContext context) {
@@ -2082,6 +3921,7 @@ class VideoTransportControls extends StatelessWidget {
           key: const Key('toggle-video-playback'),
           label: playbackLabel,
           button: true,
+          enabled: onTogglePlayback != null,
           onTap: onTogglePlayback,
           excludeSemantics: true,
           child: Tooltip(
