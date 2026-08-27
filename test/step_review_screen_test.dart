@@ -865,26 +865,45 @@ WHERE id = ?
     expect(preservedTiming!.endMilliseconds, 900);
   });
 
-  testWidgets('changed/unknownの同一動画再登録はreplaceとして工程時刻を消去する', (tester) async {
+  testWidgets('changed/unknownのreplaceは破損skipを正規化し再読込失敗中も未登録表示にする', (
+    tester,
+  ) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
-    final repository = SurgeryRepository(database);
+    final seedRepository = SurgeryRepository(database);
     final oldPath = 'videos/${record.id}/missing.mp4';
     await tester.runAsync(() async {
-      final reviews = await repository.ensureStepReviews(record.id);
+      final reviews = await seedRepository.ensureStepReviews(record.id);
       final total = reviews.singleWhere(
         (review) => review.step == SurgicalStep.totalSurgeryTime,
       );
-      await repository.saveStepTiming(
+      final ccc = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.capsulorhexis,
+      );
+      await seedRepository.saveStepTiming(
         review: total.copyWith(startMilliseconds: 100, endMilliseconds: 900),
         expectedVideoPath: null,
       );
-      await repository.updateVideoReference(
+      // Legacy/corrupt data may contain both a completed timing and raw skip.
+      // The repository normalizes this to unprocessed when timings are reset.
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?, is_skipped = 1
+WHERE id = ?
+''',
+        <Object?>[300, 600, ccc.id],
+      );
+      await seedRepository.updateVideoReference(
         surgeryRecordId: record.id,
         videoPath: oldPath,
         videoDisplayName: 'missing.mp4',
       );
     });
+    final repository = _CommitThenFailReadsRepository(
+      database,
+      failAfterVideoReset: true,
+    );
     final preflight = const _ReadyVideoImportPreflight();
     final storage = _RecordingReviewVideoStorage();
     final service = _RecordingReviewVideoService(
@@ -924,11 +943,16 @@ WHERE id = ?
 
     late SurgeryRecord? replacedRecord;
     late SurgicalStepReview? clearedTiming;
+    late SurgicalStepReview? normalizedCcc;
     await tester.runAsync(() async {
-      replacedRecord = await repository.getRecord(record.id);
-      clearedTiming = await repository.getStepReview(
+      replacedRecord = await seedRepository.getRecord(record.id);
+      clearedTiming = await seedRepository.getStepReview(
         surgeryRecordId: record.id,
         step: SurgicalStep.totalSurgeryTime,
+      );
+      normalizedCcc = await seedRepository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
       );
     });
     expect(service.relinkCalls, 0);
@@ -937,6 +961,17 @@ WHERE id = ?
     expect(replacedRecord!.videoPath, isNot(oldPath));
     expect(clearedTiming!.startMilliseconds, isNull);
     expect(clearedTiming!.endMilliseconds, isNull);
+    expect(normalizedCcc!.startMilliseconds, isNull);
+    expect(normalizedCcc!.endMilliseconds, isNull);
+    expect(normalizedCcc!.isSkipped, isFalse);
+
+    await _openTab(tester, 'CCC');
+    final timingCard = tester.widget<ProcedureTimingCard>(
+      find.byType(ProcedureTimingCard),
+    );
+    expect(timingCard.timing.recordingStatus, StepRecordingStatus.unprocessed);
+    expect(find.text('開始まで：未登録'), findsOneWidget);
+    expect(find.text('時間記録なし'), findsNothing);
   });
 
   for (final scenario
@@ -6817,10 +6852,12 @@ class _CommitThenFailReadsRepository extends SurgeryRepository {
     super.database, {
     this.failAfterReviewSave = false,
     this.failAfterTimingSave = false,
+    this.failAfterVideoReset = false,
   });
 
   final bool failAfterReviewSave;
   final bool failAfterTimingSave;
+  final bool failAfterVideoReset;
   bool failReads = false;
 
   @override
@@ -6869,6 +6906,26 @@ class _CommitThenFailReadsRepository extends SurgeryRepository {
       failReads = true;
     }
     return result;
+  }
+
+  @override
+  Future<void> replaceVideoReferenceAndClearTimings({
+    required String surgeryRecordId,
+    required String? expectedVideoPath,
+    required String? videoPath,
+    required String? videoDisplayName,
+    void Function()? ensureMutationAllowed,
+  }) async {
+    await super.replaceVideoReferenceAndClearTimings(
+      surgeryRecordId: surgeryRecordId,
+      expectedVideoPath: expectedVideoPath,
+      videoPath: videoPath,
+      videoDisplayName: videoDisplayName,
+      ensureMutationAllowed: ensureMutationAllowed,
+    );
+    if (failAfterVideoReset) {
+      failReads = true;
+    }
   }
 }
 

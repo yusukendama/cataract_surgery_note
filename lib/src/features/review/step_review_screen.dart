@@ -3016,7 +3016,11 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       if (clearsTimings) {
         _latestReviews = [
           for (final review in _latestReviews ?? const <SurgicalStepReview>[])
-            review.copyWith(clearStart: true, clearEnd: true),
+            review.copyWith(
+              clearStart: true,
+              clearEnd: true,
+              isSkipped: review.recordingStatus == StepRecordingStatus.skipped,
+            ),
         ];
       }
       _markCommittedRefreshPending();

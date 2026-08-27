@@ -1433,6 +1433,92 @@ WHERE id = ?
     expect(find.text('工程別時間を読み込めませんでした。'), findsNothing);
   });
 
+  testWidgets('snapshot再読込中は古い到達時間を隠してloadingを表示する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    await tester.runAsync(() async {
+      final total = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+      final ccc = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?
+WHERE id = ?
+''',
+        <Object?>[30000, 500000, total.id],
+      );
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?
+WHERE id = ?
+''',
+        <Object?>[250000, 300000, ccc.id],
+      );
+    });
+
+    final pendingRefresh = Completer<RecordProcedureTimingSnapshot>();
+    var attempts = 0;
+    final container = ProviderContainer(
+      overrides: [
+        appDatabaseProvider.overrideWith((ref) => database),
+        recordProcedureTimingSnapshotProvider(record.id).overrideWith((ref) {
+          attempts++;
+          if (attempts == 1) {
+            return repository.fetchRecordProcedureTimingSnapshot(record.id);
+          }
+          return pendingRefresh.future;
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('procedure-times-expansion-toggle')));
+    await tester.pumpAndSettle();
+    expect(find.text('開始まで：3分40秒'), findsOneWidget);
+
+    late RecordProcedureTimingSnapshot refreshedSnapshot;
+    await tester.runAsync(() async {
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = NULL, end_milliseconds = NULL
+WHERE surgery_record_id = ?
+''',
+        <Object?>[record.id],
+      );
+      refreshedSnapshot = await repository.fetchRecordProcedureTimingSnapshot(
+        record.id,
+      );
+    });
+    container.invalidate(recordProcedureTimingSnapshotProvider(record.id));
+    await tester.pump();
+
+    expect(attempts, 2);
+    expect(find.text('工程別時間を読み込んでいます…'), findsOneWidget);
+    expect(find.byKey(const Key('procedure-times-list')), findsNothing);
+    expect(find.text('開始まで：3分40秒'), findsNothing);
+
+    pendingRefresh.complete(refreshedSnapshot);
+    await tester.pumpAndSettle();
+    expect(find.text('工程別時間を読み込んでいます…'), findsNothing);
+    expect(find.byKey(const Key('procedure-times-list')), findsOneWidget);
+    expect(find.text('開始まで：未登録'), findsNWidgets(10));
+  });
+
   testWidgets('動画実体なしでも保存位置だけから到達時間を表示する', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);

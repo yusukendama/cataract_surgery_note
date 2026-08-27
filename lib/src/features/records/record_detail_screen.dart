@@ -1138,6 +1138,7 @@ class _ProcedureTimesExpansionState extends State<_ProcedureTimesExpansion> {
         if (_isExpanded) ...[
           const SizedBox(height: 8),
           widget.snapshot.when(
+            skipLoadingOnRefresh: false,
             data: (snapshot) => _ProcedureTimesList(snapshot: snapshot),
             loading: () => const Padding(
               padding: EdgeInsets.symmetric(vertical: 16),
