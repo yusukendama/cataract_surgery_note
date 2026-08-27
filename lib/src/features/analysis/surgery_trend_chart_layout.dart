@@ -137,7 +137,10 @@ final class SurgeryTrendChartLayout {
       chartWidth: width,
       plotLeft: plotLeft,
       plotRight: plotRight,
-      labelTop: plotBottom + 10,
+      labelTop:
+          plotBottom +
+          durationAxisLayout.labelHeight / 2 +
+          durationAxisCrossAxisLabelGap,
       measureText: measureText,
     );
     return SurgeryTrendChartLayout._(

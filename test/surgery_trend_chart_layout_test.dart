@@ -134,6 +134,56 @@ void main() {
         );
       }
     });
+
+    test('アクセシビリティ文字で縦軸と横軸のラベルが交差せず画面内に収まる', () {
+      final catalog = _catalogForDates([
+        DateTime(2026, 1, 1),
+        DateTime(2028, 1, 1),
+      ]);
+      final points = [
+        _point(
+          catalog[0],
+          const Duration(minutes: 13),
+          step: SurgicalStep.nucleusRemoval,
+        ),
+        _point(
+          catalog[1],
+          const Duration(minutes: 13, seconds: 42),
+          step: SurgicalStep.nucleusRemoval,
+        ),
+      ];
+
+      for (final labelHeight in [28.0, 40.0]) {
+        final layout = SurgeryTrendChartLayout.calculate(
+          width: 288,
+          height: 376,
+          points: points,
+          horizontalAxis: _axis(
+            AnalysisHorizontalAxisMode.chronological,
+            catalog,
+            const CalendarDay(2028, 1, 1),
+          ),
+          measureText: (value) => Size(value.length * 16, labelHeight),
+        );
+
+        expect(layout.horizontalTicks, isNotEmpty);
+        for (final horizontal in layout.horizontalTicks) {
+          expect(
+            horizontal.labelBounds.bottom,
+            lessThanOrEqualTo(layout.height),
+          );
+          for (final vertical in layout.durationAxisLayout.ticks) {
+            expect(
+              horizontal.labelBounds.overlaps(vertical.labelBounds),
+              isFalse,
+              reason:
+                  '横軸${horizontal.value.label}と縦軸${vertical.label}が'
+                  '文字高$labelHeightで交差しました',
+            );
+          }
+        }
+      }
+    });
   });
 
   group('SurgeryTrendChartLayout caseOrder', () {

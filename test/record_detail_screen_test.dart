@@ -685,6 +685,77 @@ void main() {
     expect(unchangedCcc!.reflection, '保持する記録');
   });
 
+  testWidgets('症例削除後は到着時刻snapshotの保持cacheを破棄する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    final service = RecordVideoService(
+      surgeryRepository: repository,
+      videoStorageRepository: _PresentVideoStorage(),
+      videoImportPreflight: const _SyntheticVideoImportPreflight(),
+    );
+    late RecordProcedureTimingSnapshot beforeDeletion;
+    await tester.runAsync(() async {
+      beforeDeletion = await repository.fetchRecordProcedureTimingSnapshot(
+        record.id,
+      );
+    });
+    final emptySnapshot = RecordProcedureTimingSnapshot(
+      surgeryRecordId: record.id,
+      reviewsByStep: const {},
+    );
+    var snapshotReads = 0;
+    final container = ProviderContainer(
+      overrides: [
+        appDatabaseProvider.overrideWith((ref) => database),
+        recordVideoServiceProvider.overrideWithValue(service),
+        recordProcedureTimingSnapshotProvider(record.id).overrideWith((ref) {
+          snapshotReads++;
+          return Future.value(
+            snapshotReads == 1 ? beforeDeletion : emptySnapshot,
+          );
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.runAsync(() async {
+      beforeDeletion = await container.read(
+        recordProcedureTimingSnapshotProvider(record.id).future,
+      );
+    });
+    expect(snapshotReads, 1);
+    expect(beforeDeletion.reviewsByStep, isNotEmpty);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final deleteButtonFinder = find.byKey(const Key('delete-record-button'));
+    await tester.dragUntilVisible(
+      deleteButtonFinder,
+      find.byType(ListView),
+      const Offset(0, -300),
+    );
+    await tester.tap(deleteButtonFinder);
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '削除'));
+    await pumpUntilVisible(tester, find.text('症例を削除しました'));
+
+    late SurgeryRecord? deletedRecord;
+    await tester.runAsync(() async {
+      deletedRecord = await repository.getRecord(record.id);
+    });
+    container.read(recordProcedureTimingSnapshotProvider(record.id));
+
+    expect(deletedRecord, isNull);
+    expect(snapshotReads, 2);
+  });
+
   testWidgets('症例削除中は進行表示、多重実行防止、離脱抑止を維持する', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);

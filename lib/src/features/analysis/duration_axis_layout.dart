@@ -9,6 +9,7 @@ import 'duration_axis_scale.dart';
 const double durationAxisMinimumChartHeight = 320;
 const double durationAxisMinimumPlotWidth = 44;
 const double durationAxisMinimumLabelGap = 4;
+const double durationAxisCrossAxisLabelGap = 4;
 const int durationAxisMaximumTickCount = 12;
 
 typedef DurationAxisTextMeasurer = Size Function(String value);
@@ -260,7 +261,7 @@ class DurationAxisLayout {
     final topInset = math.max(16.0, axisLabelHeight / 2 + 8);
     final bottomInset = math.max(
       42.0,
-      math.max(dateLabelHeight + 20, axisLabelHeight / 2 + 8),
+      axisLabelHeight / 2 + durationAxisCrossAxisLabelGap + dateLabelHeight,
     );
     final minimumForTwoLabels =
         topInset + bottomInset + axisLabelHeight + durationAxisMinimumLabelGap;
@@ -341,7 +342,7 @@ DurationAxisTickLayout _tickLayout({
   final plotTop = math.max(16.0, axisLabelHeight / 2 + 8);
   final plotBottomInset = math.max(
     42.0,
-    math.max(dateLabelHeight + 20, axisLabelHeight / 2 + 8),
+    axisLabelHeight / 2 + durationAxisCrossAxisLabelGap + dateLabelHeight,
   );
   final plotBottom = math.max(plotTop, height - plotBottomInset);
   return (

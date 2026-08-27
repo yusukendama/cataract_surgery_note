@@ -883,6 +883,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
       await service.deleteRecordAndManagedVideos(widget.record.id);
       ref.invalidate(surgeryRecordsProvider);
       ref.invalidate(surgeryRecordProgressProvider);
+      ref.invalidate(recordProcedureTimingSnapshotProvider(widget.record.id));
       ref.invalidate(surgeryAnalysisProvider);
       ref.invalidate(videoStorageMaintenanceProvider);
       if (mounted) {
