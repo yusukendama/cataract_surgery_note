@@ -1,3 +1,4 @@
+import 'package:cataract_surgery_note/src/domain/procedure_arrival_time.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/features/review/step_review_screen.dart';
 import 'package:flutter/material.dart';
@@ -24,13 +25,26 @@ void main() {
     );
   }
 
-  Future<void> pumpCard(WidgetTester tester, SurgicalStepReview timing) async {
+  Future<void> pumpCard(
+    WidgetTester tester,
+    SurgicalStepReview timing, {
+    ProcedureArrivalTimeResult? arrivalTime,
+  }) async {
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: ProcedureTimingCard(
             step: timing.step,
             timing: timing,
+            arrivalTime:
+                arrivalTime ??
+                (timing.step.isTotalSurgeryTime
+                    ? const ProcedureArrivalTimeResult.status(
+                        ProcedureArrivalTimeStatus.notApplicable,
+                      )
+                    : const ProcedureArrivalTimeResult.available(
+                        Duration(seconds: 3),
+                      )),
             isSaving: false,
             onStart: () {},
             onEnd: () {},
@@ -103,6 +117,9 @@ void main() {
           body: ProcedureTimingCard(
             step: timing.step,
             timing: timing,
+            arrivalTime: const ProcedureArrivalTimeResult.available(
+              Duration(seconds: 3),
+            ),
             isSaving: false,
             onStart: () {},
             onEnd: () {},
@@ -126,6 +143,9 @@ void main() {
           body: ProcedureTimingCard(
             step: timing.step,
             timing: timing,
+            arrivalTime: const ProcedureArrivalTimeResult.available(
+              Duration(seconds: 3),
+            ),
             isSaving: false,
             onStart: () {},
             onEnd: () {},
@@ -149,6 +169,9 @@ void main() {
           body: ProcedureTimingCard(
             step: timing.step,
             timing: timing,
+            arrivalTime: const ProcedureArrivalTimeResult.available(
+              Duration(seconds: 3),
+            ),
             isSaving: false,
             onStart: () {},
             onEnd: () {},
@@ -161,5 +184,101 @@ void main() {
 
     await tester.tap(find.text('終了時刻：1:06.0'));
     expect(tapped, isTrue);
+  });
+
+  testWidgets('完了工程へ工程到達時間を所要時間と併記する', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await pumpCard(
+      tester,
+      review(start: 250000, end: 380000),
+      arrivalTime: const ProcedureArrivalTimeResult.available(
+        Duration(minutes: 3, seconds: 40),
+      ),
+    );
+
+    expect(find.text('所要時間：2分10秒'), findsOneWidget);
+    expect(find.text('開始まで：3分40秒'), findsOneWidget);
+    expect(
+      tester.getSemantics(find.text('開始まで：3分40秒')).label,
+      '手術開始から3分40秒で開始',
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('計測中でも工程到達時間を表示する', (tester) async {
+    await pumpCard(
+      tester,
+      review(start: 250000),
+      arrivalTime: const ProcedureArrivalTimeResult.available(
+        Duration(minutes: 3, seconds: 40),
+      ),
+    );
+
+    expect(find.text('計測中'), findsOneWidget);
+    expect(find.text('開始まで：3分40秒'), findsOneWidget);
+    expect(find.byKey(const Key('procedure-end-button')), findsOneWidget);
+  });
+
+  testWidgets('未登録・時間記録なし・総手術開始未登録を区別する', (tester) async {
+    await pumpCard(
+      tester,
+      review(),
+      arrivalTime: const ProcedureArrivalTimeResult.status(
+        ProcedureArrivalTimeStatus.stepStartMissing,
+      ),
+    );
+    expect(find.text('開始まで：未登録'), findsOneWidget);
+
+    await pumpCard(
+      tester,
+      review(isSkipped: true),
+      arrivalTime: const ProcedureArrivalTimeResult.status(
+        ProcedureArrivalTimeStatus.skipped,
+      ),
+    );
+    expect(find.text('開始まで：時間記録なし'), findsOneWidget);
+
+    await pumpCard(
+      tester,
+      review(start: 250000),
+      arrivalTime: const ProcedureArrivalTimeResult.status(
+        ProcedureArrivalTimeStatus.totalSurgeryStartMissing,
+      ),
+    );
+    expect(find.text('開始まで：—'), findsOneWidget);
+    expect(find.text('「総手術時間」の開始位置を登録すると「開始まで」が表示されます。'), findsOneWidget);
+  });
+
+  testWidgets('不整合は負値でなく状態別の要確認表示とSemanticsを使う', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await pumpCard(
+      tester,
+      review(start: 50000),
+      arrivalTime: const ProcedureArrivalTimeResult.status(
+        ProcedureArrivalTimeStatus.beforeTotalSurgeryStart,
+      ),
+    );
+
+    expect(find.text('開始まで：要確認'), findsOneWidget);
+    expect(find.text('工程開始位置を確認してください'), findsOneWidget);
+    expect(find.textContaining('-'), findsNothing);
+    expect(
+      tester.getSemantics(find.text('開始まで：要確認')).label,
+      '工程到達時間。工程開始位置を確認してください。',
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('総手術時間カードへ開始までを表示しない', (tester) async {
+    await pumpCard(
+      tester,
+      review(step: SurgicalStep.totalSurgeryTime, start: 30000, end: 400000),
+      arrivalTime: const ProcedureArrivalTimeResult.status(
+        ProcedureArrivalTimeStatus.notApplicable,
+      ),
+    );
+
+    expect(find.textContaining('開始まで'), findsNothing);
+    expect(find.text('所要時間：6分10秒'), findsOneWidget);
   });
 }

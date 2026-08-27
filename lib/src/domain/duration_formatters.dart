@@ -1,7 +1,7 @@
 // A Duration stores microseconds in a signed 64-bit integer on native Dart.
 // Validate millisecond values before invoking its constructor, which multiplies
 // them by 1,000 and may otherwise overflow.
-const _maximumDurationMilliseconds = 9223372036854775;
+const maximumSafeDurationMilliseconds = 9223372036854775;
 
 Duration? procedureDurationBetween(
   int? startMilliseconds,
@@ -15,7 +15,7 @@ Duration? procedureDurationBetween(
 
   final difference =
       BigInt.from(endMilliseconds) - BigInt.from(startMilliseconds);
-  if (difference > BigInt.from(_maximumDurationMilliseconds)) {
+  if (difference > BigInt.from(maximumSafeDurationMilliseconds)) {
     return null;
   }
 
@@ -49,6 +49,32 @@ String formatProcedureDuration(Duration? duration) {
     return '$seconds秒';
   }
   return '$minutes分${seconds.toString().padLeft(2, '0')}秒';
+}
+
+/// Formats a validated, non-negative procedure-arrival duration.
+///
+/// Arrival time is derived from two millisecond positions on the same video
+/// timeline. Callers must classify invalid positions before formatting so a
+/// negative value can never be hidden as an ordinary elapsed time.
+String formatProcedureArrivalDuration(Duration duration) {
+  if (duration.isNegative) {
+    throw ArgumentError.value(duration, 'duration', '工程到達時間には0以上の値を指定してください。');
+  }
+
+  final totalSeconds = duration.inMilliseconds ~/ 1000;
+  final hours = totalSeconds ~/ Duration.secondsPerHour;
+  final minutes =
+      (totalSeconds ~/ Duration.secondsPerMinute) % Duration.minutesPerHour;
+  final seconds = totalSeconds % Duration.secondsPerMinute;
+  if (hours > 0) {
+    return '$hours時間'
+        '${minutes.toString().padLeft(2, '0')}分'
+        '${seconds.toString().padLeft(2, '0')}秒';
+  }
+  if (minutes > 0) {
+    return '$minutes分${seconds.toString().padLeft(2, '0')}秒';
+  }
+  return '$seconds秒';
 }
 
 String formatMinutesSeconds(Duration duration) {

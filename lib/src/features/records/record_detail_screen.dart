@@ -8,10 +8,12 @@ import '../../data/record_video_service.dart';
 import '../../data/surgery_repository.dart';
 import '../../data/video_import_models.dart';
 import '../../domain/duration_formatters.dart';
+import '../../domain/procedure_arrival_time.dart';
 import '../../domain/surgery_models.dart';
 import '../../widgets/app_confirm_dialog.dart';
 import '../../widgets/app_snack_bar.dart';
 import '../../widgets/app_states.dart';
+import '../../widgets/procedure_arrival_time_view.dart';
 import '../review/step_review_screen.dart';
 import '../video_import/video_import_dialogs.dart';
 import '../video_import/video_import_screen_flow.dart';
@@ -127,6 +129,9 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     final record = widget.record;
     final videoState = ref.watch(recordVideoStateProvider(record.id));
     final progressSnapshot = ref.watch(surgeryRecordProgressProvider);
+    final procedureTimingSnapshot = ref.watch(
+      recordProcedureTimingSnapshotProvider(record.id),
+    );
     SurgeryRecordProgress? progress;
     for (final item
         in progressSnapshot.asData?.value ?? const <SurgeryRecordProgress>[]) {
@@ -202,6 +207,13 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
                     hasError: progressSnapshot.hasError,
                     onRetry: () =>
                         ref.invalidate(surgeryRecordProgressProvider),
+                  ),
+                  const SizedBox(height: 16),
+                  _ProcedureTimesExpansion(
+                    snapshot: procedureTimingSnapshot,
+                    onRetry: () => ref.invalidate(
+                      recordProcedureTimingSnapshotProvider(record.id),
+                    ),
                   ),
                   const SizedBox(height: 16),
                   FilledButton.icon(
@@ -829,6 +841,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     ref.invalidate(recordVideoFileProvider(widget.record.id));
     ref.invalidate(videoStorageMaintenanceProvider);
     ref.invalidate(stepReviewsProvider(widget.record.id));
+    ref.invalidate(recordProcedureTimingSnapshotProvider(widget.record.id));
     ref.invalidate(surgeryAnalysisProvider);
   }
 
@@ -1064,6 +1077,240 @@ class _ProgressSummary extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+class _ProcedureTimesExpansion extends StatefulWidget {
+  const _ProcedureTimesExpansion({
+    required this.snapshot,
+    required this.onRetry,
+  });
+
+  final AsyncValue<RecordProcedureTimingSnapshot> snapshot;
+  final VoidCallback onRetry;
+
+  @override
+  State<_ProcedureTimesExpansion> createState() =>
+      _ProcedureTimesExpansionState();
+}
+
+class _ProcedureTimesExpansionState extends State<_ProcedureTimesExpansion> {
+  bool _isExpanded = false;
+
+  void _toggle() {
+    setState(() => _isExpanded = !_isExpanded);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Semantics(
+          key: const Key('procedure-times-expansion-toggle'),
+          label: '工程別時間',
+          button: true,
+          expanded: _isExpanded,
+          onTap: _toggle,
+          excludeSemantics: true,
+          child: InkWell(
+            onTap: _toggle,
+            borderRadius: BorderRadius.circular(12),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 48),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        '工程別時間',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    Icon(_isExpanded ? Icons.expand_less : Icons.expand_more),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        if (_isExpanded) ...[
+          const SizedBox(height: 8),
+          widget.snapshot.when(
+            data: (snapshot) => _ProcedureTimesList(snapshot: snapshot),
+            loading: () => const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Row(
+                children: [
+                  SizedBox.square(
+                    dimension: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(child: Text('工程別時間を読み込んでいます…')),
+                ],
+              ),
+            ),
+            error: (_, _) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('工程別時間を読み込めませんでした。'),
+                  const SizedBox(height: 4),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton.icon(
+                      key: const Key('procedure-times-retry'),
+                      onPressed: widget.onRetry,
+                      icon: const Icon(Icons.refresh),
+                      label: const Text('再読み込み'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _ProcedureTimesList extends StatelessWidget {
+  const _ProcedureTimesList({required this.snapshot});
+
+  static const _arrivalCalculator = ProcedureArrivalTimeCalculator();
+
+  final RecordProcedureTimingSnapshot snapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final totalSurgery = snapshot.reviewFor(SurgicalStep.totalSurgeryTime);
+    final results = <SurgicalStep, ProcedureArrivalTimeResult>{
+      for (final step in activeIndividualSurgicalSteps)
+        step: _arrivalCalculator.calculate(
+          step: step,
+          stepReview: snapshot.reviewFor(step),
+          totalSurgeryReview: totalSurgery,
+        ),
+    };
+    final needsTotalStartExplanation = results.values.any(
+      (result) =>
+          result.status == ProcedureArrivalTimeStatus.totalSurgeryStartMissing,
+    );
+
+    return Column(
+      key: const Key('procedure-times-list'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (
+          var index = 0;
+          index < activeIndividualSurgicalSteps.length;
+          index++
+        ) ...[
+          if (index > 0) const Divider(height: 24),
+          _ProcedureTimeRow(
+            step: activeIndividualSurgicalSteps[index],
+            review: snapshot.reviewFor(activeIndividualSurgicalSteps[index]),
+            arrivalTime: results[activeIndividualSurgicalSteps[index]]!,
+          ),
+        ],
+        if (needsTotalStartExplanation) ...[
+          const SizedBox(height: 12),
+          Text(
+            '「総手術時間」の開始位置を登録すると「開始まで」が表示されます。',
+            key: const Key('procedure-times-total-start-help'),
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _ProcedureTimeRow extends StatelessWidget {
+  const _ProcedureTimeRow({
+    required this.step,
+    required this.review,
+    required this.arrivalTime,
+  });
+
+  final SurgicalStep step;
+  final SurgicalStepReview? review;
+  final ProcedureArrivalTimeResult arrivalTime;
+
+  @override
+  Widget build(BuildContext context) {
+    final presentation = ProcedureArrivalTimePresentation.fromResult(
+      arrivalTime,
+    );
+    final durationText = _durationText(review);
+    final semanticsLabel = arrivalTime.isAvailable
+        ? '${step.label}。${presentation.detailSemanticsClause}'
+              '${_durationSemantics(review)}'
+        : '${step.label}。${presentation.detailSemanticsClause}';
+    final repeatsTotalStartHelp =
+        arrivalTime.status ==
+        ProcedureArrivalTimeStatus.totalSurgeryStartMissing;
+
+    return Semantics(
+      key: ValueKey('procedure-time-row-${step.name}'),
+      container: true,
+      label: semanticsLabel,
+      excludeSemantics: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(step.label, style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text('所要時間：$durationText'),
+          const SizedBox(height: 2),
+          ProcedureArrivalTimeView(
+            result: arrivalTime,
+            showSupportingText: !repeatsTotalStartHelp,
+          ),
+        ],
+      ),
+    );
+  }
+
+  static String _durationText(SurgicalStepReview? review) {
+    if (review == null) {
+      return '未登録';
+    }
+    if (review.recordingStatus == StepRecordingStatus.skipped) {
+      return '時間記録なし';
+    }
+    final duration = review.duration;
+    if (duration != null) {
+      return formatProcedureDuration(duration);
+    }
+    if (review.isRunning) {
+      return '計測中';
+    }
+    if (review.isNotStarted) {
+      return '未登録';
+    }
+    return '要再設定';
+  }
+
+  static String _durationSemantics(SurgicalStepReview? review) {
+    if (review == null || review.isNotStarted) {
+      return '所要時間は未登録です。';
+    }
+    if (review.recordingStatus == StepRecordingStatus.skipped) {
+      return '今回は時間を記録しません。';
+    }
+    final duration = review.duration;
+    if (duration != null) {
+      return '所要時間${formatProcedureDuration(duration)}。';
+    }
+    if (review.isRunning) {
+      return '所要時間は計測中です。';
+    }
+    return '所要時間を再設定してください。';
   }
 }
 

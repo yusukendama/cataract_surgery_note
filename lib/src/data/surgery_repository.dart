@@ -89,6 +89,22 @@ class SurgeryRecordProgress {
   final CaseTimingReviewStatus? timingReviewStatus;
 }
 
+/// Existing procedure-timing rows for one record, read without backfilling.
+///
+/// Missing rows deliberately remain absent so read-only screens can render
+/// them as unregistered without changing the database.
+final class RecordProcedureTimingSnapshot {
+  RecordProcedureTimingSnapshot({
+    required this.surgeryRecordId,
+    required Map<SurgicalStep, SurgicalStepReview> reviewsByStep,
+  }) : reviewsByStep = Map.unmodifiable(reviewsByStep);
+
+  final String surgeryRecordId;
+  final Map<SurgicalStep, SurgicalStepReview> reviewsByStep;
+
+  SurgicalStepReview? reviewFor(SurgicalStep step) => reviewsByStep[step];
+}
+
 class SurgeryRepository {
   SurgeryRepository(
     this._database, {
@@ -235,6 +251,48 @@ ORDER BY r.surgery_date DESC, r.created_at DESC, r.id ASC
           );
         })
         .toList(growable: false);
+  }
+
+  /// Reads the total-surgery row and existing active-step rows in one result.
+  ///
+  /// Unlike [ensureStepReviews], this method never inserts missing rows. The
+  /// storage-ID filter also prevents unknown and hidden legacy rows from being
+  /// decoded or modified merely because a detail screen is displayed.
+  Future<RecordProcedureTimingSnapshot> fetchRecordProcedureTimingSnapshot(
+    String surgeryRecordId,
+  ) async {
+    final includedSteps = <SurgicalStep>[
+      SurgicalStep.totalSurgeryTime,
+      ...activeIndividualSurgicalSteps,
+    ];
+    final placeholders = List.filled(includedSteps.length, '?').join(', ');
+    final rows = await _database
+        .customSelect(
+          '''
+SELECT * FROM surgical_step_reviews
+WHERE surgery_record_id = ?
+  AND step IN ($placeholders)
+''',
+          variables: <Variable<Object>>[
+            Variable<String>(surgeryRecordId),
+            for (final step in includedSteps) Variable<String>(step.storageId),
+          ],
+          readsFrom: const {},
+        )
+        .get();
+
+    final reviewsByStep = <SurgicalStep, SurgicalStepReview>{};
+    for (final row in rows) {
+      final review = _reviewFromRow(row);
+      if (reviewsByStep.containsKey(review.step)) {
+        throw StateError('同じ工程の記録が重複しています。');
+      }
+      reviewsByStep[review.step] = review;
+    }
+    return RecordProcedureTimingSnapshot(
+      surgeryRecordId: surgeryRecordId,
+      reviewsByStep: reviewsByStep,
+    );
   }
 
   /// Reads only the metadata and timing values needed by the analysis screen.
