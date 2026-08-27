@@ -170,7 +170,7 @@ final class VideoSourceAccessManager {
         result(FlutterMethodNotImplemented)
         return
       }
-      result(TimeZone.current.identifier)
+      result(TimeZone.autoupdatingCurrent.identifier)
     }
     analysisTimeMethodChannel = methodChannel
 

@@ -127,6 +127,57 @@ void main() {
     expect(monitor.isActive, isFalse);
     expect(scheduler.active, isEmpty);
   });
+
+  test('stop/start前の遅延read完了は新generationの排他を解除しない', () async {
+    final source = _DeferredTimeSource();
+    final scheduler = _FakeScheduler();
+    final changes = <(AnalysisTimeContext, AnalysisTimeContext)>[];
+    final staleChanges = <(AnalysisTimeContext, AnalysisTimeContext)>[];
+    final monitor = AnalysisClockMonitor(source: source, scheduler: scheduler);
+    addTearDown(() {
+      monitor.dispose();
+      source.dispose();
+    });
+
+    final staleStart = monitor.start(
+      initialContext: _context(2026, 8, 27, 12, 0, 'Asia/Tokyo'),
+      onChanged: (previous, current) => staleChanges.add((previous, current)),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(source.reads, hasLength(1));
+
+    monitor.stop();
+    final currentStart = monitor.start(
+      initialContext: _context(2026, 8, 28, 12, 0, 'Asia/Tokyo'),
+      onChanged: (previous, current) => changes.add((previous, current)),
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(source.reads, hasLength(2));
+
+    // The obsolete generation finishes while the current generation is still
+    // reading. Its finally block must not unlock the current read.
+    source.completeRead(0, _context(2026, 8, 27, 12, 1, 'Asia/Tokyo'));
+    await staleStart;
+    source.emitChange();
+    final manualCheck = monitor.checkNow();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(
+      source.reads,
+      hasLength(2),
+      reason: 'native通知とcheckNowは同一generationのreadに合流する',
+    );
+    expect(staleChanges, isEmpty);
+
+    source.completeRead(1, _context(2026, 8, 29, 0, 1, 'Asia/Tokyo'));
+    await currentStart;
+    await manualCheck;
+
+    expect(changes, hasLength(1));
+    expect(changes.single.$1.localDay, const CalendarDay(2026, 8, 28));
+    expect(changes.single.$2.localDay, const CalendarDay(2026, 8, 29));
+    expect(scheduler.active, hasLength(1));
+  });
 }
 
 AnalysisTimeContext _context(
@@ -179,6 +230,31 @@ final class _FakeScheduler implements AnalysisScheduler {
     tasks.add(task);
     return task;
   }
+}
+
+final class _DeferredTimeSource implements AnalysisTimeContextSource {
+  final List<Completer<AnalysisTimeContext>> reads = [];
+  final StreamController<void> _changes = StreamController<void>.broadcast(
+    sync: true,
+  );
+
+  @override
+  Stream<void> get changes => _changes.stream;
+
+  @override
+  Future<AnalysisTimeContext> read() {
+    final completer = Completer<AnalysisTimeContext>();
+    reads.add(completer);
+    return completer.future;
+  }
+
+  void completeRead(int index, AnalysisTimeContext value) {
+    reads[index].complete(value);
+  }
+
+  void emitChange() => _changes.add(null);
+
+  void dispose() => _changes.close();
 }
 
 final class _FakeTask implements AnalysisScheduledTask {

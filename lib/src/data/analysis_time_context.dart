@@ -135,7 +135,7 @@ final class AnalysisClockMonitor {
   AnalysisTimeContext? _current;
   AnalysisTimeContextChanged? _onChanged;
   int _generation = 0;
-  bool _reading = false;
+  int? _readingGeneration;
 
   bool get isActive => _onChanged != null;
 
@@ -160,16 +160,17 @@ final class AnalysisClockMonitor {
     _subscription?.cancel().ignore();
     _subscription = null;
     _onChanged = null;
-    _reading = false;
   }
 
   Future<void> checkNow() => _check(_generation);
 
   Future<void> _check(int generation) async {
-    if (_onChanged == null || generation != _generation || _reading) {
+    if (_onChanged == null ||
+        generation != _generation ||
+        _readingGeneration == generation) {
       return;
     }
-    _reading = true;
+    _readingGeneration = generation;
     try {
       final next = await _source.read();
       if (_onChanged == null || generation != _generation) {
@@ -198,7 +199,11 @@ final class AnalysisClockMonitor {
         });
       }
     } finally {
-      _reading = false;
+      // A read from an obsolete generation can complete after stop/start.
+      // It must not release the latch owned by the newer generation.
+      if (_readingGeneration == generation) {
+        _readingGeneration = null;
+      }
     }
   }
 

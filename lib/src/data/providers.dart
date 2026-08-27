@@ -103,29 +103,28 @@ final surgeryRecordProgressProvider =
           .fetchRecordProgressSnapshots();
     });
 
-final surgeryAnalysisProvider = FutureProvider<SurgeryAnalysisSnapshot>((
-  ref,
-) async {
-  final repository = ref.watch(surgeryRepositoryProvider);
-  final timeSource = ref.watch(analysisTimeContextSourceProvider);
-  for (var attempt = 0; attempt < 2; attempt++) {
-    final before = await timeSource.read();
-    final snapshot = await repository.fetchAnalysisSnapshot();
-    final after = await timeSource.read();
-    if (before.timezoneIdentifier == after.timezoneIdentifier) {
-      final referenceDate = DateTime(
-        after.now.year,
-        after.now.month,
-        after.now.day,
-      );
-      return snapshot.withDisplayContext(
-        referenceDate: referenceDate,
-        timezoneIdentifier: after.timezoneIdentifier,
-      );
-    }
-  }
-  throw StateError('分析データ取得中にtimezoneが繰り返し変更されました。');
-});
+final surgeryAnalysisProvider =
+    FutureProvider.autoDispose<SurgeryAnalysisSnapshot>((ref) async {
+      final repository = ref.watch(surgeryRepositoryProvider);
+      final timeSource = ref.watch(analysisTimeContextSourceProvider);
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final before = await timeSource.read();
+        final snapshot = await repository.fetchAnalysisSnapshot();
+        final after = await timeSource.read();
+        if (before.timezoneIdentifier == after.timezoneIdentifier) {
+          final referenceDate = DateTime(
+            after.now.year,
+            after.now.month,
+            after.now.day,
+          );
+          return snapshot.withDisplayContext(
+            referenceDate: referenceDate,
+            timezoneIdentifier: after.timezoneIdentifier,
+          );
+        }
+      }
+      throw StateError('分析データ取得中にtimezoneが繰り返し変更されました。');
+    });
 
 final surgeryRecordProvider = FutureProvider.family<SurgeryRecord?, String>((
   ref,

@@ -358,7 +358,7 @@ void main() {
     }
   });
 
-  test('painterは両modeのlayout tick位置を描画commandへ使い入力差を判定する', () {
+  test('drawing commandは両modeの線・marker・tick・label実座標をpainterへ渡す', () {
     final catalog = _catalog(3);
     final points = [
       for (final record in catalog)
@@ -366,25 +366,59 @@ void main() {
     ];
     for (final mode in AnalysisHorizontalAxisMode.values) {
       final layout = _layout(mode: mode, catalog: catalog, points: points);
-      final commands = trendChartHorizontalTickPaintCommands(layout);
-      expect(commands, hasLength(layout.horizontalTicks.length));
-      for (var index = 0; index < commands.length; index++) {
-        expect(commands[index].markStart.dx, layout.horizontalTicks[index].x);
-        expect(commands[index].markStart.dy, layout.plotBottom);
-        expect(commands[index].markEnd.dx, layout.horizontalTicks[index].x);
-        expect(commands[index].markEnd.dy, layout.plotBottom + 5);
+      final commands = trendChartPaintCommands(
+        layout: layout,
+        selectedRecordId: catalog[1].recordId,
+      );
+      expect(
+        commands.line!.vertices.map((vertex) => vertex.recordId),
+        points.map((point) => point.recordId),
+      );
+      expect(
+        commands.line!.vertices.map((vertex) => vertex.offset),
+        layout.points.map((point) => point.offset),
+      );
+      expect(commands.markers, hasLength(3));
+      final selected = commands.markers.singleWhere(
+        (marker) => marker.kind == TrendChartMarkerPaintKind.selected,
+      );
+      expect(selected.recordId, catalog[1].recordId);
+      expect(selected.center, layout.points[1].offset);
+      expect(selected.radius, 7);
+      expect(selected.ringWidth, 3);
+      final unselected = commands.markers.where(
+        (marker) => marker.kind == TrendChartMarkerPaintKind.unselected,
+      );
+      expect(unselected.map((marker) => marker.recordId), ['r0', 'r2']);
+      expect(unselected.every((marker) => marker.radius == 3.5), isTrue);
+      expect(
+        commands.horizontalTickMarks,
+        hasLength(layout.horizontalTicks.length),
+      );
+      expect(
+        commands.horizontalLabels,
+        hasLength(layout.horizontalTicks.length),
+      );
+      for (var index = 0; index < layout.horizontalTicks.length; index++) {
         expect(
-          commands[index].label,
+          commands.horizontalTickMarks[index].start,
+          Offset(layout.horizontalTicks[index].x, layout.plotBottom),
+        );
+        expect(
+          commands.horizontalTickMarks[index].end,
+          Offset(layout.horizontalTicks[index].x, layout.plotBottom + 5),
+        );
+        expect(
+          commands.horizontalLabels[index].text,
           layout.horizontalTicks[index].value.label,
         );
         expect(
-          commands[index].labelOrigin,
+          commands.horizontalLabels[index].origin,
           layout.horizontalTicks[index].labelBounds.topLeft,
         );
       }
 
       final painter = TrendChartPainter(
-        points: points,
         layout: layout,
         selectedRecordId: catalog[1].recordId,
         colorScheme: const ColorScheme.light(),
@@ -398,6 +432,214 @@ void main() {
       final picture = recorder.endRecording();
       addTearDown(picture.dispose);
     }
+  });
+
+  test('欠測を跨ぐ線と将来日の実座標・labelをcommandに残す', () {
+    final missingCatalog = _catalogForDates([
+      DateTime(2026, 8, 1),
+      DateTime(2026, 8, 5),
+      DateTime(2026, 8, 10),
+    ]);
+    final missingPoints = [
+      _point(missingCatalog[0], const Duration(seconds: 20)),
+      _point(missingCatalog[2], const Duration(seconds: 40)),
+    ];
+    final missingLayout = _layout(
+      mode: AnalysisHorizontalAxisMode.caseOrder,
+      catalog: missingCatalog,
+      points: missingPoints,
+    );
+    final missingCommands = trendChartPaintCommands(
+      layout: missingLayout,
+      selectedRecordId: missingCatalog[2].recordId,
+    );
+
+    expect(missingCommands.line!.vertices.map((vertex) => vertex.recordId), [
+      'r0',
+      'r2',
+    ]);
+    expect(
+      missingCommands.line!.vertices.map((vertex) => vertex.offset),
+      missingLayout.points.map((point) => point.offset),
+    );
+    expect(
+      missingCommands.line!.vertices.first.offset.dx,
+      missingLayout.plotLeft,
+    );
+    expect(
+      missingCommands.line!.vertices.last.offset.dx,
+      missingLayout.plotRight,
+    );
+
+    final futureCatalog = _catalogForDates([
+      DateTime(2026, 8, 27),
+      DateTime(2026, 8, 28),
+    ]);
+    final futureLayout = _layout(
+      mode: AnalysisHorizontalAxisMode.chronological,
+      catalog: futureCatalog,
+      points: [
+        _point(futureCatalog[0], const Duration(seconds: 20)),
+        _point(futureCatalog[1], const Duration(seconds: 30)),
+      ],
+      reference: const CalendarDay(2026, 8, 27),
+    );
+    final futureCommands = trendChartPaintCommands(
+      layout: futureLayout,
+      selectedRecordId: futureCatalog[1].recordId,
+    );
+
+    expect(
+      futureCommands.line!.vertices.last.offset.dx,
+      futureLayout.plotRight,
+    );
+    expect(
+      futureCommands.horizontalLabels.map((label) => label.text),
+      containsAll(['現在', '1日後']),
+    );
+  });
+
+  test('同日縦線・完全重複・高密度で線を保ち選択markerを必ず描く', () {
+    final sameDayCatalog = _catalogForDates([
+      DateTime(2026, 8, 1),
+      DateTime(2026, 8, 1),
+      DateTime(2026, 8, 1),
+    ]);
+    final sameDayLayout = _layout(
+      mode: AnalysisHorizontalAxisMode.chronological,
+      catalog: sameDayCatalog,
+      points: [
+        _point(sameDayCatalog[0], const Duration(seconds: 10)),
+        _point(sameDayCatalog[1], const Duration(seconds: 30)),
+        _point(sameDayCatalog[2], const Duration(seconds: 30)),
+      ],
+      reference: const CalendarDay(2026, 8, 1),
+    );
+    final sameDayCommands = trendChartPaintCommands(
+      layout: sameDayLayout,
+      selectedRecordId: sameDayCatalog[2].recordId,
+    );
+    final vertices = sameDayCommands.line!.vertices;
+
+    expect(vertices[0].offset.dx, vertices[1].offset.dx);
+    expect(vertices[0].offset.dy, isNot(vertices[1].offset.dy));
+    expect(vertices[1].offset, vertices[2].offset);
+    expect(sameDayCommands.markers.map((marker) => marker.recordId), [
+      'r0',
+      'r2',
+    ]);
+    expect(
+      sameDayCommands.markers.last.kind,
+      TrendChartMarkerPaintKind.selected,
+    );
+
+    final denseCatalog = _catalog(50);
+    final denseLayout = _layout(
+      mode: AnalysisHorizontalAxisMode.caseOrder,
+      catalog: denseCatalog,
+      points: [
+        for (final record in denseCatalog)
+          _point(record, const Duration(seconds: 20)),
+      ],
+    );
+    expect(denseLayout.points[10].markerVisible, isFalse);
+    final denseCommands = trendChartPaintCommands(
+      layout: denseLayout,
+      selectedRecordId: denseCatalog[10].recordId,
+    );
+
+    expect(denseCommands.line!.vertices, hasLength(50));
+    expect(denseCommands.markers.length, lessThan(50));
+    expect(
+      denseCommands.markers
+          .singleWhere((marker) => marker.recordId == denseCatalog[10].recordId)
+          .kind,
+      TrendChartMarkerPaintKind.selected,
+    );
+  });
+
+  test('1点と異なるplot rectangleをそれぞれのcommandに反映する', () {
+    final catalog = _catalog(1);
+    final point = _point(catalog.single, const Duration(seconds: 20));
+    for (final mode in AnalysisHorizontalAxisMode.values) {
+      final layout = _layout(mode: mode, catalog: catalog, points: [point]);
+      final commands = trendChartPaintCommands(
+        layout: layout,
+        selectedRecordId: point.recordId,
+      );
+      expect(commands.line, isNull);
+      expect(commands.markers, hasLength(1));
+      expect(commands.markers.single.center, layout.points.single.offset);
+      expect(commands.markers.single.kind, TrendChartMarkerPaintKind.selected);
+      expect(commands.horizontalTickMarks, isNotEmpty);
+      expect(commands.horizontalLabels, isNotEmpty);
+    }
+
+    final threeCatalog = _catalog(3);
+    final points = [
+      for (final record in threeCatalog)
+        _point(record, Duration(seconds: record.caseOrdinal * 10)),
+    ];
+    final compact = SurgeryTrendChartLayout.calculate(
+      width: 280,
+      height: 300,
+      points: points,
+      horizontalAxis: _axis(
+        AnalysisHorizontalAxisMode.caseOrder,
+        threeCatalog,
+        const CalendarDay(2028, 1, 1),
+      ),
+      measureText: (value) => Size(value.length * 8, 14),
+    );
+    final expanded = SurgeryTrendChartLayout.calculate(
+      width: 520,
+      height: 420,
+      points: points,
+      horizontalAxis: _axis(
+        AnalysisHorizontalAxisMode.caseOrder,
+        threeCatalog,
+        const CalendarDay(2028, 1, 1),
+      ),
+      measureText: (value) => Size(value.length * 12, 20),
+    );
+    final compactCommands = trendChartPaintCommands(
+      layout: compact,
+      selectedRecordId: 'r1',
+    );
+    final expandedCommands = trendChartPaintCommands(
+      layout: expanded,
+      selectedRecordId: 'r1',
+    );
+
+    expect(compact.plotRectangle, isNot(expanded.plotRectangle));
+    expect(
+      compactCommands.line!.vertices.last.offset,
+      compact.points.last.offset,
+    );
+    expect(
+      expandedCommands.line!.vertices.last.offset,
+      expanded.points.last.offset,
+    );
+    expect(
+      compactCommands.line!.vertices.last.offset,
+      isNot(expandedCommands.line!.vertices.last.offset),
+    );
+    expect(
+      compactCommands.horizontalLabels.first.origin,
+      compact.horizontalTicks.first.labelBounds.topLeft,
+    );
+    expect(
+      expandedCommands.horizontalLabels.first.origin,
+      expanded.horizontalTicks.first.labelBounds.topLeft,
+    );
+  });
+
+  test('shouldRepaintは同値だけを抑制し必要な全入力差を検知する', () {
+    final catalog = _catalog(3);
+    final points = [
+      for (final record in catalog)
+        _point(record, Duration(seconds: record.caseOrdinal * 10)),
+    ];
 
     final layout = _layout(
       mode: AnalysisHorizontalAxisMode.caseOrder,
@@ -405,7 +647,6 @@ void main() {
       points: points,
     );
     final painter = TrendChartPainter(
-      points: points,
       layout: layout,
       selectedRecordId: catalog[1].recordId,
       colorScheme: const ColorScheme.light(),
@@ -416,7 +657,6 @@ void main() {
     expect(
       painter.shouldRepaint(
         TrendChartPainter(
-          points: points,
           layout: layout,
           selectedRecordId: catalog[1].recordId,
           colorScheme: const ColorScheme.light(),
@@ -447,7 +687,6 @@ void main() {
     );
     expect(
       TrendChartPainter(
-        points: equivalentPoints,
         layout: equivalentLayout,
         selectedRecordId: catalog[1].recordId,
         colorScheme: const ColorScheme.light(),
@@ -460,7 +699,6 @@ void main() {
     );
     expect(
       TrendChartPainter(
-        points: points,
         layout: layout,
         selectedRecordId: catalog[2].recordId,
         colorScheme: const ColorScheme.light(),
@@ -470,6 +708,85 @@ void main() {
       ).shouldRepaint(painter),
       isTrue,
     );
+
+    final changedInputs = <TrendChartPainter>[
+      TrendChartPainter(
+        layout: layout,
+        selectedRecordId: catalog[1].recordId,
+        colorScheme: const ColorScheme.dark(),
+        textStyle: const TextStyle(fontSize: 12),
+        textScaler: TextScaler.noScaling,
+        textDirection: TextDirection.ltr,
+      ),
+      TrendChartPainter(
+        layout: layout,
+        selectedRecordId: catalog[1].recordId,
+        colorScheme: const ColorScheme.light(),
+        textStyle: const TextStyle(fontSize: 13),
+        textScaler: TextScaler.noScaling,
+        textDirection: TextDirection.ltr,
+      ),
+      TrendChartPainter(
+        layout: layout,
+        selectedRecordId: catalog[1].recordId,
+        colorScheme: const ColorScheme.light(),
+        textStyle: const TextStyle(fontSize: 12),
+        textScaler: const TextScaler.linear(2),
+        textDirection: TextDirection.ltr,
+      ),
+      TrendChartPainter(
+        layout: layout,
+        selectedRecordId: catalog[1].recordId,
+        colorScheme: const ColorScheme.light(),
+        textStyle: const TextStyle(fontSize: 12),
+        textScaler: TextScaler.noScaling,
+        textDirection: TextDirection.rtl,
+      ),
+      TrendChartPainter(
+        layout: SurgeryTrendChartLayout.calculate(
+          width: 420,
+          height: 340,
+          points: points,
+          horizontalAxis: _axis(
+            AnalysisHorizontalAxisMode.caseOrder,
+            catalog,
+            const CalendarDay(2028, 1, 1),
+          ),
+          measureText: (value) => Size(value.length * 8, 14),
+        ),
+        selectedRecordId: catalog[1].recordId,
+        colorScheme: const ColorScheme.light(),
+        textStyle: const TextStyle(fontSize: 12),
+        textScaler: TextScaler.noScaling,
+        textDirection: TextDirection.ltr,
+      ),
+      TrendChartPainter(
+        layout: _layout(
+          mode: AnalysisHorizontalAxisMode.chronological,
+          catalog: catalog,
+          points: points,
+        ),
+        selectedRecordId: catalog[1].recordId,
+        colorScheme: const ColorScheme.light(),
+        textStyle: const TextStyle(fontSize: 12),
+        textScaler: TextScaler.noScaling,
+        textDirection: TextDirection.ltr,
+      ),
+      TrendChartPainter(
+        layout: _layout(
+          mode: AnalysisHorizontalAxisMode.caseOrder,
+          catalog: catalog,
+          points: points,
+          reference: const CalendarDay(2029, 1, 1),
+        ),
+        selectedRecordId: catalog[1].recordId,
+        colorScheme: const ColorScheme.light(),
+        textStyle: const TextStyle(fontSize: 12),
+        textScaler: TextScaler.noScaling,
+        textDirection: TextDirection.ltr,
+      ),
+    ];
+    expect(changedInputs.every((next) => next.shouldRepaint(painter)), isTrue);
   });
 }
 

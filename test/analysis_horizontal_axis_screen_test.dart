@@ -208,6 +208,68 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('landscapeの左右notchとhome indicator内へcontrol・chartを収める', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(844, 390);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    const safeInsets = EdgeInsets.fromLTRB(44, 0, 44, 21);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          surgeryAnalysisProvider.overrideWith(
+            (ref) async => _snapshot([
+              DateTime(2026, 8, 1),
+              DateTime(2026, 8, 10),
+              DateTime(2026, 8, 20),
+            ]),
+          ),
+        ],
+        child: MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(844, 390),
+              devicePixelRatio: 1,
+              padding: safeInsets,
+              viewPadding: safeInsets,
+            ),
+            child: const AnalysisScreen(),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final content = tester.getRect(find.byKey(const Key('analysis-content')));
+    expect(content.left, 44);
+    expect(content.right, 800);
+    expect(content.bottom, 369);
+
+    for (final target in [
+      find.byKey(const Key('analysis-horizontal-axis-selector')),
+      find.byKey(const Key('analysis-horizontal-axis-help')),
+    ]) {
+      final rect = tester.getRect(target);
+      expect(rect.left, greaterThanOrEqualTo(44));
+      expect(rect.right, lessThanOrEqualTo(800));
+    }
+    final chart = find.byKey(const Key('analysis-chart-interaction'));
+    await tester.dragUntilVisible(
+      chart,
+      find.byKey(const Key('analysis-content')),
+      const Offset(0, -200),
+    );
+    await tester.pump();
+    final chartRect = tester.getRect(chart);
+    expect(chartRect.left, greaterThanOrEqualTo(44));
+    expect(chartRect.right, lessThanOrEqualTo(800));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('backgroundでclock監視を解除しresume直後の日付・timezone変更を反映する', (
     tester,
   ) async {

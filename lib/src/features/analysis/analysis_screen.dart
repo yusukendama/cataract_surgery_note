@@ -103,14 +103,17 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen>
           );
     return Scaffold(
       appBar: AppBar(title: const Text('分析')),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          AbsorbPointer(absorbing: _directJumpBusy, child: content),
-          if (_timezoneContextRefreshBusy)
-            const _AnalysisContextRefreshIndicator(),
-          if (_showDirectJumpBusy) const _DirectJumpBusyIndicator(),
-        ],
+      body: SafeArea(
+        top: false,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            AbsorbPointer(absorbing: _directJumpBusy, child: content),
+            if (_timezoneContextRefreshBusy)
+              const _AnalysisContextRefreshIndicator(),
+            if (_showDirectJumpBusy) const _DirectJumpBusyIndicator(),
+          ],
+        ),
       ),
     );
   }

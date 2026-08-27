@@ -98,13 +98,9 @@ void main() {
         onSelected: (point) => selected.add(point.recordId),
       );
 
-      final first = tester.getRect(find.byKey(const Key('analysis-point-r0')));
-      final middle = tester.getRect(find.byKey(const Key('analysis-point-r1')));
-      final last = tester.getRect(find.byKey(const Key('analysis-point-r2')));
-
-      await tester.tapAt(Offset(first.center.dx, first.top + 1));
-      await tester.tapAt(middle.center);
-      await tester.tapAt(Offset(last.center.dx, last.bottom - 1));
+      await tester.tapAt(_paintedPointCenter(tester, 'r0'));
+      await tester.tapAt(_paintedPointCenter(tester, 'r1'));
+      await tester.tapAt(_paintedPointCenter(tester, 'r2'));
       await tester.pump();
 
       expect(selected, ['r0', 'r1', 'r2']);
@@ -123,11 +119,11 @@ void main() {
         onSelected: (point) => selected.add(point.recordId),
       );
 
-      final target = find.byKey(const Key('analysis-point-r0'));
-      await tester.tap(target);
-      await tester.tap(target);
+      final target = _paintedPointCenter(tester, 'r0');
+      await tester.tapAt(target);
+      await tester.tapAt(target);
       await tester.pump();
-      await tester.longPress(target);
+      await tester.longPressAt(target);
       await tester.pump();
 
       expect(selected, ['r0', 'r0']);
@@ -192,7 +188,7 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(find.byKey(const Key('analysis-point-r10')));
+      await tester.tapAt(_paintedPointCenter(tester, 'r10'));
       await tester.pump();
 
       expect(selected, ['r10']);
@@ -212,10 +208,7 @@ void main() {
         onSelected: (point) => selected.add(point.recordId),
       );
 
-      final hiddenBand = tester.getRect(
-        find.byKey(const Key('analysis-point-r48')),
-      );
-      await tester.tapAt(hiddenBand.center);
+      await tester.tapAt(_paintedPointCenter(tester, 'r48'));
       await tester.pump();
 
       expect(selected, ['r48']);
@@ -330,7 +323,7 @@ void main() {
         onSelected: (point) => selected.add(point.recordId),
       );
 
-      await tester.tap(find.byKey(const Key('analysis-point-r1')));
+      await tester.tapAt(_paintedPointCenter(tester, 'r1'));
       await tester.pump();
       expect(selected, isEmpty);
 
@@ -373,7 +366,7 @@ void main() {
               .width,
           closeTo(288, 0.01),
         );
-        await tester.tap(find.byKey(const Key('analysis-point-r1')));
+        await tester.tapAt(_paintedPointCenter(tester, 'r1'));
         await tester.pump();
         expect(selected, ['r1']);
         expect(tester.takeException(), isNull);
@@ -407,7 +400,7 @@ void main() {
       );
       await tester.pump();
 
-      await tester.tap(find.byKey(const Key('analysis-point-r10')));
+      await tester.tapAt(_paintedPointCenter(tester, 'r10'));
       await tester.pump();
       width.value = 600;
       await tester.pump();
@@ -446,8 +439,34 @@ void main() {
         textScale: 2,
       );
 
-      expect(find.byKey(const Key('analysis-point-boundary')), findsOneWidget);
+      expect(
+        _trendPainter(tester).layout.points.single.point.recordId,
+        'boundary',
+      );
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('R=1000でもpoint別test widgetを生成せず単一canvasとSemanticsを保つ', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await _pumpChart(
+        tester,
+        points: _points(1000, sameDuration: true),
+        selectedRecordId: 'r999',
+      );
+
+      expect(_trendPainter(tester).layout.points, hasLength(1000));
+      expect(_analysisPointTestBoxes, findsNothing);
+      expect(_trendPaintFinder, findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('analysis-trend-adjustable')),
+          matching: find.byType(Semantics),
+        ),
+        findsOneWidget,
+      );
+      semantics.dispose();
     });
   });
 }
@@ -509,6 +528,31 @@ Future<void> _pumpChart(
     ),
   );
   await tester.pump();
+}
+
+Finder get _trendPaintFinder => find.descendant(
+  of: find.byType(SurgeryTrendChart),
+  matching: find.byWidgetPredicate(
+    (widget) => widget is CustomPaint && widget.painter is TrendChartPainter,
+  ),
+);
+
+Finder get _analysisPointTestBoxes => find.byWidgetPredicate((widget) {
+  final key = widget.key;
+  return key is ValueKey<String> && key.value.startsWith('analysis-point-');
+});
+
+TrendChartPainter _trendPainter(WidgetTester tester) {
+  return tester.widget<CustomPaint>(_trendPaintFinder).painter!
+      as TrendChartPainter;
+}
+
+Offset _paintedPointCenter(WidgetTester tester, String recordId) {
+  final painter = _trendPainter(tester);
+  final local = painter.layout.points
+      .singleWhere((point) => point.point.recordId == recordId)
+      .offset;
+  return tester.getTopLeft(_trendPaintFinder) + local;
 }
 
 class _InteractiveChart extends StatefulWidget {

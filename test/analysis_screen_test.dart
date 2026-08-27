@@ -533,11 +533,30 @@ void main() {
     await tester.tap(button);
   }
 
+  Finder trendPaintFinder() => find.descendant(
+    of: find.byType(SurgeryTrendChart),
+    matching: find.byWidgetPredicate(
+      (widget) => widget is CustomPaint && widget.painter is TrendChartPainter,
+    ),
+  );
+
+  TrendChartPainter trendPainter(WidgetTester tester) {
+    return tester.widget<CustomPaint>(trendPaintFinder()).painter!
+        as TrendChartPainter;
+  }
+
+  Offset analysisPointCenter(WidgetTester tester, String recordId) {
+    final local = trendPainter(tester).layout.points
+        .singleWhere((point) => point.point.recordId == recordId)
+        .offset;
+    return tester.getTopLeft(trendPaintFinder()) + local;
+  }
+
   Future<void> tapAnalysisPoint(WidgetTester tester, String recordId) async {
-    final point = find.byKey(Key('analysis-point-$recordId'));
-    await tester.ensureVisible(point);
+    final chart = find.byKey(const Key('analysis-chart-interaction'));
+    await tester.ensureVisible(chart);
     await tester.pump();
-    await tester.tapAt(tester.getCenter(point));
+    await tester.tapAt(analysisPointCenter(tester, recordId));
     await tester.pump();
   }
 
@@ -616,7 +635,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('あと1件記録すると推移を確認できます'), findsOneWidget);
-    expect(find.byKey(const Key('analysis-point-one')), findsOneWidget);
+    expect(trendPainter(tester).layout.points.single.point.recordId, 'one');
   });
 
   testWidgets('指標切り替えでグラフと比較サマリーを更新する', (tester) async {
@@ -744,9 +763,22 @@ void main() {
       ),
       findsNothing,
     );
-    // 最古と最新の両方が同時に描画されている（＝スクロール不要で全期間が見える）。
-    expect(find.byKey(const Key('analysis-point-c0')), findsOneWidget);
-    expect(find.byKey(const Key('analysis-point-c49')), findsOneWidget);
+    // 最古と最新の両方が同じplot rectangleへ描画されている。
+    final painter = trendPainter(tester);
+    expect(
+      painter.layout.points.map((point) => point.point.recordId),
+      containsAll(['c0', 'c49']),
+    );
+    expect(painter.layout.points.first.offset.dx, painter.layout.plotLeft);
+    expect(painter.layout.points.last.offset.dx, painter.layout.plotRight);
+    expect(
+      find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<String> &&
+            key.value.startsWith('analysis-point-');
+      }),
+      findsNothing,
+    );
 
     final chart = tester.getRect(find.byType(SurgeryTrendChart));
     final content = tester.getRect(find.byKey(const Key('analysis-content')));
@@ -817,14 +849,12 @@ void main() {
     final graph = find.byKey(const Key('analysis-chart-interaction'));
     await tester.ensureVisible(graph);
     await tester.pump();
-    final first = tester.getRect(find.byKey(const Key('analysis-point-c0')));
-    final middle = tester.getRect(find.byKey(const Key('analysis-point-c1')));
+    final first = analysisPointCenter(tester, 'c0');
+    final middle = analysisPointCenter(tester, 'c1');
     final graphRect = tester.getRect(graph);
 
     // 点や線から離れたaxis gutterでも、clamp後の最寄り点を選択する。
-    await tester.tapAt(
-      Offset((first.center.dx + middle.center.dx) / 2, graphRect.top + 1),
-    );
+    await tester.tapAt(Offset((first.dx + middle.dx) / 2, graphRect.top + 1));
     await tester.pumpAndSettle();
     await tester.drag(
       find.byKey(const Key('analysis-content')),
@@ -1426,10 +1456,7 @@ void main() {
     await selectCccMetric(tester);
     expectNoVideoAccess();
 
-    final middleBand = tester.getRect(
-      find.byKey(Key('analysis-point-${records[1].id}')),
-    );
-    await tester.tapAt(Offset(middleBand.center.dx, middleBand.top + 2));
+    await tester.tapAt(analysisPointCenter(tester, records[1].id));
     await tester.pump();
     expect(
       tester
@@ -2822,10 +2849,7 @@ void main() {
       find.byKey(const Key('analysis-metric-selector')),
       warnIfMissed: false,
     );
-    final secondBand = tester.getRect(
-      find.byKey(Key('analysis-point-${records.last.id}')),
-    );
-    await tester.tapAt(Offset(secondBand.center.dx, secondBand.top + 2));
+    await tester.tapAt(analysisPointCenter(tester, records.last.id));
     await tester.tap(
       find.byKey(const Key('analysis-select-previous')),
       warnIfMissed: false,

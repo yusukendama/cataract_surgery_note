@@ -111,39 +111,16 @@ class SurgeryTrendChart extends StatelessWidget {
                         layout: layout,
                         selectedRecordId: selectedRecordId,
                         onPointSelected: onPointSelected,
-                        child: Stack(
-                          children: [
-                            CustomPaint(
-                              size: Size(constraints.maxWidth, chartHeight),
-                              painter: TrendChartPainter(
-                                points: points,
-                                layout: layout,
-                                selectedRecordId: selectedPoint.recordId,
-                                colorScheme: Theme.of(context).colorScheme,
-                                textStyle: textStyle,
-                                textScaler: textScaler,
-                                textDirection: textDirection,
-                              ),
-                            ),
-                            for (final pointLayout in layout.points)
-                              Positioned(
-                                left: (pointLayout.offset.dx - 1)
-                                    .clamp(0.0, constraints.maxWidth - 2)
-                                    .toDouble(),
-                                top: (pointLayout.offset.dy - 1)
-                                    .clamp(0.0, chartHeight - 2)
-                                    .toDouble(),
-                                width: 2,
-                                height: 2,
-                                child: ColoredBox(
-                                  key: Key(
-                                    'analysis-point-'
-                                    '${pointLayout.point.recordId}',
-                                  ),
-                                  color: Colors.transparent,
-                                ),
-                              ),
-                          ],
+                        child: CustomPaint(
+                          size: Size(constraints.maxWidth, chartHeight),
+                          painter: TrendChartPainter(
+                            layout: layout,
+                            selectedRecordId: selectedPoint.recordId,
+                            colorScheme: Theme.of(context).colorScheme,
+                            textStyle: textStyle,
+                            textScaler: textScaler,
+                            textDirection: textDirection,
+                          ),
                         ),
                       ),
                     ),
@@ -344,52 +321,131 @@ class _ChartInteractionSurfaceState extends State<_ChartInteractionSurface> {
   }
 }
 
-class _DotStyle {
-  const _DotStyle({
+/// Deterministic drawing commands consumed directly by [TrendChartPainter].
+///
+/// Tests inspect the same commands that drive the canvas, avoiding a parallel
+/// reconstruction of line, marker, tick, or label geometry.
+final class TrendChartLineVertexPaintCommand {
+  const TrendChartLineVertexPaintCommand({
+    required this.recordId,
+    required this.offset,
+  });
+
+  final String recordId;
+  final Offset offset;
+}
+
+final class TrendChartLinePaintCommand {
+  TrendChartLinePaintCommand(List<TrendChartLineVertexPaintCommand> vertices)
+    : vertices = List.unmodifiable(vertices);
+
+  final List<TrendChartLineVertexPaintCommand> vertices;
+}
+
+enum TrendChartMarkerPaintKind { unselected, selected }
+
+final class TrendChartMarkerPaintCommand {
+  const TrendChartMarkerPaintCommand({
+    required this.recordId,
+    required this.center,
+    required this.kind,
     required this.radius,
     required this.ringWidth,
-    required this.fill,
   });
 
+  final String recordId;
+  final Offset center;
+  final TrendChartMarkerPaintKind kind;
   final double radius;
   final double ringWidth;
-  final Color fill;
 }
 
-/// Deterministic drawing seam for horizontal tick marks and labels.
-///
-/// The painter consumes these commands directly, while tests can verify that
-/// both axis modes paint at the exact x coordinates selected by the layout.
-final class TrendChartHorizontalTickPaintCommand {
-  const TrendChartHorizontalTickPaintCommand({
-    required this.markStart,
-    required this.markEnd,
-    required this.label,
-    required this.labelOrigin,
+final class TrendChartTickMarkPaintCommand {
+  const TrendChartTickMarkPaintCommand({
+    required this.start,
+    required this.end,
   });
 
-  final Offset markStart;
-  final Offset markEnd;
-  final String label;
-  final Offset labelOrigin;
+  final Offset start;
+  final Offset end;
 }
 
-List<TrendChartHorizontalTickPaintCommand>
-trendChartHorizontalTickPaintCommands(SurgeryTrendChartLayout layout) {
-  return List.unmodifiable([
-    for (final tick in layout.horizontalTicks)
-      TrendChartHorizontalTickPaintCommand(
-        markStart: Offset(tick.x, layout.plotBottom),
-        markEnd: Offset(tick.x, layout.plotBottom + 5),
-        label: tick.value.label,
-        labelOrigin: tick.labelBounds.topLeft,
+final class TrendChartLabelPaintCommand {
+  const TrendChartLabelPaintCommand({required this.text, required this.origin});
+
+  final String text;
+  final Offset origin;
+}
+
+final class TrendChartPaintCommands {
+  TrendChartPaintCommands({
+    required this.line,
+    required List<TrendChartMarkerPaintCommand> markers,
+    required List<TrendChartTickMarkPaintCommand> horizontalTickMarks,
+    required List<TrendChartLabelPaintCommand> horizontalLabels,
+  }) : markers = List.unmodifiable(markers),
+       horizontalTickMarks = List.unmodifiable(horizontalTickMarks),
+       horizontalLabels = List.unmodifiable(horizontalLabels);
+
+  final TrendChartLinePaintCommand? line;
+  final List<TrendChartMarkerPaintCommand> markers;
+  final List<TrendChartTickMarkPaintCommand> horizontalTickMarks;
+  final List<TrendChartLabelPaintCommand> horizontalLabels;
+}
+
+TrendChartPaintCommands trendChartPaintCommands({
+  required SurgeryTrendChartLayout layout,
+  required String? selectedRecordId,
+}) {
+  final line = layout.points.length <= 1
+      ? null
+      : TrendChartLinePaintCommand([
+          for (final pointLayout in layout.points)
+            TrendChartLineVertexPaintCommand(
+              recordId: pointLayout.point.recordId,
+              offset: pointLayout.offset,
+            ),
+        ]);
+  final markers = <TrendChartMarkerPaintCommand>[];
+  for (final pointLayout in layout.points) {
+    final selected = pointLayout.point.recordId == selectedRecordId;
+    if (!selected && !pointLayout.markerVisible) {
+      continue;
+    }
+    markers.add(
+      TrendChartMarkerPaintCommand(
+        recordId: pointLayout.point.recordId,
+        center: pointLayout.offset,
+        kind: selected
+            ? TrendChartMarkerPaintKind.selected
+            : TrendChartMarkerPaintKind.unselected,
+        radius: selected ? 7 : 3.5,
+        ringWidth: selected ? 3 : 1.5,
       ),
-  ]);
+    );
+  }
+  return TrendChartPaintCommands(
+    line: line,
+    markers: markers,
+    horizontalTickMarks: [
+      for (final tick in layout.horizontalTicks)
+        TrendChartTickMarkPaintCommand(
+          start: Offset(tick.x, layout.plotBottom),
+          end: Offset(tick.x, layout.plotBottom + 5),
+        ),
+    ],
+    horizontalLabels: [
+      for (final tick in layout.horizontalTicks)
+        TrendChartLabelPaintCommand(
+          text: tick.value.label,
+          origin: tick.labelBounds.topLeft,
+        ),
+    ],
+  );
 }
 
 class TrendChartPainter extends CustomPainter {
   const TrendChartPainter({
-    required this.points,
     required this.layout,
     required this.selectedRecordId,
     required this.colorScheme,
@@ -398,7 +454,6 @@ class TrendChartPainter extends CustomPainter {
     required this.textDirection,
   });
 
-  final List<SurgeryTrendPoint> points;
   final SurgeryTrendChartLayout layout;
   final String? selectedRecordId;
   final ColorScheme colorScheme;
@@ -408,10 +463,18 @@ class TrendChartPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final commands = trendChartPaintCommands(
+      layout: layout,
+      selectedRecordId: selectedRecordId,
+    );
     _paintGrid(canvas);
-    _paintLine(canvas);
-    _paintDots(canvas);
-    _paintHorizontalLabels(canvas);
+    _paintLine(canvas, commands.line);
+    _paintDots(canvas, commands.markers);
+    _paintHorizontalLabels(
+      canvas,
+      commands.horizontalTickMarks,
+      commands.horizontalLabels,
+    );
   }
 
   void _paintGrid(Canvas canvas) {
@@ -436,8 +499,8 @@ class TrendChartPainter extends CustomPainter {
     }
   }
 
-  void _paintLine(Canvas canvas) {
-    if (layout.points.length <= 1) {
+  void _paintLine(Canvas canvas, TrendChartLinePaintCommand? command) {
+    if (command == null) {
       return;
     }
     final linePaint = Paint()
@@ -447,8 +510,8 @@ class TrendChartPainter extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
     final path = Path();
-    for (var index = 0; index < layout.points.length; index++) {
-      final offset = layout.points[index].offset;
+    for (var index = 0; index < command.vertices.length; index++) {
+      final offset = command.vertices[index].offset;
       if (index == 0) {
         path.moveTo(offset.dx, offset.dy);
       } else {
@@ -458,47 +521,45 @@ class TrendChartPainter extends CustomPainter {
     canvas.drawPath(path, linePaint);
   }
 
-  void _paintDots(Canvas canvas) {
-    for (final pointLayout in layout.points) {
-      final selected = pointLayout.point.recordId == selectedRecordId;
-      if (!selected && !pointLayout.markerVisible) {
-        continue;
-      }
-      final style = selected
-          ? _DotStyle(
-              radius: 7,
-              ringWidth: 3,
-              fill: colorScheme.primaryContainer,
-            )
-          : _DotStyle(radius: 3.5, ringWidth: 1.5, fill: colorScheme.surface);
+  void _paintDots(Canvas canvas, List<TrendChartMarkerPaintCommand> commands) {
+    for (final command in commands) {
+      final selected = command.kind == TrendChartMarkerPaintKind.selected;
       canvas.drawCircle(
-        pointLayout.offset,
-        style.radius,
+        command.center,
+        command.radius,
         Paint()
-          ..color = style.fill
+          ..color = selected
+              ? colorScheme.primaryContainer
+              : colorScheme.surface
           ..style = PaintingStyle.fill,
       );
-      if (style.ringWidth > 0) {
+      if (command.ringWidth > 0) {
         canvas.drawCircle(
-          pointLayout.offset,
-          style.radius,
+          command.center,
+          command.radius,
           Paint()
             ..color = colorScheme.primary
-            ..strokeWidth = style.ringWidth
+            ..strokeWidth = command.ringWidth
             ..style = PaintingStyle.stroke,
         );
       }
     }
   }
 
-  void _paintHorizontalLabels(Canvas canvas) {
+  void _paintHorizontalLabels(
+    Canvas canvas,
+    List<TrendChartTickMarkPaintCommand> tickMarks,
+    List<TrendChartLabelPaintCommand> labels,
+  ) {
     final tickPaint = Paint()
       ..color = colorScheme.outline
       ..strokeWidth = 1.5;
-    for (final command in trendChartHorizontalTickPaintCommands(layout)) {
-      canvas.drawLine(command.markStart, command.markEnd, tickPaint);
-      final painter = _layoutText(command.label);
-      painter.paint(canvas, command.labelOrigin);
+    for (final command in tickMarks) {
+      canvas.drawLine(command.start, command.end, tickPaint);
+    }
+    for (final command in labels) {
+      final painter = _layoutText(command.text);
+      painter.paint(canvas, command.origin);
     }
   }
 
