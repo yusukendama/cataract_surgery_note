@@ -7,10 +7,8 @@ import 'package:intl/intl.dart';
 import '../../domain/duration_formatters.dart';
 import '../../domain/surgery_trend.dart';
 import 'date_label_layout.dart';
-import 'duration_axis_scale.dart';
+import 'duration_axis_layout.dart';
 
-const double _minimumChartHeight = 320;
-const double _minimumPlotWidth = 44;
 const double _minimumVisibleMarkerSpacing = 6;
 
 class SurgeryTrendChart extends StatelessWidget {
@@ -181,12 +179,11 @@ class SurgeryTrendChart extends StatelessWidget {
     required TextStyle textStyle,
     required ui.TextDirection textDirection,
   }) {
-    final sample = TextPainter(
-      text: TextSpan(text: '12/28', style: textStyle),
-      textDirection: textDirection,
+    return DurationAxisLayout.chartHeightFor(
+      textStyle: textStyle,
       textScaler: textScaler,
-    )..layout();
-    return math.max(_minimumChartHeight, 260 + sample.height * 4);
+      textDirection: textDirection,
+    );
   }
 }
 
@@ -232,11 +229,8 @@ class _ChartGeometry {
   const _ChartGeometry({
     required this.width,
     required this.height,
-    required this.durationAxis,
+    required this.durationAxisLayout,
     required this.pointCount,
-    required this.plotLeft,
-    required this.plotTop,
-    required this.plotBottomInset,
   });
 
   factory _ChartGeometry.fromPoints({
@@ -250,56 +244,33 @@ class _ChartGeometry {
     final maximumDuration = points
         .map((point) => point.duration)
         .reduce((current, next) => current > next ? current : next);
-    final durationAxis = DurationAxisScale.forMaximum(
+    final durationAxisLayout = DurationAxisLayout.calculate(
+      width: width,
+      height: height,
       step: points.first.step,
       maximumDuration: maximumDuration,
-    );
-    double textWidth(String value) {
-      final painter = TextPainter(
-        text: TextSpan(text: value, style: textStyle),
-        textDirection: textDirection,
-        textScaler: textScaler,
-      )..layout();
-      return painter.width;
-    }
-
-    final labelPainter = TextPainter(
-      text: TextSpan(text: '12/28', style: textStyle),
-      textDirection: textDirection,
+      textStyle: textStyle,
       textScaler: textScaler,
-    )..layout();
-    final labelHeight = labelPainter.height;
-    final widestAxisLabel = durationAxis.ticks
-        .map(durationAxis.labelFor)
-        .map(textWidth)
-        .fold<double>(0, math.max);
-    final plotRight = width - 24;
-    final maximumPlotLeft = math.max(0.0, plotRight - _minimumPlotWidth);
+      textDirection: textDirection,
+    );
     return _ChartGeometry(
       width: width,
       height: height,
-      durationAxis: durationAxis,
+      durationAxisLayout: durationAxisLayout,
       pointCount: points.length,
-      // Corrupt legacy durations can produce extremely long labels. Preserve
-      // a usable plot and let the painter clip the label instead
-      // of allowing label width to collapse or invert the plot.
-      plotLeft: math.min(math.max(56.0, widestAxisLabel + 16), maximumPlotLeft),
-      plotTop: math.max(16, labelHeight / 2 + 8),
-      plotBottomInset: math.max(42, labelHeight + 20),
     );
   }
 
   final double width;
   final double height;
-  final DurationAxisScale durationAxis;
+  final DurationAxisLayout durationAxisLayout;
   final int pointCount;
-  final double plotLeft;
-  final double plotTop;
-  final double plotBottomInset;
 
-  double get plotRight => width - 24;
-  double get plotBottom => height - plotBottomInset;
-  double get plotWidth => plotRight - plotLeft;
+  double get plotLeft => durationAxisLayout.plotLeft;
+  double get plotRight => durationAxisLayout.plotRight;
+  double get plotTop => durationAxisLayout.plotTop;
+  double get plotBottom => durationAxisLayout.plotBottom;
+  double get plotWidth => durationAxisLayout.plotWidth;
 
   /// 隣り合うデータ点の横方向の間隔。データ点や日付ラベルの簡略化は
   /// 症例数ではなくこの実ピクセル値で判定するため、端末幅にも追従する。
@@ -311,7 +282,7 @@ class _ChartGeometry {
       : plotLeft + plotWidth * index / (pointCount - 1);
 
   Offset offsetFor(int index, SurgeryTrendPoint point) {
-    final ratio = durationAxis.ratioFor(point.duration);
+    final ratio = durationAxisLayout.scale.ratioFor(point.duration);
     final y = plotBottom - (plotBottom - plotTop) * ratio;
     return Offset(xFor(index), y);
   }
@@ -329,23 +300,13 @@ class _ChartGeometry {
     return other is _ChartGeometry &&
         other.width == width &&
         other.height == height &&
-        other.durationAxis == durationAxis &&
-        other.pointCount == pointCount &&
-        other.plotLeft == plotLeft &&
-        other.plotTop == plotTop &&
-        other.plotBottomInset == plotBottomInset;
+        other.durationAxisLayout == durationAxisLayout &&
+        other.pointCount == pointCount;
   }
 
   @override
-  int get hashCode => Object.hash(
-    width,
-    height,
-    durationAxis,
-    pointCount,
-    plotLeft,
-    plotTop,
-    plotBottomInset,
-  );
+  int get hashCode =>
+      Object.hash(width, height, durationAxisLayout, pointCount);
 }
 
 enum _TextAnchor { start, center, end }
@@ -395,23 +356,13 @@ class _TrendChartPainter extends CustomPainter {
       // opaque outline role instead of the decorative outlineVariant role.
       ..color = colorScheme.outline
       ..strokeWidth = 1;
-    for (final tick in geometry.durationAxis.ticks) {
-      final ratio = geometry.durationAxis.ratioFor(tick);
-      final y =
-          geometry.plotBottom -
-          (geometry.plotBottom - geometry.plotTop) * ratio;
+    for (final tick in geometry.durationAxisLayout.ticks) {
       canvas.drawLine(
-        Offset(geometry.plotLeft, y),
-        Offset(geometry.plotRight, y),
+        Offset(geometry.plotLeft, tick.y),
+        Offset(geometry.plotRight, tick.y),
         gridPaint,
       );
-      _paintText(
-        canvas,
-        geometry.durationAxis.labelFor(tick),
-        Offset(geometry.plotLeft - 8, y),
-        anchor: _TextAnchor.end,
-        centerVertically: true,
-      );
+      _layoutText(tick.label).paint(canvas, tick.labelBounds.topLeft);
     }
   }
 

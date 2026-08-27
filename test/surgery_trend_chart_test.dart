@@ -3,6 +3,7 @@ import 'dart:ui' show SemanticsAction;
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_trend.dart';
 import 'package:cataract_surgery_note/src/features/analysis/date_label_layout.dart';
+import 'package:cataract_surgery_note/src/features/analysis/duration_axis_layout.dart';
 import 'package:cataract_surgery_note/src/features/analysis/surgery_trend_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -88,7 +89,269 @@ void main() {
     });
   });
 
+  group('DurationAxisLayout', () {
+    test('表示可能数はP/(H+4)の直前・一致・直後でfloorして2〜12に収める', () {
+      const labelHeight = 16.0;
+
+      expect(
+        calculateDurationAxisTickCapacity(
+          plotHeight: 39.999,
+          labelHeight: labelHeight,
+        ),
+        2,
+      );
+      expect(
+        calculateDurationAxisTickCapacity(
+          plotHeight: 40,
+          labelHeight: labelHeight,
+        ),
+        3,
+      );
+      expect(
+        calculateDurationAxisTickCapacity(
+          plotHeight: 40.001,
+          labelHeight: labelHeight,
+        ),
+        3,
+      );
+      expect(
+        calculateDurationAxisTickCapacity(
+          plotHeight: 0,
+          labelHeight: labelHeight,
+        ),
+        2,
+      );
+      expect(
+        calculateDurationAxisTickCapacity(
+          plotHeight: 10000,
+          labelHeight: labelHeight,
+        ),
+        12,
+      );
+    });
+
+    test('表示可能数計算は非有限値と不正な高さを拒否する', () {
+      expect(
+        () => calculateDurationAxisTickCapacity(
+          plotHeight: double.infinity,
+          labelHeight: 16,
+        ),
+        throwsArgumentError,
+      );
+      expect(
+        () =>
+            calculateDurationAxisTickCapacity(plotHeight: 100, labelHeight: 0),
+        throwsArgumentError,
+      );
+    });
+
+    testWidgets('制御済みgeometryの13分42秒は偶数分の描画commandだけを生成する', (tester) async {
+      final layout = _durationLayout(
+        maximumDuration: const Duration(minutes: 13, seconds: 42),
+        height: 400,
+      );
+
+      expect(layout.maximumTickCount, 12);
+      expect(layout.scale.interval, const Duration(minutes: 2));
+      expect(layout.scale.maximum, const Duration(minutes: 14));
+      expect(layout.ticks.map((tick) => tick.label), [
+        '0分',
+        '2分',
+        '4分',
+        '6分',
+        '8分',
+        '10分',
+        '12分',
+        '14分',
+      ]);
+      expect(layout.ticks.map((tick) => tick.tick), [
+        for (var minute = 0; minute <= 14; minute += 2)
+          Duration(minutes: minute),
+      ]);
+      _expectDurationLabelsFit(layout, canvasHeight: 400);
+    });
+
+    testWidgets('狭いplot高さでは目盛りを抜かず軸全体を5分刻みへ切り替える', (tester) async {
+      final layout = _durationLayout(
+        maximumDuration: const Duration(minutes: 13, seconds: 42),
+        height: 150,
+      );
+
+      expect(layout.maximumTickCount, lessThan(8));
+      expect(layout.scale.interval, const Duration(minutes: 5));
+      expect(layout.ticks.map((tick) => tick.label), [
+        '0分',
+        '5分',
+        '10分',
+        '15分',
+      ]);
+      _expectDurationLabelsFit(layout, canvasHeight: 150);
+    });
+
+    testWidgets('文字倍率1と2でラベル間に4px以上を確保し上下をclipしない', (tester) async {
+      const maximum = Duration(minutes: 13, seconds: 42);
+      for (final textScale in [1.0, 2.0]) {
+        final scaler = TextScaler.linear(textScale);
+        final height = DurationAxisLayout.chartHeightFor(
+          textStyle: _axisTextStyle,
+          textScaler: scaler,
+          textDirection: TextDirection.ltr,
+        );
+        final layout = _durationLayout(
+          maximumDuration: maximum,
+          height: height,
+          textScaler: scaler,
+        );
+
+        expect(
+          layout.plotHeight,
+          greaterThanOrEqualTo(
+            layout.labelHeight + durationAxisMinimumLabelGap,
+          ),
+        );
+        _expectDurationLabelsFit(layout, canvasHeight: height);
+      }
+    });
+
+    testWidgets('必須viewport幅と文字倍率でplotを反転させず通常ラベルを省略しない', (tester) async {
+      const chartWidths = <double>[
+        288, // 320 phone / compact Split Viewから左右paddingを除いた幅
+        398, // 430 phone
+        536, // 568 phone landscape
+        736, // 768 iPad portrait
+        900, // 932 phone landscape
+        992, // 1024 iPad landscape
+      ];
+      for (final textScale in [1.0, 2.0]) {
+        final scaler = TextScaler.linear(textScale);
+        final height = DurationAxisLayout.chartHeightFor(
+          textStyle: _axisTextStyle,
+          textScaler: scaler,
+          textDirection: TextDirection.ltr,
+        );
+        for (final width in chartWidths) {
+          final layout = _durationLayout(
+            maximumDuration: const Duration(minutes: 13, seconds: 42),
+            width: width,
+            height: height,
+            textScaler: scaler,
+          );
+
+          expect(layout.plotWidth, greaterThanOrEqualTo(44));
+          expect(layout.ticks, hasLength(layout.scale.ticks.length));
+          expect(
+            layout.ticks.every((tick) => tick.labelBounds.left >= 0),
+            isTrue,
+            reason: 'width=$width, textScale=$textScale',
+          );
+          _expectDurationLabelsFit(layout, canvasHeight: height);
+        }
+      }
+    });
+
+    testWidgets('表現上限値でも全座標を有限にし44pxのplotを維持する', (tester) async {
+      final scaler = TextScaler.linear(2);
+      final height = DurationAxisLayout.chartHeightFor(
+        textStyle: _axisTextStyle,
+        textScaler: scaler,
+        textDirection: TextDirection.ltr,
+      );
+      final layout = _durationLayout(
+        maximumDuration: const Duration(microseconds: 9223372036854775807),
+        width: 288,
+        height: height,
+        textScaler: scaler,
+      );
+
+      expect(layout.scale.isAtRepresentationLimit, isTrue);
+      expect(layout.plotWidth, greaterThanOrEqualTo(44));
+      expect(layout.plotTop.isFinite, isTrue);
+      expect(layout.plotBottom.isFinite, isTrue);
+      expect(layout.ticks.every((tick) => tick.y.isFinite), isTrue);
+      expect(
+        layout.ticks.every(
+          (tick) =>
+              tick.labelBounds.left.isFinite &&
+              tick.labelBounds.top.isFinite &&
+              tick.labelBounds.right.isFinite &&
+              tick.labelBounds.bottom.isFinite,
+        ),
+        isTrue,
+      );
+      _expectDurationLabelsFit(layout, canvasHeight: height);
+    });
+
+    testWidgets('文字倍率・高さ・最大値の変更後は軸を決定し直す', (tester) async {
+      final regular = _durationLayout(
+        maximumDuration: const Duration(minutes: 13, seconds: 42),
+        height: 400,
+      );
+      final constrained = _durationLayout(
+        maximumDuration: const Duration(minutes: 13, seconds: 42),
+        height: 150,
+      );
+      final scaled = _durationLayout(
+        maximumDuration: const Duration(minutes: 13, seconds: 42),
+        height: 400,
+        textScaler: TextScaler.linear(2),
+      );
+      final changedData = _durationLayout(
+        maximumDuration: const Duration(minutes: 4, seconds: 12),
+        height: 400,
+      );
+
+      expect(regular.scale.interval, const Duration(minutes: 2));
+      expect(constrained.scale.interval, const Duration(minutes: 5));
+      expect(scaled.labelHeight, greaterThan(regular.labelHeight));
+      expect(changedData.scale.interval, const Duration(minutes: 1));
+      expect(changedData.ticks.map((tick) => tick.label), [
+        '0分',
+        '1分',
+        '2分',
+        '3分',
+        '4分',
+        '5分',
+      ]);
+    });
+  });
+
   group('SurgeryTrendChart', () {
+    testWidgets('核処理13分42秒を文字倍率1/2・Light/Darkで描画し正確な値を読み上げる', (tester) async {
+      final semantics = tester.ensureSemantics();
+      final points = _pointsWithDurations(const [
+        Duration(minutes: 13),
+        Duration(minutes: 13, seconds: 42),
+      ]);
+
+      for (final themeMode in [ThemeMode.light, ThemeMode.dark]) {
+        for (final textScale in [1.0, 2.0]) {
+          await _pumpChart(
+            tester,
+            points: points,
+            selectedRecordId: 'r1',
+            width: 288,
+            textScale: textScale,
+            themeMode: themeMode,
+          );
+
+          expect(
+            find.descendant(
+              of: find.byType(SurgeryTrendChart),
+              matching: find.byType(CustomPaint),
+            ),
+            findsOneWidget,
+          );
+          final graph = tester.getSemantics(
+            find.byKey(const Key('analysis-trend-adjustable')),
+          );
+          expect(graph.value, contains('核処理'));
+          expect(graph.value, contains('13分42秒'));
+          expect(tester.takeException(), isNull);
+        }
+      }
+      semantics.dispose();
+    });
+
     testWidgets('点・線・空白を含む全高帯は症例選択だけを行う', (tester) async {
       final selected = <String>[];
       await _pumpChart(
@@ -419,6 +682,47 @@ void main() {
   });
 }
 
+const _axisTextStyle = TextStyle(fontSize: 12);
+
+DurationAxisLayout _durationLayout({
+  required Duration maximumDuration,
+  required double height,
+  double width = 360,
+  TextScaler textScaler = TextScaler.noScaling,
+}) {
+  return DurationAxisLayout.calculate(
+    width: width,
+    height: height,
+    step: SurgicalStep.nucleusRemoval,
+    maximumDuration: maximumDuration,
+    textStyle: _axisTextStyle,
+    textScaler: textScaler,
+    textDirection: TextDirection.ltr,
+  );
+}
+
+void _expectDurationLabelsFit(
+  DurationAxisLayout layout, {
+  required double canvasHeight,
+}) {
+  expect(layout.ticks, isNotEmpty);
+  expect(
+    layout.ticks.first.labelBounds.bottom,
+    lessThanOrEqualTo(canvasHeight),
+  );
+  expect(layout.ticks.last.labelBounds.top, greaterThanOrEqualTo(0));
+  expect(layout.ticks.length, lessThanOrEqualTo(layout.maximumTickCount));
+  for (var index = 1; index < layout.ticks.length; index++) {
+    final lowerLabel = layout.ticks[index - 1].labelBounds;
+    final upperLabel = layout.ticks[index].labelBounds;
+    expect(
+      lowerLabel.top - upperLabel.bottom,
+      greaterThanOrEqualTo(durationAxisMinimumLabelGap - 0.001),
+      reason: '${layout.ticks[index - 1].label} / ${layout.ticks[index].label}',
+    );
+  }
+}
+
 List<SurgeryTrendPoint> _points(
   int count, {
   SurgicalStep step = SurgicalStep.capsulorhexis,
@@ -433,6 +737,20 @@ List<SurgeryTrendPoint> _points(
         eyeSide: index.isEven ? EyeSide.right : EyeSide.left,
         step: step,
         duration: Duration(seconds: sameDuration ? 60 : 60 + index),
+      ),
+  ];
+}
+
+List<SurgeryTrendPoint> _pointsWithDurations(List<Duration> durations) {
+  return [
+    for (var index = 0; index < durations.length; index++)
+      SurgeryTrendPoint(
+        recordId: 'r$index',
+        surgeryDate: DateTime(2026, 1, 1).add(Duration(days: index)),
+        createdAt: DateTime(2026, 1, 1).add(Duration(days: index)),
+        eyeSide: index.isEven ? EyeSide.right : EyeSide.left,
+        step: SurgicalStep.nucleusRemoval,
+        duration: durations[index],
       ),
   ];
 }
