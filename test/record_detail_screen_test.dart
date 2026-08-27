@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:ui' show SemanticsAction;
+import 'dart:ui' show SemanticsAction, Tristate;
 
 import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/providers.dart';
@@ -1209,5 +1209,398 @@ void main() {
 
     expect(find.text('工程 1/10'), findsOneWidget);
     expect(find.text('総手術時間：12分34秒'), findsOneWidget);
+  });
+
+  testWidgets('工程別時間は初期折りたたみで展開しても不足行を作らない', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final semantics = tester.ensureSemantics();
+    final before = await tester.runAsync(() async {
+      return database
+          .customSelect('SELECT * FROM surgical_step_reviews ORDER BY id')
+          .get();
+    });
+
+    await pumpScreen(tester, database, record.id);
+
+    final toggle = find.byKey(const Key('procedure-times-expansion-toggle'));
+    expect(toggle, findsOneWidget);
+    expect(find.byKey(const Key('procedure-times-list')), findsNothing);
+    expect(
+      tester.getSemantics(toggle).getSemanticsData().flagsCollection.isExpanded,
+      isNot(Tristate.isTrue),
+    );
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('procedure-times-list')), findsOneWidget);
+    expect(
+      tester.getSemantics(toggle).getSemanticsData().flagsCollection.isExpanded,
+      Tristate.isTrue,
+    );
+    for (final step in activeIndividualSurgicalSteps) {
+      expect(
+        find.byKey(ValueKey('procedure-time-row-${step.name}')),
+        findsOneWidget,
+      );
+    }
+    expect(
+      find.byKey(const ValueKey('procedure-time-row-totalSurgeryTime')),
+      findsNothing,
+    );
+    expect(find.text('開始まで：未登録'), findsNWidgets(10));
+
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+    final after = await tester.runAsync(() async {
+      return database
+          .customSelect('SELECT * FROM surgical_step_reviews ORDER BY id')
+          .get();
+    });
+    expect(
+      after!.map((row) => row.data).toList(),
+      before!.map((row) => row.data).toList(),
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('10工程の所要時間と到達時間を状態別に表示する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final semantics = tester.ensureSemantics();
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      final reviews = await repository.ensureStepReviews(record.id);
+      String idFor(SurgicalStep step) =>
+          reviews.singleWhere((review) => review.step == step).id;
+      Future<void> set(
+        SurgicalStep step, {
+        int? start,
+        int? end,
+        bool skipped = false,
+      }) {
+        return database.customStatement(
+          '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?, is_skipped = ?
+WHERE id = ?
+''',
+          <Object?>[start, end, skipped ? 1 : 0, idFor(step)],
+        );
+      }
+
+      await set(SurgicalStep.totalSurgeryTime, start: 30000, end: 500000);
+      await set(SurgicalStep.sidePortCreation, start: 45000, end: 75000);
+      await set(SurgicalStep.ovdInjection, start: 80000);
+      await set(SurgicalStep.capsulorhexis, skipped: true);
+      await set(SurgicalStep.nucleusRemoval, start: 20000, end: 25000);
+      await set(
+        SurgicalStep.corticalIrrigationAspiration,
+        start: 500001,
+        end: 510000,
+      );
+      await set(SurgicalStep.iolInsertion, end: 200000);
+      await set(
+        SurgicalStep.ovdRemovalIrrigationAspiration,
+        start: 250000,
+        end: 250000,
+      );
+      await set(
+        SurgicalStep.woundClosureAndPressureAdjustment,
+        start: 300000,
+        end: 290000,
+      );
+    });
+
+    await pumpScreen(tester, database, record.id);
+    await tester.tap(find.byKey(const Key('procedure-times-expansion-toggle')));
+    await tester.pumpAndSettle();
+
+    Finder row(SurgicalStep step) =>
+        find.byKey(ValueKey('procedure-time-row-${step.name}'));
+    Finder textIn(SurgicalStep step, String text) =>
+        find.descendant(of: row(step), matching: find.text(text));
+
+    expect(textIn(SurgicalStep.sidePortCreation, '所要時間：30秒'), findsOneWidget);
+    expect(textIn(SurgicalStep.sidePortCreation, '開始まで：15秒'), findsOneWidget);
+    expect(
+      tester.getSemantics(row(SurgicalStep.sidePortCreation)).label,
+      'サイドポート作成。手術開始から15秒で開始。所要時間30秒。',
+    );
+    expect(textIn(SurgicalStep.ovdInjection, '所要時間：計測中'), findsOneWidget);
+    expect(textIn(SurgicalStep.ovdInjection, '開始まで：50秒'), findsOneWidget);
+    expect(textIn(SurgicalStep.capsulorhexis, '所要時間：時間記録なし'), findsOneWidget);
+    expect(textIn(SurgicalStep.capsulorhexis, '開始まで：時間記録なし'), findsOneWidget);
+    expect(textIn(SurgicalStep.mainPortCreation, '開始まで：未登録'), findsOneWidget);
+    expect(textIn(SurgicalStep.nucleusRemoval, '開始まで：要確認'), findsOneWidget);
+    expect(
+      textIn(SurgicalStep.nucleusRemoval, '工程開始位置を確認してください'),
+      findsOneWidget,
+    );
+    expect(
+      textIn(SurgicalStep.corticalIrrigationAspiration, '開始まで：要確認'),
+      findsOneWidget,
+    );
+    expect(textIn(SurgicalStep.iolInsertion, '所要時間：要再設定'), findsOneWidget);
+    expect(textIn(SurgicalStep.iolInsertion, '開始まで：要確認'), findsOneWidget);
+    expect(
+      textIn(SurgicalStep.ovdRemovalIrrigationAspiration, '所要時間：要再設定'),
+      findsOneWidget,
+    );
+    expect(
+      textIn(SurgicalStep.ovdRemovalIrrigationAspiration, '開始まで：3分40秒'),
+      findsOneWidget,
+    );
+    expect(
+      textIn(SurgicalStep.woundClosureAndPressureAdjustment, '所要時間：要再設定'),
+      findsOneWidget,
+    );
+    expect(
+      textIn(SurgicalStep.woundClosureAndPressureAdjustment, '開始まで：4分30秒'),
+      findsOneWidget,
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('総手術開始未登録の説明を一覧近傍へ一度だけ表示する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      final ccc = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?
+WHERE id = ?
+''',
+        <Object?>[250000, 300000, ccc!.id],
+      );
+    });
+
+    await pumpScreen(tester, database, record.id);
+    await tester.tap(find.byKey(const Key('procedure-times-expansion-toggle')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('開始まで：—'), findsOneWidget);
+    expect(find.text('「総手術時間」の開始位置を登録すると「開始まで」が表示されます。'), findsOneWidget);
+    expect(find.text('開始まで：未登録'), findsNWidgets(9));
+  });
+
+  testWidgets('snapshot失敗を工程カード内へ分離し再試行で一覧へ復帰する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    var attempts = 0;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appDatabaseProvider.overrideWith((ref) => database),
+          recordProcedureTimingSnapshotProvider(record.id).overrideWith((
+            ref,
+          ) async {
+            attempts++;
+            if (attempts == 1) {
+              throw StateError('fixture read failure');
+            }
+            return repository.fetchRecordProcedureTimingSnapshot(record.id);
+          }),
+        ],
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('procedure-times-expansion-toggle')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('工程別時間を読み込めませんでした。'), findsOneWidget);
+    expect(find.textContaining('総手術時間：'), findsOneWidget);
+    expect(find.text('工程記録を開く'), findsOneWidget);
+
+    final retry = find.byKey(const Key('procedure-times-retry'));
+    await tester.ensureVisible(retry);
+    await tester.pumpAndSettle();
+    await tester.tap(retry);
+    await tester.pumpAndSettle();
+
+    expect(attempts, 2);
+    expect(find.byKey(const Key('procedure-times-list')), findsOneWidget);
+    expect(find.text('工程別時間を読み込めませんでした。'), findsNothing);
+  });
+
+  testWidgets('snapshot再読込中は古い到達時間を隠してloadingを表示する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final repository = SurgeryRepository(database);
+    await tester.runAsync(() async {
+      final total = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+      final ccc = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?
+WHERE id = ?
+''',
+        <Object?>[30000, 500000, total.id],
+      );
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?
+WHERE id = ?
+''',
+        <Object?>[250000, 300000, ccc.id],
+      );
+    });
+
+    final pendingRefresh = Completer<RecordProcedureTimingSnapshot>();
+    var attempts = 0;
+    final container = ProviderContainer(
+      overrides: [
+        appDatabaseProvider.overrideWith((ref) => database),
+        recordProcedureTimingSnapshotProvider(record.id).overrideWith((ref) {
+          attempts++;
+          if (attempts == 1) {
+            return repository.fetchRecordProcedureTimingSnapshot(record.id);
+          }
+          return pendingRefresh.future;
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(home: RecordDetailScreen(recordId: record.id)),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('procedure-times-expansion-toggle')));
+    await tester.pumpAndSettle();
+    expect(find.text('開始まで：3分40秒'), findsOneWidget);
+
+    late RecordProcedureTimingSnapshot refreshedSnapshot;
+    await tester.runAsync(() async {
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = NULL, end_milliseconds = NULL
+WHERE surgery_record_id = ?
+''',
+        <Object?>[record.id],
+      );
+      refreshedSnapshot = await repository.fetchRecordProcedureTimingSnapshot(
+        record.id,
+      );
+    });
+    container.invalidate(recordProcedureTimingSnapshotProvider(record.id));
+    await tester.pump();
+
+    expect(attempts, 2);
+    expect(find.text('工程別時間を読み込んでいます…'), findsOneWidget);
+    expect(find.byKey(const Key('procedure-times-list')), findsNothing);
+    expect(find.text('開始まで：3分40秒'), findsNothing);
+
+    pendingRefresh.complete(refreshedSnapshot);
+    await tester.pumpAndSettle();
+    expect(find.text('工程別時間を読み込んでいます…'), findsNothing);
+    expect(find.byKey(const Key('procedure-times-list')), findsOneWidget);
+    expect(find.text('開始まで：未登録'), findsNWidgets(10));
+  });
+
+  testWidgets('動画実体なしでも保存位置だけから到達時間を表示する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      final total = await repository.ensureStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.totalSurgeryTime,
+      );
+      final ccc = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+      await database.customStatement(
+        'UPDATE surgical_step_reviews SET start_milliseconds = ? WHERE id = ?',
+        <Object?>[30000, total.id],
+      );
+      await database.customStatement(
+        'UPDATE surgical_step_reviews SET start_milliseconds = ? WHERE id = ?',
+        <Object?>[250000, ccc!.id],
+      );
+    });
+
+    await pumpScreen(
+      tester,
+      database,
+      record.id,
+      videoState: const RecordVideoState(RecordVideoStateKind.missing),
+    );
+    await tester.tap(find.byKey(const Key('procedure-times-expansion-toggle')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('動画の実体が見つかりません'), findsOneWidget);
+    expect(find.text('開始まで：3分40秒'), findsOneWidget);
+  });
+
+  testWidgets('320x568・文字倍率2.0で最長工程と既存導線へスクロール到達できる', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [appDatabaseProvider.overrideWith((ref) => database)],
+        child: MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(
+              size: Size(320, 568),
+              textScaler: TextScaler.linear(2),
+            ),
+            child: RecordDetailScreen(recordId: record.id),
+          ),
+        ),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pumpAndSettle();
+    final list = find.byType(ListView);
+    final scrollable = tester.state<ScrollableState>(
+      find.descendant(of: list, matching: find.byType(Scrollable)),
+    );
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    await tester.pumpAndSettle();
+    final toggle = find.byKey(const Key('procedure-times-expansion-toggle'));
+    expect(toggle, findsOneWidget);
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+
+    final longest = find.text('I/A（粘弾性物質除去）');
+    await tester.ensureVisible(longest);
+    await tester.pumpAndSettle();
+    expect(longest, findsOneWidget);
+    final reviewButton = find.text('工程記録を開く');
+    await tester.ensureVisible(reviewButton);
+    await tester.pumpAndSettle();
+
+    expect(reviewButton, findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

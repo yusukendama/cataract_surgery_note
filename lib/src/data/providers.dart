@@ -103,6 +103,16 @@ final surgeryRecordProgressProvider =
           .fetchRecordProgressSnapshots();
     });
 
+final recordProcedureTimingSnapshotProvider =
+    FutureProvider.family<RecordProcedureTimingSnapshot, String>((
+      ref,
+      recordId,
+    ) {
+      return ref
+          .watch(surgeryRepositoryProvider)
+          .fetchRecordProcedureTimingSnapshot(recordId);
+    });
+
 final surgeryAnalysisProvider =
     FutureProvider.autoDispose<SurgeryAnalysisSnapshot>((ref) async {
       final repository = ref.watch(surgeryRepositoryProvider);

@@ -12,10 +12,12 @@ import '../../data/record_mutation_coordinator.dart';
 import '../../data/record_video_service.dart';
 import '../../data/video_import_models.dart';
 import '../../domain/duration_formatters.dart';
+import '../../domain/procedure_arrival_time.dart';
 import '../../domain/surgery_models.dart';
 import '../../domain/video_seek_coordinator.dart';
 import '../../widgets/app_confirm_dialog.dart';
 import '../../widgets/app_snack_bar.dart';
+import '../../widgets/procedure_arrival_time_view.dart';
 import '../../widgets/video_surface.dart';
 import '../video_import/video_import_screen_flow.dart';
 import '../video_import/video_import_ui_flow.dart';
@@ -1280,6 +1282,8 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
 
   Widget _buildBody(SurgeryRecord record, List<SurgicalStepReview> reviews) {
     final byStep = {for (final review in reviews) review.step: review};
+    final totalSurgeryReview = byStep[SurgicalStep.totalSurgeryTime];
+    const arrivalCalculator = ProcedureArrivalTimeCalculator();
     final hasRefreshError =
         _recordRefreshError != null || _reviewsRefreshError != null;
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
@@ -1381,6 +1385,11 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
                                   ProcedureTimingCard(
                                     step: step,
                                     timing: byStep[step]!,
+                                    arrivalTime: arrivalCalculator.calculate(
+                                      step: step,
+                                      stepReview: byStep[step],
+                                      totalSurgeryReview: totalSurgeryReview,
+                                    ),
                                     isSaving: _savingStep == step,
                                     videoUnavailableReason:
                                         _timingUnavailableReason(),
@@ -3007,7 +3016,11 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
       if (clearsTimings) {
         _latestReviews = [
           for (final review in _latestReviews ?? const <SurgicalStepReview>[])
-            review.copyWith(clearStart: true, clearEnd: true),
+            review.copyWith(
+              clearStart: true,
+              clearEnd: true,
+              isSkipped: review.recordingStatus == StepRecordingStatus.skipped,
+            ),
         ];
       }
       _markCommittedRefreshPending();
@@ -3473,6 +3486,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
 
   void _invalidateReviewData() {
     ref.invalidate(stepReviewsProvider(widget.recordId));
+    ref.invalidate(recordProcedureTimingSnapshotProvider(widget.recordId));
     ref.invalidate(surgeryRecordProvider(widget.recordId));
     ref.invalidate(surgeryRecordsProvider);
     ref.invalidate(surgeryRecordProgressProvider);
@@ -3488,6 +3502,7 @@ class _StepReviewScreenState extends ConsumerState<StepReviewScreen>
   void _refreshAll() {
     _startVideoResolutionListener();
     ref.invalidate(stepReviewsProvider(widget.recordId));
+    ref.invalidate(recordProcedureTimingSnapshotProvider(widget.recordId));
     ref.invalidate(surgeryRecordProvider(widget.recordId));
     ref.invalidate(surgeryRecordsProvider);
     ref.invalidate(surgeryRecordProgressProvider);
@@ -4022,6 +4037,7 @@ class ProcedureTimingCard extends StatelessWidget {
   const ProcedureTimingCard({
     required this.step,
     required this.timing,
+    required this.arrivalTime,
     required this.isSaving,
     required this.onStart,
     required this.onEnd,
@@ -4035,6 +4051,7 @@ class ProcedureTimingCard extends StatelessWidget {
 
   final SurgicalStep step;
   final SurgicalStepReview timing;
+  final ProcedureArrivalTimeResult arrivalTime;
   final bool isSaving;
   final VoidCallback? onStart;
   final VoidCallback? onEnd;
@@ -4130,6 +4147,10 @@ class ProcedureTimingCard extends StatelessWidget {
               const SizedBox(height: 16),
             ] else
               const SizedBox(height: 12),
+            if (!step.isTotalSurgeryTime) ...[
+              ProcedureArrivalTimeView(result: arrivalTime),
+              const SizedBox(height: 16),
+            ],
             if (isSaving)
               const SizedBox(
                 height: 56,

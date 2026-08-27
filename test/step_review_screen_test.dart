@@ -148,12 +148,11 @@ void main() {
       ),
       findsOneWidget,
     );
+    await _scrollToStepNotes(tester, SurgicalStep.capsulorhexis);
     expect(find.text('自己評価・反省点'), findsOneWidget);
     expect(find.text('任意'), findsOneWidget);
     expect(find.widgetWithText(TextField, '反省点'), findsNothing);
 
-    await tester.ensureVisible(find.text('自己評価・反省点'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('自己評価・反省点'));
     await tester.pumpAndSettle();
     expect(find.widgetWithText(TextField, '反省点'), findsOneWidget);
@@ -163,6 +162,84 @@ void main() {
     await tester.tap(find.widgetWithText(Tab, '症例メモ'));
     await tester.pumpAndSettle();
     expect(find.widgetWithText(TextField, '症例全体のメモ'), findsOneWidget);
+  });
+
+  testWidgets('個別工程カードに同一snapshotの到達時間を表示し総手術カードには表示しない', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    final semantics = tester.ensureSemantics();
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      final reviews = await repository.ensureStepReviews(record.id);
+      final total = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.totalSurgeryTime,
+      );
+      final nucleus = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.nucleusRemoval,
+      );
+      await repository.saveStepTiming(
+        review: total.copyWith(
+          startMilliseconds: 30000,
+          endMilliseconds: 500000,
+        ),
+        expectedVideoPath: null,
+      );
+      await repository.saveStepTiming(
+        review: nucleus.copyWith(
+          startMilliseconds: 250000,
+          endMilliseconds: 380000,
+        ),
+        expectedVideoPath: null,
+      );
+    });
+
+    await pumpScreen(tester, database, record.id);
+    await _openTab(tester, '総手術時間');
+    expect(find.textContaining('開始まで'), findsNothing);
+
+    await _openTab(tester, '核処理');
+    expect(find.text('所要時間：2分10秒'), findsOneWidget);
+    expect(find.text('開始まで：3分40秒'), findsOneWidget);
+    expect(find.bySemanticsLabel('手術開始から3分40秒で開始'), findsOneWidget);
+    semantics.dispose();
+  });
+
+  testWidgets('工程所要時間が逆転しても有効な開始位置から到達時間を表示する', (tester) async {
+    final (database, record) = await createRecord(tester);
+    addTearDown(database.close);
+    await tester.runAsync(() async {
+      final repository = SurgeryRepository(database);
+      final reviews = await repository.ensureStepReviews(record.id);
+      final total = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.totalSurgeryTime,
+      );
+      final nucleus = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.nucleusRemoval,
+      );
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?
+WHERE id = ?
+''',
+        <Object?>[30000, 500000, total.id],
+      );
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?
+WHERE id = ?
+''',
+        <Object?>[250000, 200000, nucleus.id],
+      );
+    });
+
+    await pumpScreen(tester, database, record.id);
+    await _openTab(tester, '核処理');
+
+    expect(find.text('要再設定'), findsOneWidget);
+    expect(find.text('開始まで：3分40秒'), findsOneWidget);
+    expect(find.textContaining('所要時間：'), findsNothing);
   });
 
   testWidgets('動画なしでは開始を無効化し、既存時刻の再設定は保存する', (tester) async {
@@ -598,8 +675,7 @@ void main() {
     );
 
     await _openTab(tester, 'CCC');
-    await tester.ensureVisible(find.text('自己評価・反省点'));
-    await tester.pumpAndSettle();
+    await _scrollToStepNotes(tester, SurgicalStep.capsulorhexis);
     await tester.tap(find.text('自己評価・反省点'));
     await tester.pumpAndSettle();
     final rating = find.byType(DropdownButtonFormField<StepRating>);
@@ -644,8 +720,7 @@ void main() {
 
     await _openTab(tester, 'CCC');
     if (find.widgetWithText(TextField, '反省点').evaluate().isEmpty) {
-      await tester.ensureVisible(find.text('自己評価・反省点'));
-      await tester.pumpAndSettle();
+      await _scrollToStepNotes(tester, SurgicalStep.capsulorhexis);
       await tester.tap(find.text('自己評価・反省点'));
       await tester.pumpAndSettle();
     }
@@ -790,26 +865,45 @@ void main() {
     expect(preservedTiming!.endMilliseconds, 900);
   });
 
-  testWidgets('changed/unknownの同一動画再登録はreplaceとして工程時刻を消去する', (tester) async {
+  testWidgets('changed/unknownのreplaceは破損skipを正規化し再読込失敗中も未登録表示にする', (
+    tester,
+  ) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
-    final repository = SurgeryRepository(database);
+    final seedRepository = SurgeryRepository(database);
     final oldPath = 'videos/${record.id}/missing.mp4';
     await tester.runAsync(() async {
-      final reviews = await repository.ensureStepReviews(record.id);
+      final reviews = await seedRepository.ensureStepReviews(record.id);
       final total = reviews.singleWhere(
         (review) => review.step == SurgicalStep.totalSurgeryTime,
       );
-      await repository.saveStepTiming(
+      final ccc = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.capsulorhexis,
+      );
+      await seedRepository.saveStepTiming(
         review: total.copyWith(startMilliseconds: 100, endMilliseconds: 900),
         expectedVideoPath: null,
       );
-      await repository.updateVideoReference(
+      // Legacy/corrupt data may contain both a completed timing and raw skip.
+      // The repository normalizes this to unprocessed when timings are reset.
+      await database.customStatement(
+        '''
+UPDATE surgical_step_reviews
+SET start_milliseconds = ?, end_milliseconds = ?, is_skipped = 1
+WHERE id = ?
+''',
+        <Object?>[300, 600, ccc.id],
+      );
+      await seedRepository.updateVideoReference(
         surgeryRecordId: record.id,
         videoPath: oldPath,
         videoDisplayName: 'missing.mp4',
       );
     });
+    final repository = _CommitThenFailReadsRepository(
+      database,
+      failAfterVideoReset: true,
+    );
     final preflight = const _ReadyVideoImportPreflight();
     final storage = _RecordingReviewVideoStorage();
     final service = _RecordingReviewVideoService(
@@ -849,11 +943,16 @@ void main() {
 
     late SurgeryRecord? replacedRecord;
     late SurgicalStepReview? clearedTiming;
+    late SurgicalStepReview? normalizedCcc;
     await tester.runAsync(() async {
-      replacedRecord = await repository.getRecord(record.id);
-      clearedTiming = await repository.getStepReview(
+      replacedRecord = await seedRepository.getRecord(record.id);
+      clearedTiming = await seedRepository.getStepReview(
         surgeryRecordId: record.id,
         step: SurgicalStep.totalSurgeryTime,
+      );
+      normalizedCcc = await seedRepository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
       );
     });
     expect(service.relinkCalls, 0);
@@ -862,6 +961,17 @@ void main() {
     expect(replacedRecord!.videoPath, isNot(oldPath));
     expect(clearedTiming!.startMilliseconds, isNull);
     expect(clearedTiming!.endMilliseconds, isNull);
+    expect(normalizedCcc!.startMilliseconds, isNull);
+    expect(normalizedCcc!.endMilliseconds, isNull);
+    expect(normalizedCcc!.isSkipped, isFalse);
+
+    await _openTab(tester, 'CCC');
+    final timingCard = tester.widget<ProcedureTimingCard>(
+      find.byType(ProcedureTimingCard),
+    );
+    expect(timingCard.timing.recordingStatus, StepRecordingStatus.unprocessed);
+    expect(find.text('開始まで：未登録'), findsOneWidget);
+    expect(find.text('時間記録なし'), findsNothing);
   });
 
   for (final scenario
@@ -1130,8 +1240,15 @@ void main() {
       final total = reviews.singleWhere(
         (review) => review.step == SurgicalStep.totalSurgeryTime,
       );
+      final ccc = reviews.singleWhere(
+        (review) => review.step == SurgicalStep.capsulorhexis,
+      );
       await repository.saveStepTiming(
         review: total.copyWith(startMilliseconds: 100, endMilliseconds: 900),
+        expectedVideoPath: null,
+      );
+      await repository.saveStepTiming(
+        review: ccc.copyWith(startMilliseconds: 300, endMilliseconds: 600),
         expectedVideoPath: null,
       );
     });
@@ -1166,6 +1283,9 @@ void main() {
           .isNotStarted,
       isTrue,
     );
+    await _openTab(tester, 'CCC');
+    expect(find.text('開始まで：—'), findsOneWidget);
+    expect(find.text('「総手術時間」の開始位置を登録すると「開始まで」が表示されます。'), findsOneWidget);
     late SurgicalStepReview? committed;
     await tester.runAsync(() async {
       committed = await SurgeryRepository(database).getStepReview(
@@ -1325,8 +1445,7 @@ void main() {
       repository: repository,
     );
     await _openTab(tester, 'CCC');
-    await tester.ensureVisible(find.text('自己評価・反省点'));
-    await tester.pumpAndSettle();
+    await _scrollToStepNotes(tester, SurgicalStep.capsulorhexis);
     await tester.tap(find.text('自己評価・反省点'));
     await tester.pumpAndSettle();
     final reflection = find.widgetWithText(TextField, '反省点');
@@ -1395,8 +1514,7 @@ void main() {
     addTearDown(database.close);
     final container = await pumpScreen(tester, database, record.id);
     await _openTab(tester, 'CCC');
-    await tester.ensureVisible(find.text('自己評価・反省点'));
-    await tester.pumpAndSettle();
+    await _scrollToStepNotes(tester, SurgicalStep.capsulorhexis);
     await tester.tap(find.text('自己評価・反省点'));
     await tester.pumpAndSettle();
 
@@ -1548,7 +1666,12 @@ void main() {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
 
-    await pumpScreen(tester, database, record.id);
+    final container = await pumpScreen(tester, database, record.id);
+    await tester.runAsync(
+      () => container.read(
+        recordProcedureTimingSnapshotProvider(record.id).future,
+      ),
+    );
     await _openTab(tester, 'CCC');
 
     final skipButton = find
@@ -1563,6 +1686,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('時間記録なし'), findsOneWidget);
+    expect(find.text('開始まで：時間記録なし'), findsOneWidget);
     late SurgicalStepReview skipped;
     late SurgeryRecord savedRecord;
     await tester.runAsync(() async {
@@ -1578,6 +1702,16 @@ void main() {
     expect(skipped.endMilliseconds, isNull);
     expect(savedRecord.reviewSchemaVersion, 1);
     expect(savedRecord.reviewStatus, ReviewStatus.reviewed);
+    late RecordProcedureTimingSnapshot detailSnapshot;
+    await tester.runAsync(() async {
+      detailSnapshot = await container.read(
+        recordProcedureTimingSnapshotProvider(record.id).future,
+      );
+    });
+    expect(
+      detailSnapshot.reviewFor(SurgicalStep.capsulorhexis)?.recordingStatus,
+      StepRecordingStatus.skipped,
+    );
 
     final resetButton = find
         .byKey(const Key('procedure-reset-button'))
@@ -1600,6 +1734,7 @@ void main() {
     expect(restored.recordingStatus, StepRecordingStatus.unprocessed);
     expect(restored.isSkipped, isFalse);
     expect(find.text('時間記録なし'), findsNothing);
+    expect(find.text('開始まで：未登録'), findsOneWidget);
     expect(
       find.byKey(const Key('procedure-start-button')).hitTestable(),
       findsOneWidget,
@@ -1623,11 +1758,14 @@ void main() {
 
     await pumpScreen(tester, database, record.id);
     await _openTab(tester, 'CCC');
-    final skipButton = find
-        .byKey(const Key('procedure-skip-button'))
-        .hitTestable();
-    await tester.ensureVisible(skipButton);
+    final skipButton = find.byKey(const Key('procedure-skip-button'));
+    await tester.dragUntilVisible(
+      skipButton,
+      find.byKey(const ValueKey('review-step-content-capsulorhexis')),
+      const Offset(0, -240),
+    );
     await tester.pumpAndSettle();
+    expect(skipButton.hitTestable(), findsOneWidget);
     await tester.tap(skipButton);
     await tester.pumpAndSettle();
 
@@ -1684,6 +1822,7 @@ void main() {
     expect(repository.saveCalls, 1);
     expect(find.text('工程状態を保存できませんでした。もう一度お試しください。'), findsOneWidget);
     expect(find.text('時間記録なし'), findsNothing);
+    expect(find.text('開始まで：未登録'), findsOneWidget);
 
     late SurgicalStepReview persisted;
     await tester.runAsync(() async {
@@ -6506,6 +6645,15 @@ Future<void> _openCaseMemoTab(WidgetTester tester) async {
   await _openTab(tester, '症例メモ');
 }
 
+Future<void> _scrollToStepNotes(WidgetTester tester, SurgicalStep step) async {
+  await tester.dragUntilVisible(
+    find.text('自己評価・反省点'),
+    find.byKey(ValueKey('review-step-content-${step.name}')),
+    const Offset(0, -240),
+  );
+  await tester.pumpAndSettle();
+}
+
 Future<void> _openTab(
   WidgetTester tester,
   String label, {
@@ -6704,10 +6852,12 @@ class _CommitThenFailReadsRepository extends SurgeryRepository {
     super.database, {
     this.failAfterReviewSave = false,
     this.failAfterTimingSave = false,
+    this.failAfterVideoReset = false,
   });
 
   final bool failAfterReviewSave;
   final bool failAfterTimingSave;
+  final bool failAfterVideoReset;
   bool failReads = false;
 
   @override
@@ -6756,6 +6906,26 @@ class _CommitThenFailReadsRepository extends SurgeryRepository {
       failReads = true;
     }
     return result;
+  }
+
+  @override
+  Future<void> replaceVideoReferenceAndClearTimings({
+    required String surgeryRecordId,
+    required String? expectedVideoPath,
+    required String? videoPath,
+    required String? videoDisplayName,
+    void Function()? ensureMutationAllowed,
+  }) async {
+    await super.replaceVideoReferenceAndClearTimings(
+      surgeryRecordId: surgeryRecordId,
+      expectedVideoPath: expectedVideoPath,
+      videoPath: videoPath,
+      videoDisplayName: videoDisplayName,
+      ensureMutationAllowed: ensureMutationAllowed,
+    );
+    if (failAfterVideoReset) {
+      failReads = true;
+    }
   }
 }
 

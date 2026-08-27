@@ -55,6 +55,7 @@ void main() {
         );
 
         _expectPinnedPlayer(tester, aspectRatio: 16 / 9);
+        expect(find.textContaining('開始まで：'), findsOneWidget);
         expect(harness.videoPlatform.createCount, 1);
         expect(tester.takeException(), isNull);
       });
@@ -89,8 +90,9 @@ void main() {
       videoSize: const Size(1600, 900),
     );
     final before = _playerRects(tester);
+    await _openTab(tester, 'サイドポート作成');
     final reviewList = find.byKey(
-      const ValueKey('review-step-content-totalSurgeryTime'),
+      const ValueKey('review-step-content-sidePortCreation'),
     );
 
     await tester.drag(reviewList, const Offset(0, -600));
@@ -102,6 +104,27 @@ void main() {
     await tester.ensureVisible(find.byKey(const Key('procedure-start-button')));
     await tester.pumpAndSettle();
     _expectRectsUnchanged(tester, before);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('320x568・文字倍率2.0で最長工程名と到達時間へスクロール到達できる', (tester) async {
+    await _pumpReview(
+      tester,
+      viewport: portraitViewports.first,
+      textScale: 2,
+      videoSize: const Size(1600, 900),
+    );
+
+    await _openTab(tester, 'I/A（粘弾性物質除去）');
+    final reviewList = find.byKey(
+      const ValueKey('review-step-content-ovdRemovalIrrigationAspiration'),
+    );
+    final arrival = find.text('開始まで：2分00秒');
+    await tester.dragUntilVisible(arrival, reviewList, const Offset(0, -120));
+
+    expect(find.text('I/A（粘弾性物質除去）'), findsWidgets);
+    expect(arrival, findsOneWidget);
+    expect(find.byKey(const Key('procedure-reset-button')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -181,6 +204,24 @@ Future<_ReviewHarness> _pumpReview(
       surgeryRecordId: record.id,
       videoPath: 'videos/${record.id}/review.mp4',
       videoDisplayName: 'review.mp4',
+    );
+    final reviews = await repository.ensureStepReviews(record.id);
+    final total = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.totalSurgeryTime,
+    );
+    final longest = reviews.singleWhere(
+      (review) => review.step == SurgicalStep.ovdRemovalIrrigationAspiration,
+    );
+    await repository.saveStepTiming(
+      review: total.copyWith(startMilliseconds: 1000, endMilliseconds: 300000),
+      expectedVideoPath: 'videos/${record.id}/review.mp4',
+    );
+    await repository.saveStepTiming(
+      review: longest.copyWith(
+        startMilliseconds: 121000,
+        endMilliseconds: 181000,
+      ),
+      expectedVideoPath: 'videos/${record.id}/review.mp4',
     );
   });
 
