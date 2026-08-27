@@ -263,6 +263,9 @@ void main() {
         .getSingle();
 
     expect(snapshot.recordCount, 1);
+    expect(snapshot.catalog, hasLength(1));
+    expect(snapshot.catalog.single.recordId, record.id);
+    expect(snapshot.catalog.single.caseOrdinal, 1);
     expect(snapshot.measurements, hasLength(1));
     expect(snapshot.measurements.single.recordId, record.id);
     expect(snapshot.measurements.single.step, SurgicalStep.capsulorhexis);
@@ -459,5 +462,215 @@ WHERE id = ?
     expect(trend.summary!.previousAverage, const Duration(seconds: 10));
     expect(trend.summary!.difference, const Duration(seconds: 20));
     expect(trend.summary!.comparisonCount, 1);
+  });
+
+  test('全登録catalogは工程なし・未知眼を残しcalendar日→登録時刻→binary IDで採番する', () async {
+    // Open/migrate before inserting deliberately crafted legacy rows.
+    await database.customSelect('SELECT 1').getSingle();
+    final baseDate = DateTime(2026, 8, 20);
+    final created = DateTime(2026, 8, 21, 12);
+    Future<void> insertRecord({
+      required String id,
+      required DateTime date,
+      required DateTime createdAt,
+      String eyeSide = 'right',
+    }) {
+      final dateMillis = date.toUtc().millisecondsSinceEpoch;
+      final createdMillis = createdAt.toUtc().millisecondsSinceEpoch;
+      return database.customStatement(
+        '''
+INSERT INTO surgery_records (
+  id, surgery_date, eye_side, review_status, review_schema_version,
+  video_path, video_display_name, case_memo, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, NULL, NULL, '', ?, ?)
+''',
+        [
+          id,
+          dateMillis,
+          eyeSide,
+          ReviewStatus.draft.name,
+          1,
+          createdMillis,
+          createdMillis,
+        ],
+      );
+    }
+
+    await insertRecord(
+      id: 'later-date',
+      date: baseDate.add(const Duration(days: 1)),
+      createdAt: created.subtract(const Duration(days: 5)),
+    );
+    await insertRecord(
+      id: 'later-created',
+      date: baseDate,
+      createdAt: created.add(const Duration(minutes: 1)),
+    );
+    await insertRecord(id: 'a', date: baseDate, createdAt: created);
+    await insertRecord(id: 'A', date: baseDate, createdAt: created);
+    await insertRecord(id: 'z', date: baseDate, createdAt: created);
+    await insertRecord(
+      id: 'ä',
+      date: baseDate,
+      createdAt: created,
+      eyeSide: 'legacy-unknown-eye',
+    );
+
+    final snapshot = await repository.fetchAnalysisSnapshot();
+
+    expect(snapshot.recordCount, 6);
+    expect(snapshot.catalog.map((record) => record.recordId), [
+      'A',
+      'a',
+      'z',
+      'ä',
+      'later-created',
+      'later-date',
+    ]);
+    expect(snapshot.catalog.map((record) => record.caseOrdinal), [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+    ]);
+    final unknown = snapshot.catalog[3];
+    expect(unknown.rawEyeSide, 'legacy-unknown-eye');
+    expect(unknown.eyeSide, isNull);
+    expect(snapshot.measurements, isEmpty);
+  });
+
+  test('unknown眼とskip+有効時刻の旧不正行はRとnへ残すが有効点から除外する', () async {
+    final valid = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 20),
+      eyeSide: EyeSide.right,
+    );
+    final skipped = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 21),
+      eyeSide: EyeSide.left,
+    );
+    final unknown = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 22),
+      eyeSide: EyeSide.right,
+    );
+    for (final record in [valid, skipped, unknown]) {
+      final review = await repository.getStepReview(
+        surgeryRecordId: record.id,
+        step: SurgicalStep.capsulorhexis,
+      );
+      await repository.saveStepReview(
+        review!.copyWith(startMilliseconds: 1000, endMilliseconds: 5000),
+      );
+    }
+    await database.customStatement(
+      'UPDATE surgical_step_reviews SET is_skipped = 1 WHERE surgery_record_id = ?',
+      [skipped.id],
+    );
+    await database.customStatement(
+      'UPDATE surgery_records SET eye_side = ? WHERE id = ?',
+      ['unknown', unknown.id],
+    );
+
+    final snapshot = await repository.fetchAnalysisSnapshot();
+    final trend = const SurgeryTrendCalculator().calculate(
+      snapshot.measurements,
+      SurgicalStep.capsulorhexis,
+      catalog: snapshot.catalog,
+      registeredRecordCount: snapshot.recordCount,
+    );
+
+    expect(snapshot.recordCount, 3);
+    expect(snapshot.catalog.map((record) => record.caseOrdinal), [1, 2, 3]);
+    expect(
+      snapshot.measurements
+          .singleWhere((measurement) => measurement.recordId == skipped.id)
+          .isSkipped,
+      isTrue,
+    );
+    expect(trend.points.map((point) => point.recordId), [valid.id]);
+  });
+
+  test('同じrecordIdのraw行でcatalog metadataが競合すればSnapshot全体を失敗させる', () async {
+    await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 20),
+      eyeSide: EyeSide.right,
+    );
+    await database.customStatement(
+      'ALTER TABLE surgery_records RENAME TO surgery_records_source',
+    );
+    await database.customStatement('''
+CREATE VIEW surgery_records AS
+SELECT * FROM surgery_records_source
+UNION ALL
+SELECT
+  id, surgery_date + 86400000, eye_side, review_status,
+  review_schema_version, video_path, video_display_name, case_memo,
+  created_at, updated_at
+FROM surgery_records_source
+''');
+
+    await expectLater(
+      repository.fetchAnalysisSnapshot(),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('同じrecordIdとstepのmeasurementが重複すればSnapshot全体を失敗させる', () async {
+    await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 20),
+      eyeSide: EyeSide.right,
+    );
+    await database.customStatement(
+      'ALTER TABLE surgical_step_reviews RENAME TO surgical_step_reviews_source',
+    );
+    await database.customStatement('''
+CREATE VIEW surgical_step_reviews AS
+SELECT * FROM surgical_step_reviews_source
+UNION ALL
+SELECT * FROM surgical_step_reviews_source
+''');
+
+    await expectLater(
+      repository.fetchAnalysisSnapshot(),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('skip raw値が0/1以外なら部分Snapshotを返さず永続fieldも変更しない', () async {
+    final record = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 20),
+      eyeSide: EyeSide.right,
+    );
+    await database.customStatement(
+      'UPDATE surgical_step_reviews SET is_skipped = 2 WHERE surgery_record_id = ?',
+      [record.id],
+    );
+    final beforeRecords = await database
+        .customSelect('SELECT * FROM surgery_records ORDER BY id')
+        .get();
+    final beforeReviews = await database
+        .customSelect('SELECT * FROM surgical_step_reviews ORDER BY id')
+        .get();
+
+    await expectLater(
+      repository.fetchAnalysisSnapshot(),
+      throwsA(isA<FormatException>()),
+    );
+
+    final afterRecords = await database
+        .customSelect('SELECT * FROM surgery_records ORDER BY id')
+        .get();
+    final afterReviews = await database
+        .customSelect('SELECT * FROM surgical_step_reviews ORDER BY id')
+        .get();
+    expect(
+      afterRecords.map((row) => row.data),
+      beforeRecords.map((row) => row.data),
+    );
+    expect(
+      afterReviews.map((row) => row.data),
+      beforeReviews.map((row) => row.data),
+    );
   });
 }

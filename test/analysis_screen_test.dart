@@ -8,6 +8,7 @@ import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
 import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
+import 'package:cataract_surgery_note/src/domain/analysis_horizontal_axis.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_trend.dart';
 import 'package:cataract_surgery_note/src/features/analysis/analysis_screen.dart';
@@ -532,6 +533,33 @@ void main() {
     await tester.tap(button);
   }
 
+  Finder trendPaintFinder() => find.descendant(
+    of: find.byType(SurgeryTrendChart),
+    matching: find.byWidgetPredicate(
+      (widget) => widget is CustomPaint && widget.painter is TrendChartPainter,
+    ),
+  );
+
+  TrendChartPainter trendPainter(WidgetTester tester) {
+    return tester.widget<CustomPaint>(trendPaintFinder()).painter!
+        as TrendChartPainter;
+  }
+
+  Offset analysisPointCenter(WidgetTester tester, String recordId) {
+    final local = trendPainter(tester).layout.points
+        .singleWhere((point) => point.point.recordId == recordId)
+        .offset;
+    return tester.getTopLeft(trendPaintFinder()) + local;
+  }
+
+  Future<void> tapAnalysisPoint(WidgetTester tester, String recordId) async {
+    final chart = find.byKey(const Key('analysis-chart-interaction'));
+    await tester.ensureVisible(chart);
+    await tester.pump();
+    await tester.tapAt(analysisPointCenter(tester, recordId));
+    await tester.pump();
+  }
+
   Future<void> pumpUntilCondition(
     WidgetTester tester,
     bool Function() condition, {
@@ -607,7 +635,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('あと1件記録すると推移を確認できます'), findsOneWidget);
-    expect(find.byKey(const Key('analysis-point-one')), findsOneWidget);
+    expect(trendPainter(tester).layout.points.single.point.recordId, 'one');
   });
 
   testWidgets('指標切り替えでグラフと比較サマリーを更新する', (tester) async {
@@ -668,8 +696,7 @@ void main() {
       ),
     );
 
-    await tester.tap(find.byKey(const Key('analysis-point-selected')));
-    await tester.pumpAndSettle();
+    await tapAnalysisPoint(tester, 'selected');
     await tester.drag(
       find.byKey(const Key('analysis-content')),
       const Offset(0, -300),
@@ -736,9 +763,22 @@ void main() {
       ),
       findsNothing,
     );
-    // 最古と最新の両方が同時に描画されている（＝スクロール不要で全期間が見える）。
-    expect(find.byKey(const Key('analysis-point-c0')), findsOneWidget);
-    expect(find.byKey(const Key('analysis-point-c49')), findsOneWidget);
+    // 最古と最新の両方が同じplot rectangleへ描画されている。
+    final painter = trendPainter(tester);
+    expect(
+      painter.layout.points.map((point) => point.point.recordId),
+      containsAll(['c0', 'c49']),
+    );
+    expect(painter.layout.points.first.offset.dx, painter.layout.plotLeft);
+    expect(painter.layout.points.last.offset.dx, painter.layout.plotRight);
+    expect(
+      find.byWidgetPredicate((widget) {
+        final key = widget.key;
+        return key is ValueKey<String> &&
+            key.value.startsWith('analysis-point-');
+      }),
+      findsNothing,
+    );
 
     final chart = tester.getRect(find.byType(SurgeryTrendChart));
     final content = tester.getRect(find.byKey(const Key('analysis-content')));
@@ -754,12 +794,12 @@ void main() {
       const Offset(0, -300),
     );
     await tester.pumpAndSettle();
-    expect(find.text('3 / 3 症例目'), findsOneWidget);
+    expect(find.text('症例順 3 / 3'), findsOneWidget);
 
     final graphFinder = find.byKey(const Key('analysis-trend-adjustable'));
     final graph = tester.getSemantics(graphFinder);
     expect(graph.label, '総手術時間の推移');
-    expect(graph.value, contains('全3件中3件目'));
+    expect(graph.value, contains('この指標3件中3件目'));
     expect(graph.value, contains('2026年1月3日'));
     expect(
       graph.getSemanticsData().hasAction(SemanticsAction.increase),
@@ -773,17 +813,17 @@ void main() {
 
     graph.owner!.performAction(graph.id, SemanticsAction.decrease);
     await tester.pumpAndSettle();
-    expect(tester.getSemantics(graphFinder).value, contains('全3件中2件目'));
+    expect(tester.getSemantics(graphFinder).value, contains('この指標3件中2件目'));
 
     final middleGraph = tester.getSemantics(graphFinder);
     middleGraph.owner!.performAction(middleGraph.id, SemanticsAction.increase);
     await tester.pumpAndSettle();
-    expect(tester.getSemantics(graphFinder).value, contains('全3件中3件目'));
+    expect(tester.getSemantics(graphFinder).value, contains('この指標3件中3件目'));
 
     final newestGraph = tester.getSemantics(graphFinder);
     newestGraph.owner!.performAction(newestGraph.id, SemanticsAction.increase);
     await tester.pumpAndSettle();
-    expect(tester.getSemantics(graphFinder).value, contains('全3件中3件目'));
+    expect(tester.getSemantics(graphFinder).value, contains('この指標3件中3件目'));
     semantics.dispose();
   });
 
@@ -793,12 +833,12 @@ void main() {
 
     final graphFinder = find.byKey(const Key('analysis-trend-adjustable'));
     final graph = tester.getSemantics(graphFinder);
-    expect(graph.value, contains('全1件中1件目'));
+    expect(graph.value, contains('この指標1件中1件目'));
 
     for (final action in [SemanticsAction.increase, SemanticsAction.decrease]) {
       graph.owner!.performAction(graph.id, action);
       await tester.pump();
-      expect(tester.getSemantics(graphFinder).value, contains('全1件中1件目'));
+      expect(tester.getSemantics(graphFinder).value, contains('この指標1件中1件目'));
     }
     semantics.dispose();
   });
@@ -806,19 +846,15 @@ void main() {
   testWidgets('データ点の外側をタップしても最寄りの症例が選択される', (tester) async {
     await pumpAnalysis(tester, manyCases(3));
 
-    final firstBand = tester.getRect(
-      find.byKey(const Key('analysis-point-c0')),
-    );
-    final middleBand = tester.getRect(
-      find.byKey(const Key('analysis-point-c1')),
-    );
-    final lastBand = tester.getRect(find.byKey(const Key('analysis-point-c2')));
-    // 帯は隙間なく・重なりなくチャートを覆う。
-    expect(firstBand.right, closeTo(middleBand.left, 0.5));
-    expect(middleBand.right, closeTo(lastBand.left, 0.5));
+    final graph = find.byKey(const Key('analysis-chart-interaction'));
+    await tester.ensureVisible(graph);
+    await tester.pump();
+    final first = analysisPointCenter(tester, 'c0');
+    final middle = analysisPointCenter(tester, 'c1');
+    final graphRect = tester.getRect(graph);
 
-    // 中央の点そのものではなく、その帯の左端付近をタップする。
-    await tester.tapAt(Offset(middleBand.left + 2, middleBand.center.dy));
+    // 点や線から離れたaxis gutterでも、clamp後の最寄り点を選択する。
+    await tester.tapAt(Offset((first.dx + middle.dx) / 2, graphRect.top + 1));
     await tester.pumpAndSettle();
     await tester.drag(
       find.byKey(const Key('analysis-content')),
@@ -826,7 +862,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('2 / 3 症例目'), findsOneWidget);
+    expect(find.text('症例順 2 / 3'), findsOneWidget);
     expect(find.text('2026年1月2日 右眼'), findsOneWidget);
     expect(find.text('総手術時間：1分01秒'), findsOneWidget);
   });
@@ -834,18 +870,17 @@ void main() {
   testWidgets('前後ボタンで隣接症例へ移動し、両端で無効になる', (tester) async {
     await pumpAnalysis(tester, manyCases(3));
 
-    await tester.tap(find.byKey(const Key('analysis-point-c1')));
-    await tester.pumpAndSettle();
+    await tapAnalysisPoint(tester, 'c1');
     await tester.drag(
       find.byKey(const Key('analysis-content')),
       const Offset(0, -300),
     );
     await tester.pumpAndSettle();
-    expect(find.text('2 / 3 症例目'), findsOneWidget);
+    expect(find.text('症例順 2 / 3'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('analysis-select-previous')));
     await tester.pumpAndSettle();
-    expect(find.text('1 / 3 症例目'), findsOneWidget);
+    expect(find.text('症例順 1 / 3'), findsOneWidget);
     expect(find.text('2026年1月1日 右眼'), findsOneWidget);
     expect(
       tester
@@ -858,7 +893,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('analysis-select-next')));
     await tester.pumpAndSettle();
-    expect(find.text('3 / 3 症例目'), findsOneWidget);
+    expect(find.text('症例順 3 / 3'), findsOneWidget);
     expect(find.text('2026年1月3日 右眼'), findsOneWidget);
     expect(
       tester
@@ -904,7 +939,7 @@ void main() {
       tester
           .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
           .value,
-      contains('全2件中2件目'),
+      contains('この指標2件中2件目'),
     );
 
     await tester.tap(find.byKey(const Key('analysis-metric-selector')));
@@ -915,7 +950,7 @@ void main() {
       tester
           .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
           .value,
-      allOf(contains('全2件中2件目'), contains('2026年7月20日')),
+      allOf(contains('この指標2件中2件目'), contains('2026年7月20日')),
     );
 
     await tester.tap(find.byKey(const Key('analysis-metric-selector')));
@@ -931,7 +966,7 @@ void main() {
       tester
           .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
           .value,
-      allOf(contains('全1件中1件目'), contains('2026年7月19日')),
+      allOf(contains('この指標1件中1件目'), contains('2026年7月19日')),
     );
   });
 
@@ -995,7 +1030,7 @@ void main() {
       tester
           .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
           .value,
-      contains('全2件中2件目'),
+      contains('この指標2件中2件目'),
     );
 
     olderReload.complete(
@@ -1011,7 +1046,7 @@ void main() {
       tester
           .getSemantics(find.byKey(const Key('analysis-trend-adjustable')))
           .value,
-      contains('全2件中2件目'),
+      contains('この指標2件中2件目'),
     );
     semantics.dispose();
   });
@@ -1069,8 +1104,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(Key('analysis-point-${record.id}')));
-    await tester.pumpAndSettle();
+    await tapAnalysisPoint(tester, record.id);
     await tester.drag(
       find.byKey(const Key('analysis-content')),
       const Offset(0, -300),
@@ -1080,7 +1114,7 @@ void main() {
         .widget<ListView>(find.byKey(const Key('analysis-content')))
         .controller!
         .offset;
-    await tester.tap(find.text('症例詳細を見る'));
+    await tapSelectedCardButton(tester);
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 50)),
     );
@@ -1162,13 +1196,13 @@ void main() {
       const Offset(0, -300),
     );
     await tester.pumpAndSettle();
+    await revealSelectedCardButton(tester);
     final offsetBeforePush = tester
         .widget<ListView>(find.byKey(const Key('analysis-content')))
         .controller!
         .offset;
     expect(offsetBeforePush, greaterThan(0));
-
-    await tester.tap(find.text('症例詳細を見る'));
+    await tester.tap(find.byKey(const Key('analysis-open-selected')));
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );
@@ -1263,6 +1297,68 @@ void main() {
     semantics.dispose();
   });
 
+  testWidgets('pull-to-refresh後のR=0とM=0は対応する空状態見出しへfocusする', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final accessibilityEvents = observeAccessibilityEvents();
+    final initial = SurgeryAnalysisSnapshot(
+      recordCount: 1,
+      measurements: [
+        measurement(id: 'refresh-focus', date: DateTime(2026, 8, 20)),
+      ],
+    );
+    final cases = <(SurgeryAnalysisSnapshot, String)>[
+      (
+        const SurgeryAnalysisSnapshot(recordCount: 0, measurements: []),
+        'まだ症例がありません',
+      ),
+      (
+        const SurgeryAnalysisSnapshot(recordCount: 1, measurements: []),
+        '「総手術時間」の計測データがありません',
+      ),
+    ];
+
+    for (final (refreshed, title) in cases) {
+      var invocation = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          key: UniqueKey(),
+          overrides: [
+            surgeryAnalysisProvider.overrideWith((ref) async {
+              invocation++;
+              return invocation == 1 ? initial : refreshed;
+            }),
+          ],
+          child: const MaterialApp(home: AnalysisScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      accessibilityEvents.clear();
+
+      final refreshFuture = tester
+          .widget<RefreshIndicator>(find.byType(RefreshIndicator))
+          .onRefresh();
+      await tester.pump();
+      await tester.runAsync(() => refreshFuture);
+      await tester.pumpAndSettle();
+      await tester.pump();
+
+      expect(invocation, 2);
+      expect(find.byType(SurgeryTrendChart), findsNothing);
+      final heading = find
+          .ancestor(of: find.text(title), matching: find.byType(Semantics))
+          .first;
+      final headingNode = tester.getSemantics(heading);
+      expect(headingNode.flagsCollection.isHeader, isTrue);
+      expect(
+        accessibilityEvents
+            .where((event) => event['type'] == 'focus')
+            .map((event) => event['nodeId']),
+        contains(headingNode.id),
+      );
+    }
+    semantics.dispose();
+  });
+
   testWidgets('詳細画面で症例を削除すると選択点を解除して空状態を表示する', (tester) async {
     final database = AppDatabase.memory();
     addTearDown(database.close);
@@ -1296,14 +1392,13 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(Key('analysis-point-${record.id}')));
-    await tester.pumpAndSettle();
+    await tapAnalysisPoint(tester, record.id);
     await tester.drag(
       find.byKey(const Key('analysis-content')),
       const Offset(0, -300),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('症例詳細を見る'));
+    await tapSelectedCardButton(tester);
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 50)),
     );
@@ -1361,10 +1456,7 @@ void main() {
     await selectCccMetric(tester);
     expectNoVideoAccess();
 
-    final middleBand = tester.getRect(
-      find.byKey(Key('analysis-point-${records[1].id}')),
-    );
-    await tester.tapAt(Offset(middleBand.center.dx, middleBand.top + 2));
+    await tester.tapAt(analysisPointCenter(tester, records[1].id));
     await tester.pump();
     expect(
       tester
@@ -2757,10 +2849,7 @@ void main() {
       find.byKey(const Key('analysis-metric-selector')),
       warnIfMissed: false,
     );
-    final secondBand = tester.getRect(
-      find.byKey(Key('analysis-point-${records.last.id}')),
-    );
-    await tester.tapAt(Offset(secondBand.center.dx, secondBand.top + 2));
+    await tester.tapAt(analysisPointCenter(tester, records.last.id));
     await tester.tap(
       find.byKey(const Key('analysis-select-previous')),
       warnIfMissed: false,
@@ -2781,6 +2870,22 @@ void main() {
       find.byKey(const Key('analysis-metric-selector')),
     );
     expect(metricSelector.onTap, isNull);
+    expect(
+      tester
+          .widget<SegmentedButton<AnalysisHorizontalAxisMode>>(
+            find.byKey(const Key('analysis-horizontal-axis-selector')),
+          )
+          .onSelectionChanged,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<TextButton>(
+            find.byKey(const Key('analysis-horizontal-axis-help')),
+          )
+          .onPressed,
+      isNull,
+    );
     expect(find.byType(BottomSheet), findsNothing);
     expect(
       tester
@@ -3165,7 +3270,7 @@ void main() {
 
     await tester.tap(find.byKey(const Key('analysis-select-next')));
     await tester.pump();
-    expect(find.text('2 / 2 症例目'), findsOneWidget);
+    expect(find.text('症例順 2 / 2'), findsOneWidget);
 
     service.clearInspectionError();
     service.videoStateKind = RecordVideoStateKind.availableManaged;

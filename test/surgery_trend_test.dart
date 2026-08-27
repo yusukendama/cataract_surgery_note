@@ -14,6 +14,7 @@ void main() {
     int? start = 0,
     int? end = 60000,
     EyeSide eyeSide = EyeSide.right,
+    bool isSkipped = false,
   }) {
     return SurgeryAnalysisMeasurement(
       recordId: id,
@@ -23,6 +24,7 @@ void main() {
       step: step,
       startMilliseconds: start,
       endMilliseconds: end,
+      isSkipped: isSkipped,
     );
   }
 
@@ -60,6 +62,13 @@ void main() {
       measurement(id: 'zero', surgeryDate: date, start: 1000, end: 1000),
       measurement(id: 'reverse', surgeryDate: date, start: 2000, end: 1000),
       measurement(
+        id: 'skipped-with-times',
+        surgeryDate: date,
+        start: 1000,
+        end: 2000,
+        isSkipped: true,
+      ),
+      measurement(
         id: 'other-step',
         surgeryDate: date,
         step: SurgicalStep.capsulorhexis,
@@ -69,6 +78,30 @@ void main() {
     expect(data.points, hasLength(1));
     expect(data.points.single.recordId, 'valid');
     expect(data.points.single.duration, const Duration(milliseconds: 1500));
+  });
+
+  test('catalogのunknown眼をmeasurement側の値で補完せずRとnだけへ残す', () {
+    final date = DateTime(2026, 7, 20);
+    final catalog = [
+      SurgeryAnalysisRecord(
+        recordId: 'unknown-eye',
+        surgeryDate: date,
+        createdAt: date,
+        rawEyeSide: 'legacy-eye',
+        eyeSide: null,
+        caseOrdinal: 1,
+      ),
+    ];
+
+    final data = calculator.calculate(
+      [measurement(id: 'unknown-eye', surgeryDate: date)],
+      SurgicalStep.totalSurgeryTime,
+      catalog: catalog,
+      registeredRecordCount: 1,
+    );
+
+    expect(data.points, isEmpty);
+    expect(data.registeredRecordCount, 1);
   });
 
   test('最新値を除く直前最大5件をミリ秒精度で平均する', () {

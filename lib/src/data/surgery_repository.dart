@@ -248,21 +248,50 @@ SELECT
   r.eye_side,
   s.step,
   s.start_milliseconds,
-  s.end_milliseconds
+  s.end_milliseconds,
+  s.is_skipped
 FROM surgery_records AS r
 LEFT JOIN surgical_step_reviews AS s
   ON s.surgery_record_id = r.id
-ORDER BY r.surgery_date ASC, r.created_at ASC, r.id ASC
+ORDER BY r.surgery_date ASC, r.created_at ASC, r.id COLLATE BINARY ASC
 ''', readsFrom: const {}).get();
 
-    final recordIds = <String>{};
+    final catalogById = <String, SurgeryAnalysisRecord>{};
+    final measurementKeys = <(String, String)>{};
     final measurements = <SurgeryAnalysisMeasurement>[];
     for (final row in rows) {
       final recordId = row.read<String>('record_id');
-      recordIds.add(recordId);
+      if (recordId.isEmpty) {
+        throw const FormatException('分析SnapshotのrecordIdが空です。');
+      }
+      final surgeryDate = _millisToDate(row.read<int>('surgery_date'));
+      final createdAt = _millisToDate(row.read<int>('created_at'));
+      final rawEyeSide = row.read<String>('eye_side');
+      final eyeSide = EyeSide.values
+          .where((value) => value.name == rawEyeSide)
+          .firstOrNull;
+      final existingRecord = catalogById[recordId];
+      if (existingRecord == null) {
+        catalogById[recordId] = SurgeryAnalysisRecord(
+          recordId: recordId,
+          surgeryDate: surgeryDate,
+          createdAt: createdAt,
+          rawEyeSide: rawEyeSide,
+          eyeSide: eyeSide,
+          caseOrdinal: 0,
+        );
+      } else if (existingRecord.surgeryDate != surgeryDate ||
+          existingRecord.createdAt != createdAt ||
+          existingRecord.rawEyeSide != rawEyeSide) {
+        throw FormatException('分析Snapshot内で症例metadataが競合しています: $recordId');
+      }
+
       final storageId = row.read<String?>('step');
       if (storageId == null) {
         continue;
+      }
+      if (!measurementKeys.add((recordId, storageId))) {
+        throw FormatException('分析Snapshot内で工程measurementが重複しています: $recordId');
       }
       final step = SurgicalStep.fromStorageId(storageId);
       if (step == null) {
@@ -275,27 +304,56 @@ ORDER BY r.surgery_date ASC, r.created_at ASC, r.id ASC
       if (!surgicalStepsInDisplayOrder.contains(step)) {
         continue;
       }
-      final eyeSideName = row.read<String>('eye_side');
-      final eyeSide = EyeSide.values
-          .where((value) => value.name == eyeSideName)
-          .firstOrNull;
-      if (eyeSide == null) {
-        continue;
+      final rawSkipped = row.read<int>('is_skipped');
+      if (rawSkipped != 0 && rawSkipped != 1) {
+        throw FormatException('分析Snapshotのskip状態が不正です: $recordId');
       }
       measurements.add(
         SurgeryAnalysisMeasurement(
           recordId: recordId,
-          surgeryDate: _millisToDate(row.read<int>('surgery_date')),
-          createdAt: _millisToDate(row.read<int>('created_at')),
+          surgeryDate: surgeryDate,
+          createdAt: createdAt,
           eyeSide: eyeSide,
           step: step,
           startMilliseconds: row.read<int?>('start_milliseconds'),
           endMilliseconds: row.read<int?>('end_milliseconds'),
+          isSkipped: rawSkipped == 1,
         ),
       );
     }
+    final unorderedCatalog = catalogById.values.toList();
+    unorderedCatalog.sort((a, b) {
+      final dateComparison = a.surgeryDay.compareTo(b.surgeryDay);
+      if (dateComparison != 0) {
+        return dateComparison;
+      }
+      final createdAtComparison = a.createdAt.compareTo(b.createdAt);
+      if (createdAtComparison != 0) {
+        return createdAtComparison;
+      }
+      return compareBinaryStrings(a.recordId, b.recordId);
+    });
+    final catalog = List<SurgeryAnalysisRecord>.unmodifiable([
+      for (var index = 0; index < unorderedCatalog.length; index++)
+        SurgeryAnalysisRecord(
+          recordId: unorderedCatalog[index].recordId,
+          surgeryDate: unorderedCatalog[index].surgeryDate,
+          createdAt: unorderedCatalog[index].createdAt,
+          rawEyeSide: unorderedCatalog[index].rawEyeSide,
+          eyeSide: unorderedCatalog[index].eyeSide,
+          caseOrdinal: index + 1,
+        ),
+    ]);
+    final catalogIds = catalog.map((record) => record.recordId).toSet();
+    if (catalogIds.length != catalog.length ||
+        measurements.any(
+          (measurement) => !catalogIds.contains(measurement.recordId),
+        )) {
+      throw const FormatException('分析Snapshotの参照整合性が壊れています。');
+    }
     return SurgeryAnalysisSnapshot(
-      recordCount: recordIds.length,
+      recordCount: catalog.length,
+      catalog: catalog,
       measurements: List.unmodifiable(measurements),
     );
   }

@@ -8,6 +8,7 @@ import 'package:cataract_surgery_note/src/data/video_import_models.dart';
 import 'package:cataract_surgery_note/src/data/video_storage_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/features/analysis/analysis_screen.dart';
+import 'package:cataract_surgery_note/src/features/analysis/surgery_trend_chart.dart';
 import 'package:cataract_surgery_note/src/features/review/step_review_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -98,9 +99,10 @@ void main() {
     await tester.tap(cccMetric);
     await tester.pumpAndSettle();
 
-    final graphPoint = find.byKey(Key('analysis-point-${record.id}'));
-    expect(graphPoint, findsOneWidget);
-    await tester.tap(graphPoint);
+    final chart = find.byKey(const Key('analysis-chart-interaction'));
+    await tester.ensureVisible(chart);
+    await tester.pump();
+    await tester.tapAt(_paintedPointCenter(tester, record.id));
     await tester.pump();
 
     expect(find.byType(AnalysisScreen), findsOneWidget);
@@ -170,6 +172,21 @@ void main() {
     expect(find.byIcon(Icons.play_arrow), findsOneWidget);
     expect(find.byIcon(Icons.pause), findsNothing);
   }, skip: !Platform.isIOS);
+}
+
+Offset _paintedPointCenter(WidgetTester tester, String recordId) {
+  final paint = find.descendant(
+    of: find.byType(SurgeryTrendChart),
+    matching: find.byWidgetPredicate(
+      (widget) => widget is CustomPaint && widget.painter is TrendChartPainter,
+    ),
+  );
+  final painter =
+      tester.widget<CustomPaint>(paint).painter! as TrendChartPainter;
+  final local = painter.layout.points
+      .singleWhere((point) => point.point.recordId == recordId)
+      .offset;
+  return tester.getTopLeft(paint) + local;
 }
 
 Future<void> _pumpUntil(

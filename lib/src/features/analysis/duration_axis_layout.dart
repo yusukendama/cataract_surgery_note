@@ -11,6 +11,8 @@ const double durationAxisMinimumPlotWidth = 44;
 const double durationAxisMinimumLabelGap = 4;
 const int durationAxisMaximumTickCount = 12;
 
+typedef DurationAxisTextMeasurer = Size Function(String value);
+
 /// プロット高さと実測ラベル高さから表示可能な主要目盛り数を返す。
 int calculateDurationAxisTickCapacity({
   required double plotHeight,
@@ -81,6 +83,44 @@ class DurationAxisLayout {
     required TextScaler textScaler,
     required ui.TextDirection textDirection,
   }) {
+    return _calculate(
+      width: width,
+      height: height,
+      step: step,
+      maximumDuration: maximumDuration,
+      measureText: (value) => _measureText(
+        value,
+        textStyle: textStyle,
+        textScaler: textScaler,
+        textDirection: textDirection,
+      ),
+    );
+  }
+
+  /// UIに依存しないchart layoutと同じ文字計測結果を共有するための境界。
+  factory DurationAxisLayout.calculateWithMeasurer({
+    required double width,
+    required double height,
+    required SurgicalStep step,
+    required Duration maximumDuration,
+    required DurationAxisTextMeasurer measureText,
+  }) {
+    return _calculate(
+      width: width,
+      height: height,
+      step: step,
+      maximumDuration: maximumDuration,
+      measureText: measureText,
+    );
+  }
+
+  static DurationAxisLayout _calculate({
+    required double width,
+    required double height,
+    required SurgicalStep step,
+    required Duration maximumDuration,
+    required DurationAxisTextMeasurer measureText,
+  }) {
     if (!width.isFinite || width < 0) {
       throw ArgumentError.value(width, 'width');
     }
@@ -88,22 +128,12 @@ class DurationAxisLayout {
       throw ArgumentError.value(height, 'height');
     }
 
-    final dateLabelHeight = _measureText(
-      '12/28',
-      textStyle: textStyle,
-      textScaler: textScaler,
-      textDirection: textDirection,
-    ).height;
+    final dateLabelHeight = measureText('12/28').height;
     var scale = DurationAxisScale.forMaximum(
       step: step,
       maximumDuration: maximumDuration,
     );
-    var labelHeight = _maximumLabelHeight(
-      scale,
-      textStyle: textStyle,
-      textScaler: textScaler,
-      textDirection: textDirection,
-    );
+    var labelHeight = _maximumLabelHeight(scale, measureText: measureText);
     var maximumTickCount = durationAxisMaximumTickCount;
 
     // Nが変わるとラベル列も変わり得るため、最終ラベルの実寸で収束させる。
@@ -129,9 +159,7 @@ class DurationAxisLayout {
       );
       final nextLabelHeight = _maximumLabelHeight(
         nextScale,
-        textStyle: textStyle,
-        textScaler: textScaler,
-        textDirection: textDirection,
+        measureText: measureText,
       );
       final isStable =
           nextMaximumTickCount == maximumTickCount &&
@@ -165,12 +193,7 @@ class DurationAxisLayout {
         (
           tick: tick,
           label: scale.labelFor(tick),
-          size: _measureText(
-            scale.labelFor(tick),
-            textStyle: textStyle,
-            textScaler: textScaler,
-            textDirection: textDirection,
-          ),
+          size: measureText(scale.labelFor(tick)),
         ),
     ];
     labelHeight = measuredLabels
@@ -330,20 +353,12 @@ DurationAxisTickLayout _tickLayout({
 
 double _maximumLabelHeight(
   DurationAxisScale scale, {
-  required TextStyle textStyle,
-  required TextScaler textScaler,
-  required ui.TextDirection textDirection,
+  required DurationAxisTextMeasurer measureText,
 }) {
   return scale.ticks
       .map(scale.labelFor)
-      .map(
-        (label) => _measureText(
-          label,
-          textStyle: textStyle,
-          textScaler: textScaler,
-          textDirection: textDirection,
-        ).height,
-      )
+      .map(measureText)
+      .map((size) => size.height)
       .fold<double>(0, math.max);
 }
 

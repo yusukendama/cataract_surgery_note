@@ -4,7 +4,10 @@ import 'package:flutter/semantics.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/providers.dart';
+import '../../data/analysis_time_context.dart';
 import '../../data/record_video_service.dart';
+import '../../domain/analysis_horizontal_axis.dart';
+import '../../domain/calendar_day.dart';
 import '../../domain/duration_formatters.dart';
 import '../../domain/surgery_models.dart';
 import '../../domain/surgery_trend.dart';
@@ -22,13 +25,17 @@ class AnalysisScreen extends ConsumerStatefulWidget {
   ConsumerState<AnalysisScreen> createState() => _AnalysisScreenState();
 }
 
-class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
+class _AnalysisScreenState extends ConsumerState<AnalysisScreen>
+    with WidgetsBindingObserver {
   static const _calculator = SurgeryTrendCalculator();
 
   final ScrollController _scrollController = ScrollController();
   final GlobalKey _trendChartFocusKey = GlobalKey();
   final GlobalKey _emptyStateKey = GlobalKey();
+  final FocusNode _axisHelpFocusNode = FocusNode(debugLabel: '横軸の説明');
   SurgicalStep _selectedStep = SurgicalStep.totalSurgeryTime;
+  AnalysisHorizontalAxisMode _horizontalAxisMode =
+      AnalysisHorizontalAxisMode.caseOrder;
   String? _selectedRecordId;
   bool _directJumpBusy = false;
   bool _showDirectJumpBusy = false;
@@ -36,17 +43,51 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
   int _analysisReloadGeneration = 0;
   double? _pendingScrollOffset;
   SurgeryAnalysisSnapshot? _lastStableAnalysisSnapshot;
+  SurgeryAnalysisSnapshot? _contextSnapshot;
+  CalendarDay? _referenceDate;
+  String? _timezoneIdentifier;
+  late final AnalysisClockMonitor _clockMonitor;
+  bool _appActive = false;
+  bool? _routeIsCurrent;
+  bool _timezoneContextRefreshBusy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    final lifecycleState = WidgetsBinding.instance.lifecycleState;
+    _appActive =
+        lifecycleState == null || lifecycleState == AppLifecycleState.resumed;
+    _clockMonitor = AnalysisClockMonitor(
+      source: ref.read(analysisTimeContextSourceProvider),
+      scheduler: ref.read(analysisSchedulerProvider),
+    );
+  }
 
   @override
   void dispose() {
     _directJumpGeneration++;
     _analysisReloadGeneration++;
     _scrollController.dispose();
+    _clockMonitor.dispose();
+    _axisHelpFocusNode.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appActive = state == AppLifecycleState.resumed;
+    if (_appActive) {
+      _restartClockMonitor();
+    } else {
+      _stopClockMonitor();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    _synchronizeRouteActivity(ModalRoute.of(context)?.isCurrent ?? true);
     final snapshot = ref.watch(surgeryAnalysisProvider);
     final frozenSnapshot = _directJumpBusy ? _lastStableAnalysisSnapshot : null;
     final content = frozenSnapshot != null
@@ -56,17 +97,23 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
             error: (_, _) => _ErrorState(onRetry: _retry),
             data: (value) {
               _lastStableAnalysisSnapshot = value;
+              _adoptSnapshotContext(value);
               return _buildContent(value);
             },
           );
     return Scaffold(
       appBar: AppBar(title: const Text('分析')),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          AbsorbPointer(absorbing: _directJumpBusy, child: content),
-          if (_showDirectJumpBusy) const _DirectJumpBusyIndicator(),
-        ],
+      body: SafeArea(
+        top: false,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            AbsorbPointer(absorbing: _directJumpBusy, child: content),
+            if (_timezoneContextRefreshBusy)
+              const _AnalysisContextRefreshIndicator(),
+            if (_showDirectJumpBusy) const _DirectJumpBusyIndicator(),
+          ],
+        ),
       ),
     );
   }
@@ -81,7 +128,13 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       );
     }
 
-    final trend = _calculator.calculate(snapshot.measurements, _selectedStep);
+    final catalog = snapshot.effectiveCatalog;
+    final trend = _calculator.calculate(
+      snapshot.measurements,
+      _selectedStep,
+      catalog: catalog,
+      registeredRecordCount: snapshot.recordCount,
+    );
     final selectedIndex = _selectedIndexFor(trend.points);
     final effectiveSelectedRecordId = selectedIndex < 0
         ? null
@@ -111,12 +164,39 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
               message: '工程の開始時刻と終了時刻を記録すると、ここに表示されます。',
             )
           else ...[
+            _HorizontalAxisControls(
+              mode: _horizontalAxisMode,
+              enabled: !_directJumpBusy,
+              helpFocusNode: _axisHelpFocusNode,
+              onModeChanged: (mode) {
+                if (_directJumpBusy || mode == _horizontalAxisMode) {
+                  return;
+                }
+                setState(() => _horizontalAxisMode = mode);
+              },
+              onOpenHelp: _directJumpBusy ? null : _showHorizontalAxisHelp,
+            ),
+            const SizedBox(height: 16),
             SurgeryTrendChart(
               focusTargetKey: _trendChartFocusKey,
               points: trend.points,
+              horizontalAxis: AnalysisHorizontalAxis(
+                mode: _horizontalAxisMode,
+                catalog: catalog,
+                recordCount: snapshot.recordCount,
+                referenceDate:
+                    _referenceDate ??
+                    CalendarDay.fromDateTime(
+                      snapshot.referenceDate ?? DateTime.now(),
+                    ),
+              ),
               selectedRecordId: effectiveSelectedRecordId,
               enabled: !_directJumpBusy,
               showProcessVideoHint: !_selectedStep.isTotalSurgeryTime,
+              showSameDayHint:
+                  _horizontalAxisMode ==
+                      AnalysisHorizontalAxisMode.chronological &&
+                  _hasSameDayCluster(trend.points),
               onPointSelected: (point) {
                 if (_directJumpBusy) {
                   return;
@@ -132,8 +212,12 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
               const SizedBox(height: 16),
               _SelectedPointCard(
                 point: trend.points[selectedIndex],
-                position: selectedIndex + 1,
-                total: trend.points.length,
+                caseOrdinal: trend.points[selectedIndex].caseOrdinal > 0
+                    ? trend.points[selectedIndex].caseOrdinal
+                    : selectedIndex + 1,
+                registeredTotal: snapshot.recordCount,
+                metricPosition: selectedIndex + 1,
+                metricTotal: trend.points.length,
                 onSelectPrevious: !_directJumpBusy && selectedIndex > 0
                     ? () => _selectAdjacent(trend.points, selectedIndex - 1)
                     : null,
@@ -167,6 +251,159 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     );
   }
 
+  bool _hasSameDayCluster(List<SurgeryTrendPoint> points) {
+    final seen = <CalendarDay>{};
+    for (final point in points) {
+      if (!seen.add(point.surgeryDay)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _adoptSnapshotContext(SurgeryAnalysisSnapshot snapshot) {
+    if (identical(snapshot, _contextSnapshot)) {
+      return;
+    }
+    _contextSnapshot = snapshot;
+    final now = snapshot.referenceDate ?? DateTime.now();
+    _referenceDate = CalendarDay.fromDateTime(now);
+    _timezoneIdentifier =
+        snapshot.timezoneIdentifier ?? 'dart:${now.timeZoneName}';
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && identical(snapshot, _contextSnapshot)) {
+        _restartClockMonitor();
+      }
+    });
+  }
+
+  void _restartClockMonitor() {
+    if (!mounted || !_appActive || ModalRoute.of(context)?.isCurrent != true) {
+      _stopClockMonitor();
+      return;
+    }
+    final referenceDate = _referenceDate;
+    final timezoneIdentifier = _timezoneIdentifier;
+    if (referenceDate == null || timezoneIdentifier == null) {
+      return;
+    }
+    _clockMonitor.stop();
+    _clockMonitor
+        .start(
+          initialContext: AnalysisTimeContext(
+            now: DateTime(
+              referenceDate.year,
+              referenceDate.month,
+              referenceDate.day,
+            ),
+            timezoneIdentifier: timezoneIdentifier,
+          ),
+          onChanged: _handleTimeContextChanged,
+        )
+        .ignore();
+  }
+
+  void _stopClockMonitor() {
+    _clockMonitor.stop();
+  }
+
+  void _synchronizeRouteActivity(bool isCurrent) {
+    if (_routeIsCurrent == isCurrent) {
+      return;
+    }
+    _routeIsCurrent = isCurrent;
+    if (!isCurrent) {
+      _stopClockMonitor();
+      return;
+    }
+    if (_referenceDate == null || _timezoneIdentifier == null) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _routeIsCurrent == true) {
+        _restartClockMonitor();
+      }
+    });
+  }
+
+  void _handleTimeContextChanged(
+    AnalysisTimeContext previous,
+    AnalysisTimeContext current,
+  ) {
+    if (!mounted) {
+      return;
+    }
+    if (_directJumpBusy) {
+      _stopClockMonitor();
+      return;
+    }
+    if (ModalRoute.of(context)?.isCurrent != true) {
+      _stopClockMonitor();
+      return;
+    }
+    if (current.timezoneIdentifier != _timezoneIdentifier) {
+      _refreshForTimezoneChange().ignore();
+      return;
+    }
+    if (current.localDay != _referenceDate) {
+      setState(() => _referenceDate = current.localDay);
+    }
+  }
+
+  Future<void> _refreshForTimezoneChange() async {
+    if (!mounted || _directJumpBusy || _timezoneContextRefreshBusy) {
+      return;
+    }
+    _stopClockMonitor();
+    setState(() => _timezoneContextRefreshBusy = true);
+    try {
+      if (await _reloadAnalysis()) {
+        final refreshed = ref.read(surgeryAnalysisProvider).asData?.value;
+        if (refreshed != null && _isEmptyState(refreshed)) {
+          _restoreAccessibilityFocusAfterBuild();
+        }
+      }
+    } on Object {
+      // The provider's retryable analysis error state is authoritative.
+    } finally {
+      if (mounted) {
+        setState(() => _timezoneContextRefreshBusy = false);
+      }
+    }
+  }
+
+  Future<void> _showHorizontalAxisHelp() async {
+    if (_directJumpBusy) {
+      return;
+    }
+    _stopClockMonitor();
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        scrollable: true,
+        title: const Text('横軸の説明'),
+        content: const Text(
+          '症例順は、アプリ内の登録症例を手術日順に並べた表示です。'
+          '同日内の実際の執刀順は表しません。\n\n'
+          '時系列は手術日の暦日間隔を表します。表示件数は生涯の執刀件数ではなく、'
+          '時間だけで手術成績は判断できません。',
+        ),
+        actions: [
+          TextButton(
+            key: const Key('analysis-horizontal-axis-help-close'),
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('閉じる'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) {
+      return;
+    }
+    _axisHelpFocusNode.requestFocus();
+    _restartClockMonitor();
+  }
+
   int _selectedIndexFor(List<SurgeryTrendPoint> points) {
     if (points.isEmpty) {
       return -1;
@@ -181,6 +418,7 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     if (_directJumpBusy) {
       return;
     }
+    _stopClockMonitor();
     final selected = await showAnalysisMetricPicker(
       context: context,
       selectedStep: _selectedStep,
@@ -189,6 +427,9 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
         selected == _selectedStep ||
         !mounted ||
         _directJumpBusy) {
+      if (mounted) {
+        _restartClockMonitor();
+      }
       return;
     }
     setState(() {
@@ -197,6 +438,7 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       // 次のbuildでその指標の最新症例へfallbackする。
       _selectedRecordId = currentlySelectedRecordId;
     });
+    _restartClockMonitor();
   }
 
   void _selectAdjacent(List<SurgeryTrendPoint> points, int index) {
@@ -406,6 +648,11 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
         _selectedRecordId = _selectionForSnapshot(currentSnapshot);
       }
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _restartClockMonitor();
+      }
+    });
   }
 
   void _finishDirectJumpWithMessage(
@@ -436,7 +683,12 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     if (snapshot == null) {
       return;
     }
-    final trend = _calculator.calculate(snapshot.measurements, _selectedStep);
+    final trend = _calculator.calculate(
+      snapshot.measurements,
+      _selectedStep,
+      catalog: snapshot.effectiveCatalog,
+      registeredRecordCount: snapshot.recordCount,
+    );
     final selectedIndex = _selectedIndexFor(trend.points);
     if (selectedIndex < 0) {
       return;
@@ -511,6 +763,7 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     // can invalidate the analysis provider while this route is offstage,
     // detaching or shortening the list before the user returns.
     _captureScrollOffset();
+    _stopClockMonitor();
     final routeFuture = Navigator.of(
       context,
     ).push(MaterialPageRoute<void>(builder: (_) => destination));
@@ -533,6 +786,7 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       return;
     }
     _captureScrollOffset();
+    _stopClockMonitor();
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => RecordDetailScreen(recordId: point.recordId),
@@ -554,7 +808,9 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
     if (_directJumpBusy) {
       return;
     }
-    await _reloadAnalysis();
+    if (await _reloadAnalysis()) {
+      _restoreAccessibilityFocusAfterBuild();
+    }
   }
 
   Future<bool> _reloadAnalysis() async {
@@ -606,7 +862,12 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
   }
 
   String? _selectionForSnapshot(SurgeryAnalysisSnapshot snapshot) {
-    final trend = _calculator.calculate(snapshot.measurements, _selectedStep);
+    final trend = _calculator.calculate(
+      snapshot.measurements,
+      _selectedStep,
+      catalog: snapshot.effectiveCatalog,
+      registeredRecordCount: snapshot.recordCount,
+    );
     if (trend.points.isEmpty) {
       return null;
     }
@@ -614,6 +875,21 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       (point) => point.recordId == _selectedRecordId,
     );
     return stillSelected ? _selectedRecordId : trend.points.last.recordId;
+  }
+
+  bool _isEmptyState(SurgeryAnalysisSnapshot snapshot) {
+    if (snapshot.recordCount == 0) {
+      return true;
+    }
+    return _calculator
+        .calculate(
+          snapshot.measurements,
+          _selectedStep,
+          catalog: snapshot.effectiveCatalog,
+          registeredRecordCount: snapshot.recordCount,
+        )
+        .points
+        .isEmpty;
   }
 
   void _restoreScrollOffsetAfterBuild({
@@ -673,6 +949,25 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen> {
       }
       renderObject.sendSemanticsEvent(const FocusSemanticEvent());
     });
+  }
+}
+
+class _AnalysisContextRefreshIndicator extends StatelessWidget {
+  const _AnalysisContextRefreshIndicator();
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.topCenter,
+      child: Semantics(
+        container: true,
+        liveRegion: true,
+        label: 'タイムゾーン変更に合わせて分析データを更新しています',
+        child: const LinearProgressIndicator(
+          key: Key('analysis-timezone-refresh-indicator'),
+        ),
+      ),
+    );
   }
 }
 
@@ -738,11 +1033,73 @@ class _DirectJumpBusyIndicator extends StatelessWidget {
   }
 }
 
+class _HorizontalAxisControls extends StatelessWidget {
+  const _HorizontalAxisControls({
+    required this.mode,
+    required this.enabled,
+    required this.helpFocusNode,
+    required this.onModeChanged,
+    required this.onOpenHelp,
+  });
+
+  final AnalysisHorizontalAxisMode mode;
+  final bool enabled;
+  final FocusNode helpFocusNode;
+  final ValueChanged<AnalysisHorizontalAxisMode> onModeChanged;
+  final Future<void> Function()? onOpenHelp;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('横軸', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        Semantics(
+          container: true,
+          label: '横軸',
+          value: mode.label,
+          child: SegmentedButton<AnalysisHorizontalAxisMode>(
+            key: const Key('analysis-horizontal-axis-selector'),
+            segments: [
+              for (final value in AnalysisHorizontalAxisMode.values)
+                ButtonSegment(value: value, label: Text(value.label)),
+            ],
+            selected: {mode},
+            onSelectionChanged: !enabled
+                ? null
+                : (selection) => onModeChanged(selection.single),
+            expandedInsets: EdgeInsets.zero,
+            style: const ButtonStyle(
+              minimumSize: WidgetStatePropertyAll(Size(0, 48)),
+            ),
+          ),
+        ),
+        Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: TextButton.icon(
+            key: const Key('analysis-horizontal-axis-help'),
+            focusNode: helpFocusNode,
+            onPressed: onOpenHelp == null ? null : () => onOpenHelp!().ignore(),
+            icon: const Icon(Icons.help_outline),
+            label: const Text('横軸の説明'),
+            style: const ButtonStyle(
+              minimumSize: WidgetStatePropertyAll(Size(44, 44)),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _SelectedPointCard extends StatelessWidget {
   const _SelectedPointCard({
     required this.point,
-    required this.position,
-    required this.total,
+    required this.caseOrdinal,
+    required this.registeredTotal,
+    required this.metricPosition,
+    required this.metricTotal,
     required this.onSelectPrevious,
     required this.onSelectNext,
     required this.onOpenDetails,
@@ -750,8 +1107,10 @@ class _SelectedPointCard extends StatelessWidget {
   });
 
   final SurgeryTrendPoint point;
-  final int position;
-  final int total;
+  final int caseOrdinal;
+  final int registeredTotal;
+  final int metricPosition;
+  final int metricTotal;
   final VoidCallback? onSelectPrevious;
   final VoidCallback? onSelectNext;
   final VoidCallback? onOpenDetails;
@@ -769,8 +1128,10 @@ class _SelectedPointCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _CaseNavigator(
-              position: position,
-              total: total,
+              caseOrdinal: caseOrdinal,
+              registeredTotal: registeredTotal,
+              metricPosition: metricPosition,
+              metricTotal: metricTotal,
               onPrevious: onSelectPrevious,
               onNext: onSelectNext,
             ),
@@ -828,14 +1189,18 @@ class _SelectedPointCard extends StatelessWidget {
 
 class _CaseNavigator extends StatelessWidget {
   const _CaseNavigator({
-    required this.position,
-    required this.total,
+    required this.caseOrdinal,
+    required this.registeredTotal,
+    required this.metricPosition,
+    required this.metricTotal,
     required this.onPrevious,
     required this.onNext,
   });
 
-  final int position;
-  final int total;
+  final int caseOrdinal;
+  final int registeredTotal;
+  final int metricPosition;
+  final int metricTotal;
   final VoidCallback? onPrevious;
   final VoidCallback? onNext;
 
@@ -848,22 +1213,34 @@ class _CaseNavigator extends StatelessWidget {
           key: const Key('analysis-select-previous'),
           onPressed: onPrevious,
           icon: const Icon(Icons.chevron_left),
-          tooltip: '前の症例',
+          tooltip: '前の計測済み症例',
         ),
         Expanded(
-          child: Text(
-            '$position / $total 症例目',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.labelLarge?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '症例順 $caseOrdinal / $registeredTotal',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              Text(
+                'この指標 $metricPosition / $metricTotal',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
           ),
         ),
         IconButton(
           key: const Key('analysis-select-next'),
           onPressed: onNext,
           icon: const Icon(Icons.chevron_right),
-          tooltip: '次の症例',
+          tooltip: '次の計測済み症例',
         ),
       ],
     );

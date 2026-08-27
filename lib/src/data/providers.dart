@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../domain/surgery_models.dart';
 import '../domain/surgery_trend.dart';
 import 'app_database.dart';
+import 'analysis_time_context.dart';
 import 'onboarding_state_repository.dart';
 import 'protected_storage.dart';
 import 'record_video_service.dart';
@@ -21,6 +22,16 @@ final appDatabaseProvider = Provider<AppDatabase>((ref) {
 
 final surgeryRepositoryProvider = Provider<SurgeryRepository>((ref) {
   return SurgeryRepository(ref.watch(appDatabaseProvider));
+});
+
+final analysisTimeContextSourceProvider = Provider<AnalysisTimeContextSource>((
+  ref,
+) {
+  return PlatformAnalysisTimeContextSource();
+});
+
+final analysisSchedulerProvider = Provider<AnalysisScheduler>((ref) {
+  return const TimerAnalysisScheduler();
 });
 
 final onboardingStateRepositoryProvider = Provider<OnboardingStateRepository>((
@@ -92,9 +103,28 @@ final surgeryRecordProgressProvider =
           .fetchRecordProgressSnapshots();
     });
 
-final surgeryAnalysisProvider = FutureProvider<SurgeryAnalysisSnapshot>((ref) {
-  return ref.watch(surgeryRepositoryProvider).fetchAnalysisSnapshot();
-});
+final surgeryAnalysisProvider =
+    FutureProvider.autoDispose<SurgeryAnalysisSnapshot>((ref) async {
+      final repository = ref.watch(surgeryRepositoryProvider);
+      final timeSource = ref.watch(analysisTimeContextSourceProvider);
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final before = await timeSource.read();
+        final snapshot = await repository.fetchAnalysisSnapshot();
+        final after = await timeSource.read();
+        if (before.timezoneIdentifier == after.timezoneIdentifier) {
+          final referenceDate = DateTime(
+            after.now.year,
+            after.now.month,
+            after.now.day,
+          );
+          return snapshot.withDisplayContext(
+            referenceDate: referenceDate,
+            timezoneIdentifier: after.timezoneIdentifier,
+          );
+        }
+      }
+      throw StateError('分析データ取得中にtimezoneが繰り返し変更されました。');
+    });
 
 final surgeryRecordProvider = FutureProvider.family<SurgeryRecord?, String>((
   ref,
