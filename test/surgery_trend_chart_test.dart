@@ -89,7 +89,7 @@ void main() {
   });
 
   group('SurgeryTrendChart', () {
-    testWidgets('点・線・空白を含む全高帯は症例選択だけを行う', (tester) async {
+    testWidgets('点と周辺を含むcanvasのtapは症例選択だけを行う', (tester) async {
       final selected = <String>[];
       await _pumpChart(
         tester,
@@ -139,6 +139,36 @@ void main() {
         }),
         findsNothing,
       );
+    });
+
+    testWidgets('drag・cancel・複数pointerは症例選択を変更しない', (tester) async {
+      final selected = <String>[];
+      await _pumpChart(
+        tester,
+        points: _points(3),
+        selectedRecordId: 'r2',
+        onSelected: (point) => selected.add(point.recordId),
+      );
+      final chart = tester.getRect(
+        find.byKey(const Key('analysis-chart-interaction')),
+      );
+
+      await tester.dragFrom(chart.center, const Offset(0, 60));
+      final cancelled = await tester.startGesture(chart.center, pointer: 11);
+      await cancelled.cancel();
+      final first = await tester.startGesture(
+        chart.center.translate(-10, 0),
+        pointer: 21,
+      );
+      final second = await tester.startGesture(
+        chart.center.translate(10, 0),
+        pointer: 22,
+      );
+      await second.up();
+      await first.up();
+      await tester.pump();
+
+      expect(selected, isEmpty);
     });
 
     testWidgets('高密度でも省略markerの症例帯を1回で選択する', (tester) async {
@@ -243,7 +273,10 @@ void main() {
       final graphFinder = find.byKey(const Key('analysis-trend-adjustable'));
       var graph = tester.getSemantics(graphFinder);
       expect(graph.label, 'CCCの推移');
-      expect(graph.value, contains('全3件中3件目'));
+      expect(graph.value, contains('横軸は症例順'));
+      expect(graph.value, contains('登録3症例'));
+      expect(graph.value, contains('3番'));
+      expect(graph.value, contains('この指標3件中3件目'));
       expect(graph.value, contains('2026年1月3日'));
       expect(graph.hint, contains('症例詳細を見るボタン'));
       expect(graph.hint, isNot(contains('ダブルタップ')));
@@ -261,7 +294,7 @@ void main() {
       await tester.pump();
       expect(selected, ['r1']);
       graph = tester.getSemantics(graphFinder);
-      expect(graph.value, contains('全3件中2件目'));
+      expect(graph.value, contains('この指標3件中2件目'));
       expect(graph.getSemanticsData().hasAction(SemanticsAction.tap), isFalse);
       semantics.dispose();
     });

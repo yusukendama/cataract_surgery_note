@@ -15,6 +15,7 @@
 		5F2300052C6E000100000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 5F2300042C6E000100000001 /* PrivacyInfo.xcprivacy */; };
 		5F2300072C6E000100000001 /* ProtectedStorageManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F2300062C6E000100000001 /* ProtectedStorageManager.swift */; };
 		5F2300092C6E000100000001 /* PrivacyShieldController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F2300082C6E000100000001 /* PrivacyShieldController.swift */; };
+		5F23000D2C6E000100000001 /* AnalysisTimeContextPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F23000C2C6E000100000001 /* AnalysisTimeContextPlugin.swift */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
@@ -57,6 +58,7 @@
 		5F2300042C6E000100000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		5F2300062C6E000100000001 /* ProtectedStorageManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtectedStorageManager.swift; sourceTree = "<group>"; };
 		5F2300082C6E000100000001 /* PrivacyShieldController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyShieldController.swift; sourceTree = "<group>"; };
+		5F23000C2C6E000100000001 /* AnalysisTimeContextPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnalysisTimeContextPlugin.swift; sourceTree = "<group>"; };
 		5F23000A2C6E000100000001 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		6F971EDAAE561F5B86BEDA5B /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -173,6 +175,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				5F2300062C6E000100000001 /* ProtectedStorageManager.swift */,
 				5F2300082C6E000100000001 /* PrivacyShieldController.swift */,
+				5F23000C2C6E000100000001 /* AnalysisTimeContextPlugin.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
 			path = Runner;
@@ -416,6 +419,7 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				5F2300072C6E000100000001 /* ProtectedStorageManager.swift in Sources */,
 				5F2300092C6E000100000001 /* PrivacyShieldController.swift in Sources */,
+				5F23000D2C6E000100000001 /* AnalysisTimeContextPlugin.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

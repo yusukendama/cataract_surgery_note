@@ -117,12 +117,15 @@ final class VideoSourceAccessManager {
   let protectedStorageManager = ProtectedStorageManager()
   let privacyShieldController = PrivacyShieldController()
   let protectedDataEventStreamHandler = ProtectedDataEventStreamHandler()
+  private let analysisTimeEventStreamHandler = AnalysisTimeEventStreamHandler()
   private let videoSourceAccessManager = VideoSourceAccessManager()
 
   private var backupChannel: FlutterMethodChannel?
   private var protectedStorageChannel: FlutterMethodChannel?
   private var protectedDataEventChannel: FlutterEventChannel?
   private var videoSourceAccessChannel: FlutterMethodChannel?
+  private var analysisTimeMethodChannel: FlutterMethodChannel?
+  private var analysisTimeEventChannel: FlutterEventChannel?
 
   override func application(
     _ application: UIApplication,
@@ -134,6 +137,7 @@ final class VideoSourceAccessManager {
       configureBackupChannel(binaryMessenger: messenger)
       configureProtectedStorageChannels(binaryMessenger: messenger)
       configureVideoSourceAccessChannel(binaryMessenger: messenger)
+      configureAnalysisTimeChannels(binaryMessenger: messenger)
     }
     NotificationCenter.default.addObserver(
       self,
@@ -152,6 +156,30 @@ final class VideoSourceAccessManager {
       privacyShieldController.install(on: window)
     }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  private func configureAnalysisTimeChannels(
+    binaryMessenger: FlutterBinaryMessenger
+  ) {
+    let methodChannel = FlutterMethodChannel(
+      name: "cataract_surgery_note/analysis_time_context",
+      binaryMessenger: binaryMessenger
+    )
+    methodChannel.setMethodCallHandler { call, result in
+      guard call.method == "timezoneIdentifier" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(TimeZone.current.identifier)
+    }
+    analysisTimeMethodChannel = methodChannel
+
+    let eventChannel = FlutterEventChannel(
+      name: "cataract_surgery_note/analysis_time_events",
+      binaryMessenger: binaryMessenger
+    )
+    eventChannel.setStreamHandler(analysisTimeEventStreamHandler)
+    analysisTimeEventChannel = eventChannel
   }
 
   private func configureVideoSourceAccessChannel(
