@@ -82,6 +82,16 @@ void main() {
     expect(repository.writes, isEmpty);
   });
 
+  testWidgets('ページタイトルをレベル1見出しとして公開する', (tester) async {
+    final semantics = tester.ensureSemantics();
+    final repository = _FakeOnboardingStateRepository();
+
+    await pumpGate(tester, repository: repository);
+
+    expect(tester.getSemantics(find.text('手術を、振り返りにつなげる')).headingLevel, 1);
+    semantics.dispose();
+  });
+
   testWidgets('現行版を完了済みなら症例確認を行わず一覧を表示する', (tester) async {
     final repository = _FakeOnboardingStateRepository(
       completedVersion: currentOnboardingVersion,
@@ -248,9 +258,8 @@ void main() {
         theme: AppTheme.light,
         builder: (context, child) {
           return MediaQuery(
-            data: MediaQuery.of(
-              context,
-            ).copyWith(textScaler: const TextScaler.linear(2)),
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: const TextScaler.linear(2)),
             child: child!,
           );
         },

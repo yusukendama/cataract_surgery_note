@@ -44,6 +44,8 @@
 
 ## 開発
 
+開発・ReleaseビルドにはFlutter 3.47.1 stable（Dart 3.13.1）以降を使用します。
+
 ```sh
 flutter pub get
 flutter analyze

@@ -33,7 +33,10 @@ class _VideoTimelineIdentityDialogState
       scrollable: true,
       title: Focus(
         autofocus: true,
-        child: Semantics(header: true, child: const Text('選択した動画について確認してください')),
+        child: Semantics(
+          headingLevel: 1,
+          child: const Text('選択した動画について確認してください'),
+        ),
       ),
       content: Column(
         mainAxisSize: MainAxisSize.min,

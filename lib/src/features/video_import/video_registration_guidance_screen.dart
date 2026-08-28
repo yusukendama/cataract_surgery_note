@@ -8,7 +8,9 @@ class VideoRegistrationGuidanceScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('登録できる動画の目安')),
+      appBar: AppBar(
+        title: Semantics(headingLevel: 1, child: const Text('登録できる動画の目安')),
+      ),
       body: SafeArea(
         child: ListView(
           key: const Key('video-registration-guidance'),
@@ -38,8 +40,7 @@ class VideoRegistrationGuidanceScreen extends StatelessWidget {
                 ),
                 _NumberedGuidanceItem(
                   number: 3,
-                  text:
-                      'MP4、H.264 / AVC、8bit、4:2:0、progressive、AACまたは音声なしを出力の目安にします。',
+                  text: 'MP4、H.264 / AVC、8bit、4:2:0、progressive、AACまたは音声なしを出力の目安にします。',
                 ),
                 _NumberedGuidanceItem(
                   number: 4,
@@ -117,7 +118,7 @@ class _GuidanceSection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Semantics(
-          header: true,
+          headingLevel: 2,
           child: Text(title, style: Theme.of(context).textTheme.titleLarge),
         ),
         const SizedBox(height: AppSpacing.small),
@@ -154,7 +155,7 @@ class _WarningSection extends StatelessWidget {
                 const SizedBox(width: AppSpacing.small),
                 Expanded(
                   child: Semantics(
-                    header: true,
+                    headingLevel: 2,
                     child: Text(
                       title,
                       style: Theme.of(context).textTheme.titleMedium,
@@ -192,9 +193,8 @@ class _NumberedGuidanceItem extends StatelessWidget {
             width: AppSpacing.large,
             child: Text(
               '$number.',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+              style: Theme.of(context).textTheme.bodyMedium
+                  ?.copyWith(fontWeight: FontWeight.w600),
             ),
           ),
           Expanded(child: Text(text)),

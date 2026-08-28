@@ -239,14 +239,13 @@ class _OnboardingPage extends StatelessWidget {
                 ),
                 const SizedBox(height: AppSpacing.large),
                 Semantics(
-                  header: true,
+                  headingLevel: 1,
                   child: Text(
                     page.title,
                     key: ValueKey('onboarding-page-title-$index'),
                     textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
+                    style: Theme.of(context).textTheme.headlineSmall
+                        ?.copyWith(fontWeight: FontWeight.w700),
                   ),
                 ),
                 if (page.body.isNotEmpty) ...[
@@ -254,9 +253,8 @@ class _OnboardingPage extends StatelessWidget {
                   Text(
                     page.body,
                     textAlign: TextAlign.center,
-                    style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
+                    style: Theme.of(context).textTheme.bodyLarge
+                        ?.copyWith(color: colorScheme.onSurfaceVariant),
                   ),
                 ],
                 const SizedBox(height: AppSpacing.large),

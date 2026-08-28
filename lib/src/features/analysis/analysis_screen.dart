@@ -764,9 +764,8 @@ class _AnalysisScreenState extends ConsumerState<AnalysisScreen>
     // detaching or shortening the list before the user returns.
     _captureScrollOffset();
     _stopClockMonitor();
-    final routeFuture = Navigator.of(
-      context,
-    ).push(MaterialPageRoute<void>(builder: (_) => destination));
+    final routeFuture = Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (_) => destination));
     _endDirectJump(generation);
     await routeFuture;
     if (!mounted) {
@@ -1275,7 +1274,7 @@ class _MessageState extends StatelessWidget {
           const SizedBox(height: 16),
           Semantics(
             key: focusTargetKey,
-            header: true,
+            headingLevel: 1,
             child: Text(
               title,
               textAlign: TextAlign.center,

@@ -4,7 +4,8 @@ publish_to: 'none'
 version: 1.0.0+25
 
 environment:
-  sdk: ^3.10.1
+  sdk: ^3.13.1
+  flutter: '>=3.47.1'
 
 dependencies:
   drift: ^2.34.0
@@ -31,6 +32,10 @@ dev_dependencies:
   video_player_platform_interface: ^6.9.0
 
 flutter:
+  # file_picker の写真・音声コードを CocoaPods のフラグで除外するため、
+  # v1.0.0 では Swift Package Manager へ自動移行しない。
+  config:
+    enable-swift-package-manager: false
   uses-material-design: true
 
 hooks:

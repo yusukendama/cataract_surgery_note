@@ -1348,7 +1348,7 @@ void main() {
           .ancestor(of: find.text(title), matching: find.byType(Semantics))
           .first;
       final headingNode = tester.getSemantics(heading);
-      expect(headingNode.flagsCollection.isHeader, isTrue);
+      expect(headingNode.headingLevel, 1);
       expect(
         accessibilityEvents
             .where((event) => event['type'] == 'focus')
@@ -2215,7 +2215,7 @@ void main() {
         .first;
     expect(emptyHeading, findsOneWidget);
     final emptyHeadingNode = tester.getSemantics(emptyHeading);
-    expect(emptyHeadingNode.flagsCollection.isHeader, isTrue);
+    expect(emptyHeadingNode.headingLevel, 1);
     expect(
       accessibilityEvents
           .skip(accessibilityEventCountBeforeReturn)
@@ -3348,7 +3348,7 @@ void main() {
     final emptyState = find.bySemanticsLabel('まだ症例がありません');
     expect(emptyState, findsOneWidget);
     final emptyStateNode = tester.getSemantics(emptyState);
-    expect(emptyStateNode.flagsCollection.isHeader, isTrue);
+    expect(emptyStateNode.headingLevel, 1);
     final focusEvents = semanticEvents
         .where((event) => event['type'] == 'focus')
         .toList();

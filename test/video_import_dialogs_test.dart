@@ -80,11 +80,8 @@ void main() {
       SemanticsRole.alertDialog,
     );
     expect(
-      tester
-          .getSemantics(find.text('この拡張子のファイルは登録対象外です'))
-          .flagsCollection
-          .isHeader,
-      isTrue,
+      tester.getSemantics(find.text('この拡張子のファイルは登録対象外です')).headingLevel,
+      1,
     );
     expect(
       Focus.of(tester.element(find.text('この拡張子のファイルは登録対象外です'))).hasFocus,

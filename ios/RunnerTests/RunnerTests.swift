@@ -322,6 +322,116 @@ class RunnerTests: XCTestCase {
     XCTAssertNil(shield.superview)
   }
 
+  func testSceneManifestUsesRunnerSceneDelegate() throws {
+    let manifest = try XCTUnwrap(
+      Bundle.main.object(
+        forInfoDictionaryKey: "UIApplicationSceneManifest"
+      ) as? [String: Any]
+    )
+    XCTAssertEqual(
+      manifest["UIApplicationSupportsMultipleScenes"] as? Bool,
+      false
+    )
+    let configurations = try XCTUnwrap(
+      manifest["UISceneConfigurations"] as? [String: Any]
+    )
+    let applicationConfigurations = try XCTUnwrap(
+      configurations["UIWindowSceneSessionRoleApplication"]
+        as? [[String: Any]]
+    )
+    let configuration = try XCTUnwrap(applicationConfigurations.first)
+
+    XCTAssertEqual(
+      configuration["UISceneClassName"] as? String,
+      "UIWindowScene"
+    )
+    XCTAssertEqual(
+      configuration["UISceneConfigurationName"] as? String,
+      "flutter"
+    )
+    XCTAssertEqual(
+      configuration["UISceneDelegateClassName"] as? String,
+      "Runner.SceneDelegate"
+    )
+    XCTAssertEqual(
+      configuration["UISceneStoryboardFile"] as? String,
+      "Main"
+    )
+  }
+
+  func testSceneResignAndBackgroundKeepSinglePrivacyShield() throws {
+    let delegate = AppDelegate()
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 640))
+    window.addSubview(UIView(frame: window.bounds))
+
+    delegate.connectSceneWindow(
+      window,
+      isActive: false,
+      protectedDataAvailable: true
+    )
+    delegate.sceneWillResignActive(window: window)
+    delegate.sceneWillResignActive(window: window)
+    delegate.sceneDidEnterBackground(window: window)
+
+    XCTAssertTrue(delegate.sceneWindow === window)
+    XCTAssertTrue(delegate.privacyShieldController.isInstalled)
+    XCTAssertTrue(delegate.privacyShieldController.coveredWindow === window)
+    XCTAssertEqual(
+      window.subviews.filter {
+        $0.accessibilityIdentifier
+          == PrivacyShieldController.accessibilityIdentifier
+      }.count,
+      1
+    )
+  }
+
+  func testSceneBecomesVisibleOnlyWhenProtectedDataIsAvailable() {
+    let delegate = AppDelegate()
+    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 640))
+
+    delegate.connectSceneWindow(
+      window,
+      isActive: true,
+      protectedDataAvailable: true
+    )
+    XCTAssertFalse(delegate.privacyShieldController.isInstalled)
+
+    delegate.sceneDidBecomeActive(
+      window: window,
+      protectedDataAvailable: false
+    )
+    XCTAssertTrue(delegate.privacyShieldController.isInstalled)
+
+    delegate.sceneDidBecomeActive(
+      window: window,
+      protectedDataAvailable: true
+    )
+    XCTAssertFalse(delegate.privacyShieldController.isInstalled)
+  }
+
+  func testDisconnectClearsOnlyTheRegisteredSceneWindow() {
+    let delegate = AppDelegate()
+    let registeredWindow = UIWindow(
+      frame: CGRect(x: 0, y: 0, width: 320, height: 640)
+    )
+    let unrelatedWindow = UIWindow(
+      frame: CGRect(x: 0, y: 0, width: 320, height: 640)
+    )
+    delegate.connectSceneWindow(
+      registeredWindow,
+      isActive: false,
+      protectedDataAvailable: false
+    )
+
+    delegate.disconnectSceneWindow(unrelatedWindow)
+    XCTAssertTrue(delegate.sceneWindow === registeredWindow)
+    XCTAssertTrue(delegate.privacyShieldController.isInstalled)
+
+    delegate.disconnectSceneWindow(registeredWindow)
+    XCTAssertNil(delegate.sceneWindow)
+    XCTAssertFalse(delegate.privacyShieldController.isInstalled)
+  }
+
   func testPrivacyManifestKeepsTrackingAndCollectionDisabled() throws {
     let url = try XCTUnwrap(
       Bundle.main.url(forResource: "PrivacyInfo", withExtension: "xcprivacy")

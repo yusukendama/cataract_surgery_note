@@ -37,7 +37,7 @@ void main() {
     expect(find.byType(OutlinedButton), findsNothing);
   });
 
-  testWidgets('section titles are exposed as accessibility headings', (
+  testWidgets('page and section titles expose their heading levels', (
     tester,
   ) async {
     await tester.pumpWidget(
@@ -48,10 +48,11 @@ void main() {
     );
     final semantics = tester.ensureSemantics();
 
-    expect(
-      tester.getSemantics(find.text('対応の目安')).flagsCollection.isHeader,
-      isTrue,
-    );
+    expect(tester.getSemantics(find.text('登録できる動画の目安')).headingLevel, 1);
+    expect(tester.getSemantics(find.text('対応の目安')).headingLevel, 2);
+
+    await _scrollTo(tester, '医療情報の取り扱い');
+    expect(tester.getSemantics(find.text('医療情報の取り扱い')).headingLevel, 2);
 
     semantics.dispose();
   });
@@ -101,9 +102,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(VideoRegistrationGuidanceScreen), findsOneWidget);
 
-    Navigator.of(
-      tester.element(find.byType(VideoRegistrationGuidanceScreen)),
-    ).pop();
+    Navigator.of(tester.element(find.byType(VideoRegistrationGuidanceScreen)))
+        .pop();
     await tester.pumpAndSettle();
     await navigation;
   });

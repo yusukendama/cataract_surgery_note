@@ -1,1 +1,15 @@
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
 include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    # Keep readable public dependency-injection labels for private fields.
+    prefer_initializing_formals: false

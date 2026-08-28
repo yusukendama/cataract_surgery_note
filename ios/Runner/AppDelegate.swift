@@ -113,12 +113,14 @@ final class VideoSourceAccessManager {
 }
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   let protectedStorageManager = ProtectedStorageManager()
   let privacyShieldController = PrivacyShieldController()
   let protectedDataEventStreamHandler = ProtectedDataEventStreamHandler()
   private let analysisTimeEventStreamHandler = AnalysisTimeEventStreamHandler()
   private let videoSourceAccessManager = VideoSourceAccessManager()
+
+  private(set) weak var sceneWindow: UIWindow?
 
   private var backupChannel: FlutterMethodChannel?
   private var protectedStorageChannel: FlutterMethodChannel?
@@ -131,14 +133,6 @@ final class VideoSourceAccessManager {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
-    if let registrar = registrar(forPlugin: "ProtectedStoragePlugin") {
-      let messenger = registrar.messenger()
-      configureBackupChannel(binaryMessenger: messenger)
-      configureProtectedStorageChannels(binaryMessenger: messenger)
-      configureVideoSourceAccessChannel(binaryMessenger: messenger)
-      configureAnalysisTimeChannels(binaryMessenger: messenger)
-    }
     NotificationCenter.default.addObserver(
       self,
       selector: #selector(protectedDataWillBecomeUnavailable),
@@ -151,11 +145,59 @@ final class VideoSourceAccessManager {
       name: UIApplication.protectedDataDidBecomeAvailableNotification,
       object: nil
     )
-    if application.applicationState != .active
-      || !application.isProtectedDataAvailable {
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  func didInitializeImplicitFlutterEngine(
+    _ engineBridge: FlutterImplicitEngineBridge
+  ) {
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    let messenger = engineBridge.applicationRegistrar.messenger()
+    configureBackupChannel(binaryMessenger: messenger)
+    configureProtectedStorageChannels(binaryMessenger: messenger)
+    configureVideoSourceAccessChannel(binaryMessenger: messenger)
+    configureAnalysisTimeChannels(binaryMessenger: messenger)
+  }
+
+  func connectSceneWindow(
+    _ window: UIWindow?,
+    isActive: Bool,
+    protectedDataAvailable: Bool
+  ) {
+    sceneWindow = window
+    if isActive && protectedDataAvailable {
+      privacyShieldController.remove()
+    } else {
       privacyShieldController.install(on: window)
     }
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  func sceneWillResignActive(window: UIWindow?) {
+    privacyShieldController.install(on: window)
+  }
+
+  func sceneDidEnterBackground(window: UIWindow?) {
+    privacyShieldController.install(on: window)
+  }
+
+  func sceneDidBecomeActive(
+    window: UIWindow?,
+    protectedDataAvailable: Bool
+  ) {
+    sceneWindow = window
+    if protectedDataAvailable {
+      privacyShieldController.remove()
+    } else {
+      privacyShieldController.install(on: window)
+    }
+  }
+
+  func disconnectSceneWindow(_ window: UIWindow?) {
+    guard sceneWindow === window else { return }
+    sceneWindow = nil
+    if privacyShieldController.coveredWindow === window {
+      privacyShieldController.remove()
+    }
   }
 
   private func configureAnalysisTimeChannels(
@@ -233,25 +275,6 @@ final class VideoSourceAccessManager {
       }
     }
     videoSourceAccessChannel = channel
-  }
-
-  override func applicationWillResignActive(_ application: UIApplication) {
-    privacyShieldController.install(on: window)
-    super.applicationWillResignActive(application)
-  }
-
-  override func applicationDidEnterBackground(_ application: UIApplication) {
-    privacyShieldController.install(on: window)
-    super.applicationDidEnterBackground(application)
-  }
-
-  override func applicationDidBecomeActive(_ application: UIApplication) {
-    super.applicationDidBecomeActive(application)
-    if application.isProtectedDataAvailable {
-      privacyShieldController.remove()
-    } else {
-      privacyShieldController.install(on: window)
-    }
   }
 
   private func configureBackupChannel(binaryMessenger: FlutterBinaryMessenger) {
@@ -418,7 +441,7 @@ final class VideoSourceAccessManager {
   @objc private func protectedDataWillBecomeUnavailable(
     _ notification: Notification
   ) {
-    privacyShieldController.install(on: window)
+    privacyShieldController.install(on: sceneWindow)
     videoSourceAccessManager.releaseAll()
     protectedDataEventStreamHandler.publish(isAvailable: false)
   }

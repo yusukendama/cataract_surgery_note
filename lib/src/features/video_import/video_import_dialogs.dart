@@ -192,7 +192,7 @@ class VideoImportAlertDialog extends StatelessWidget {
         title: Focus(
           key: const ValueKey<String>('video-import-dialog-title-focus'),
           autofocus: true,
-          child: Semantics(header: true, child: Text(content.title)),
+          child: Semantics(headingLevel: 1, child: Text(content.title)),
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,

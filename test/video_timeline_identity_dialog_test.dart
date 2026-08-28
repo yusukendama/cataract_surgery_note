@@ -16,11 +16,8 @@ void main() {
 
     final semantics = tester.ensureSemantics();
     expect(
-      tester
-          .getSemantics(find.text('選択した動画について確認してください'))
-          .flagsCollection
-          .isHeader,
-      isTrue,
+      tester.getSemantics(find.text('選択した動画について確認してください')).headingLevel,
+      1,
     );
     semantics.dispose();
 
