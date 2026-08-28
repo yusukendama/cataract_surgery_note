@@ -8,7 +8,7 @@ class VideoRegistrationGuidanceScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('再登録できる動画の目安')),
+      appBar: AppBar(title: const Text('登録できる動画の目安')),
       body: SafeArea(
         child: ListView(
           key: const Key('video-registration-guidance'),
@@ -84,7 +84,7 @@ class VideoRegistrationGuidanceScreen extends StatelessWidget {
               title: 'サポート範囲',
               children: [
                 Text(
-                  '白内障執刀ノートのサポート対象は、再登録できる動画の目安、再選択、アプリのエラーコードまでです。'
+                  '白内障執刀ノートのサポート対象は、登録できる動画の目安、再選択、アプリのエラーコードまでです。'
                   '第三者ツールの操作、契約、料金、出力品質、安全性、保存、削除、障害はサポート対象外です。',
                 ),
               ],

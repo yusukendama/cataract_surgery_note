@@ -184,7 +184,7 @@ guidanceOnlyExtensionsをpickerへ追加することは、再生対応形式の�
 
 拡張子の権威値は、OS pickerが返す`SelectedSurgeryVideo.displayName`の最後のsuffixをASCII小文字へ正規化した値とする。File Providerの一時`path`、保存先path、UIごとの再計算値を判定に使用しない。大文字・小文字は区別せず、拡張子なしとallowlist外は登録しない。
 
-allowlist外のfileはpickerで選択対象にしない。providerがpicker契約外のfileを返した場合もcopyせず、nonCandidateExtensionとして安全に終了する。常設の「再登録できる動画の目安」helpはpickerを開く前から到達可能にする。
+allowlist外のfileはpickerで選択対象にしない。providerがpicker契約外のfileを返した場合もcopyせず、nonCandidateExtensionとして安全に終了する。常設の「登録できる動画の目安」helpはpickerを開く前から到達可能にする。
 
 ### 5.2 登録可能動画
 
@@ -425,7 +425,7 @@ platformまたはcontainerがDRM / 暗号化を明示した場合はprotectedMed
 
 #### FR-023 offline help
 
-「再登録できる動画の目安」helpはapp bundle内のlocal contentとして表示し、network接続を必要としない。
+「登録できる動画の目安」helpはapp bundle内のlocal contentとして表示し、network接続を必要としない。
 
 helpは、picker前の常設入口とnonCandidateExtension dialogから到達できる。unplayableMediaまたはplaybackVerificationTimedOut dialogからは直接開かず、原因未確定の確認を優先する。
 
@@ -652,7 +652,7 @@ createでは「症例への登録は行っていません」、既存症例で�
 **操作**
 
 - 別の動画を選ぶ
-- 再登録できる動画の目安を見る
+- 登録できる動画の目安を見る
 - 閉じる
 
 「変換する」というaction labelを使用せず、外部appを起動しない。
@@ -782,7 +782,7 @@ createではdataInvariantSuffixとして「症例への登録は行っていま�
 
 ## 10. offline help要件
 
-help titleは「再登録できる動画の目安」とする。
+help titleは「登録できる動画の目安」とする。
 
 ### 10.1 対応の目安
 
@@ -823,7 +823,7 @@ help titleは「再登録できる動画の目安」とする。
 
 ### 10.5 第三者toolのsupport境界
 
-白内障執刀ノートのsupport対象は、再登録できる動画の目安、再選択、アプリのerror codeまでとする。第三者toolの操作、契約、料金、出力品質、安全性、保存、削除、障害はsupport対象外であることを表示する。
+白内障執刀ノートのsupport対象は、登録できる動画の目安、再選択、アプリのerror codeまでとする。第三者toolの操作、契約、料金、出力品質、安全性、保存、削除、障害はsupport対象外であることを表示する。
 
 ---
 
@@ -892,7 +892,7 @@ v1.1で新しい永続diagnostic logまたはanalytics SDKを追加しない。V
 
 ### UI-003 継続導線
 
-dialogを閉じた後も、短いerror state、「別の動画を選ぶ」、「再登録できる動画の目安」を画面から再度利用できるようにする。
+dialogを閉じた後も、短いerror state、「別の動画を選ぶ」、「登録できる動画の目安」を画面から再度利用できるようにする。
 
 ### UI-004 VoiceOver
 

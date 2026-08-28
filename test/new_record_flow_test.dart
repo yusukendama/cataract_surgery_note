@@ -106,7 +106,7 @@ void main() {
 
     await tester.tap(find.byTooltip('ヘルプ'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('再登録できる動画の目安'));
+    await tester.tap(find.text('登録できる動画の目安'));
     await tester.pumpAndSettle();
 
     expect(find.byType(VideoRegistrationGuidanceScreen), findsOneWidget);
@@ -134,7 +134,7 @@ void main() {
     expect(find.byType(NewRecordScreen), findsNothing);
     expect(await recordCount(tester), 0);
 
-    await tester.tap(find.text('再登録できる動画の目安を見る'));
+    await tester.tap(find.text('登録できる動画の目安を見る'));
     await tester.pumpAndSettle();
     expect(find.byType(VideoRegistrationGuidanceScreen), findsOneWidget);
     await tester.pageBack();

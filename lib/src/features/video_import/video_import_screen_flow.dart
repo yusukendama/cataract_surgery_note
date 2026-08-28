@@ -500,7 +500,7 @@ class _VideoImportPersistentErrorNoticeState
                 TextButton.icon(
                   onPressed: () => openVideoRegistrationGuidance(context),
                   icon: const Icon(Icons.help_outline),
-                  label: const Text('再登録できる動画の目安'),
+                  label: const Text('登録できる動画の目安'),
                 ),
               ],
             ),
@@ -519,7 +519,7 @@ class VideoRegistrationHelpButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return IconButton(
-      tooltip: '再登録できる動画の目安',
+      tooltip: '登録できる動画の目安',
       onPressed: enabled
           ? () {
               unawaited(openVideoRegistrationGuidance(context));

@@ -2801,7 +2801,7 @@ WHERE surgery_record_id = ? AND step = ?
     final helpButton = tester.widget<IconButton>(
       find
           .ancestor(
-            of: find.byTooltip('再登録できる動画の目安'),
+            of: find.byTooltip('登録できる動画の目安'),
             matching: find.byType(IconButton),
           )
           .first,
@@ -2877,7 +2877,7 @@ WHERE surgery_record_id = ? AND step = ?
           .widget<IconButton>(
             find
                 .ancestor(
-                  of: find.byTooltip('再登録できる動画の目安'),
+                  of: find.byTooltip('登録できる動画の目安'),
                   matching: find.byType(IconButton),
                 )
                 .first,
@@ -4323,10 +4323,10 @@ WHERE surgery_record_id = ? AND step = ?
     );
 
     final navigator = tester.state<NavigatorState>(find.byType(Navigator));
-    await tester.tap(find.byTooltip('再登録できる動画の目安'));
+    await tester.tap(find.byTooltip('登録できる動画の目安'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('再登録できる動画の目安'), findsWidgets);
+    expect(find.text('登録できる動画の目安'), findsWidgets);
     navigator.pop();
     await tester.pumpAndSettle();
     expect(find.textContaining('動画を準備できませんでした'), findsOneWidget);

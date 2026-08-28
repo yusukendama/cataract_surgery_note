@@ -482,7 +482,7 @@ void main() {
     expect(find.text('症例情報'), findsOneWidget);
     expect(find.text('動画'), findsOneWidget);
     expect(find.text('工程記録'), findsOneWidget);
-    expect(find.byTooltip('再登録できる動画の目安'), findsOneWidget);
+    expect(find.byTooltip('登録できる動画の目安'), findsOneWidget);
     final deleteButtonFinder = find.byKey(const Key('delete-record-button'));
     expect(deleteButtonFinder, findsNothing);
     await tester.dragUntilVisible(
@@ -1101,7 +1101,7 @@ void main() {
     await tester.tap(find.text('動画を登録'));
     await pumpUntilVisible(tester, find.text('この拡張子のファイルは登録対象外です'));
 
-    expect(find.text('再登録できる動画の目安を見る'), findsOneWidget);
+    expect(find.text('登録できる動画の目安を見る'), findsOneWidget);
     expect(find.textContaining('元のファイルは変更されていません'), findsOneWidget);
     expect(find.textContaining('写真へのアクセス権限'), findsNothing);
     expect(storage.importCount, 0);

@@ -325,7 +325,7 @@ String _recoveryActionLabel(VideoImportRecoveryAction action) {
     VideoImportRecoveryAction.resetTimingsAndAttach => '工程位置を消去して動画を登録',
     VideoImportRecoveryAction.resetTimingsAndReplace => '工程位置を消去して動画を差し替え',
     VideoImportRecoveryAction.contactSupport => 'サポートへ連絡',
-    VideoImportRecoveryAction.openReferenceHelp => '再登録できる動画の目安を見る',
+    VideoImportRecoveryAction.openReferenceHelp => '登録できる動画の目安を見る',
   };
 }
 

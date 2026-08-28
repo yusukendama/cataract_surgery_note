@@ -62,7 +62,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('別の動画を選ぶ'), findsOneWidget);
-    expect(find.text('再登録できる動画の目安を見る'), findsOneWidget);
+    expect(find.text('登録できる動画の目安を見る'), findsOneWidget);
     expect(find.text('閉じる'), findsOneWidget);
 
     final semantics = tester.ensureSemantics();
@@ -70,7 +70,7 @@ void main() {
       RegExp(
         r'^この拡張子のファイルは登録対象外です\n'
         r'原因と現在の状態: .*登録済みの動画と工程位置は変更していません。\n'
-        r'次の操作: 別の動画を選ぶ、再登録できる動画の目安を見る、閉じる$',
+        r'次の操作: 別の動画を選ぶ、登録できる動画の目安を見る、閉じる$',
         dotAll: true,
       ),
     );
@@ -92,7 +92,7 @@ void main() {
     );
     semantics.dispose();
 
-    await tester.tap(find.text('再登録できる動画の目安を見る'));
+    await tester.tap(find.text('登録できる動画の目安を見る'));
     expect(await future, VideoImportRecoveryAction.openReferenceHelp);
 
     future = showNonCandidateVideoDialog(
@@ -205,7 +205,7 @@ void main() {
     );
     expect(scrollable, findsOneWidget);
 
-    for (final label in <String>['別の動画を選ぶ', '再登録できる動画の目安を見る', '閉じる']) {
+    for (final label in <String>['別の動画を選ぶ', '登録できる動画の目安を見る', '閉じる']) {
       final labelFinder = find.text(label);
       await tester.scrollUntilVisible(labelFinder, 120, scrollable: scrollable);
       await tester.pump();

@@ -14,7 +14,7 @@ void main() {
       ),
     );
 
-    expect(find.text('再登録できる動画の目安'), findsOneWidget);
+    expect(find.text('登録できる動画の目安'), findsOneWidget);
     expect(find.text('対応の目安'), findsOneWidget);
     expect(find.textContaining('H.264（AVC）'), findsOneWidget);
     expect(find.textContaining('8bit、4:2:0、progressive'), findsWidgets);

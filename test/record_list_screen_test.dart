@@ -198,7 +198,7 @@ void main() {
 
     await tester.tap(find.byTooltip('ヘルプ'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('再登録できる動画の目安'));
+    await tester.tap(find.text('登録できる動画の目安'));
     await tester.pumpAndSettle();
 
     expect(find.byType(VideoRegistrationGuidanceScreen), findsOneWidget);

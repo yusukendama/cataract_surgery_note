@@ -155,7 +155,7 @@ void main() {
       expect(find.byType(AlertDialog), findsNothing);
       expect(find.text('症例に動画を登録できませんでした'), findsOneWidget);
       expect(find.text('別の動画を選ぶ'), findsOneWidget);
-      expect(find.text('再登録できる動画の目安'), findsWidgets);
+      expect(find.text('登録できる動画の目安'), findsWidgets);
       expect(find.text('surgery.mp4'), findsOneWidget);
       expect(service.callCount, 1);
     },

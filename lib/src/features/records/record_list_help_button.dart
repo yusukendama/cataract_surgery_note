@@ -37,7 +37,7 @@ class RecordListHelpButton extends StatelessWidget {
           value: _RecordListHelpDestination.videoGuidance,
           child: ListTile(
             leading: Icon(Icons.video_file_outlined),
-            title: Text('再登録できる動画の目安'),
+            title: Text('登録できる動画の目安'),
             contentPadding: EdgeInsets.zero,
           ),
         ),
