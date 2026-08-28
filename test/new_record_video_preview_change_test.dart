@@ -134,6 +134,84 @@ void main() {
       expect(find.textContaining('再確認してください'), findsOneWidget);
     },
   );
+
+  testWidgets('a newer video change cancels and disposes a pending preview', (
+    tester,
+  ) async {
+    final initialFile = (await tester.runAsync(
+      () => _writeVideo(tempDirectory, 'first.mp4', 1),
+    ))!;
+    final pendingFile = (await tester.runAsync(
+      () => _writeVideo(tempDirectory, 'pending.mp4', 2),
+    ))!;
+    final latestFile = (await tester.runAsync(
+      () => _writeVideo(tempDirectory, 'latest.mp4', 3),
+    ))!;
+    final initialCandidate = (await tester.runAsync(
+      () => verifiedVideoCandidateForFile(initialFile),
+    ))!;
+    final pendingCandidate = (await tester.runAsync(
+      () => verifiedVideoCandidateForFile(pendingFile),
+    ))!;
+    final latestCandidate = (await tester.runAsync(
+      () => verifiedVideoCandidateForFile(latestFile),
+    ))!;
+    final platform = _PreviewVideoPlayerPlatform(pendingPlayerIds: const {2});
+    VideoPlayerPlatform.instance = platform;
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          surgeryVideoPickerProvider.overrideWithValue(
+            _SequenceVideoPicker([
+              SelectedSurgeryVideo(
+                path: pendingFile.path,
+                displayName: 'pending.mp4',
+              ),
+              SelectedSurgeryVideo(
+                path: latestFile.path,
+                displayName: 'latest.mp4',
+              ),
+            ]),
+          ),
+          videoImportPreflightProvider.overrideWithValue(
+            _CandidatesByPathPreflight({
+              pendingFile.path: pendingCandidate,
+              latestFile.path: latestCandidate,
+            }),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light,
+          home: NewRecordScreen(initialVideo: initialCandidate),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await _scrollToTop(tester);
+    await tester.tap(find.text('動画を変更'));
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump();
+    expect(find.text('pending.mp4'), findsOneWidget);
+    expect(platform.activePlayerIds, contains(2));
+
+    await tester.tap(find.text('動画を変更'));
+    await tester.pumpAndSettle();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump();
+
+    expect(find.text('latest.mp4'), findsOneWidget);
+    expect(platform.activePlayerIds, contains(3));
+    expect(platform.activePlayerIds, isNot(contains(1)));
+    expect(platform.activePlayerIds, isNot(contains(2)));
+    expect(platform.disposeRequests, containsAll(<int>[1, 2]));
+  });
 }
 
 Future<File> _writeVideo(Directory directory, String name, int byte) async {
@@ -207,6 +285,21 @@ class _QueueVideoPicker implements SurgeryVideoPicker {
   Future<SelectedSurgeryVideo?> pickVideo() async => selection;
 }
 
+class _SequenceVideoPicker implements SurgeryVideoPicker {
+  _SequenceVideoPicker(this._selections);
+
+  final List<SelectedSurgeryVideo> _selections;
+  var _nextSelection = 0;
+
+  @override
+  Future<SelectedSurgeryVideo?> pickVideo() async {
+    if (_nextSelection >= _selections.length) {
+      return null;
+    }
+    return _selections[_nextSelection++];
+  }
+}
+
 class _SelectedCandidatePreflight implements VideoImportPreflight {
   const _SelectedCandidatePreflight(this.candidate);
 
@@ -240,13 +333,52 @@ class _SelectedCandidatePreflight implements VideoImportPreflight {
   }) => operation(candidate);
 }
 
+class _CandidatesByPathPreflight implements VideoImportPreflight {
+  const _CandidatesByPathPreflight(this._candidates);
+
+  final Map<String, VerifiedVideoCandidate> _candidates;
+
+  @override
+  Future<VideoSelectionPreflightResult> inspectSelection(
+    SelectedSurgeryVideo selection, {
+    required int selectionGeneration,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async {
+    cancellationToken?.throwIfCancelled(VideoImportPhase.sourceAccess);
+    return VideoSelectionReady(_candidates[selection.path]!);
+  }
+
+  @override
+  Future<VerifiedVideoCandidate> revalidateForImport(
+    VerifiedVideoCandidate candidate, {
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) async => candidate;
+
+  @override
+  Future<T> withRevalidatedImport<T>(
+    VerifiedVideoCandidate candidate, {
+    required Future<T> Function(VerifiedVideoCandidate admittedCandidate)
+    operation,
+    VideoImportCancellationToken? cancellationToken,
+    VideoImportProgressCallback? onProgress,
+  }) => operation(candidate);
+}
+
 class _PreviewVideoPlayerPlatform extends VideoPlayerPlatform {
-  _PreviewVideoPlayerPlatform({this.failingPlayerIds = const <int>{}});
+  _PreviewVideoPlayerPlatform({
+    this.failingPlayerIds = const <int>{},
+    this.pendingPlayerIds = const <int>{},
+  });
 
   final Set<int> failingPlayerIds;
+  final Set<int> pendingPlayerIds;
   final Set<int> activePlayerIds = <int>{};
   final Set<int> disposeRequests = <int>{};
   final Map<int, Duration> _positions = <int, Duration>{};
+  final Map<int, StreamController<VideoEvent>> _pendingEvents =
+      <int, StreamController<VideoEvent>>{};
   var _nextPlayerId = 1;
 
   @override
@@ -270,6 +402,11 @@ class _PreviewVideoPlayerPlatform extends VideoPlayerPlatform {
         ),
       );
     }
+    if (pendingPlayerIds.contains(playerId)) {
+      final events = StreamController<VideoEvent>();
+      _pendingEvents[playerId] = events;
+      return events.stream;
+    }
     return Stream<VideoEvent>.value(
       VideoEvent(
         eventType: VideoEventType.initialized,
@@ -284,6 +421,7 @@ class _PreviewVideoPlayerPlatform extends VideoPlayerPlatform {
     disposeRequests.add(playerId);
     activePlayerIds.remove(playerId);
     _positions.remove(playerId);
+    await _pendingEvents.remove(playerId)?.close();
   }
 
   @override

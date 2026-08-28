@@ -29,6 +29,7 @@ final class _FaultInjectingProtectedStorage
 
   int? _failureOrdinal;
   bool Function()? _failurePredicate;
+  Future<bool> Function()? _availabilityReader;
   int _verificationsSinceArm = 0;
   bool _isAvailable = true;
 
@@ -62,10 +63,20 @@ final class _FaultInjectingProtectedStorage
     }
   }
 
+  void setAvailabilityReader(Future<bool> Function()? reader) {
+    _availabilityReader = reader;
+  }
+
   Future<void> dispose() => _availability.close();
 
   @override
-  Future<bool> get isAvailable async => _isAvailable;
+  Future<bool> get isAvailable async {
+    final reader = _availabilityReader;
+    if (reader != null) {
+      return reader();
+    }
+    return _isAvailable;
+  }
 
   @override
   Stream<bool> get availabilityChanges async* {
@@ -199,6 +210,19 @@ VerifiedVideoCandidate _candidate() {
     sha256: 'verified-source-sha256',
     playbackEvidence: testVideoPlaybackEvidence,
   );
+}
+
+Future<void> _pumpUntil(WidgetTester tester, bool Function() condition) async {
+  for (var attempt = 0; attempt < 100; attempt++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    if (condition()) {
+      return;
+    }
+  }
+  fail('Condition did not become true');
 }
 
 String? _readTextColumn(
@@ -578,6 +602,131 @@ void main() {
     final durable = await SurgeryRepository(reopened).getRecord(record.id);
     expect(durable?.caseMemo, isEmpty);
   });
+
+  testWidgets(
+    'bootstrap closes a provisional database when availability verification fails',
+    (tester) async {
+      final protection = _FaultInjectingProtectedStorage(
+        const ProtectedStoragePaths(
+          applicationSupportPath: '/test/application-support',
+          databasePath: '/test/records.sqlite',
+        ),
+      );
+      protection.setAvailabilityReader(() async {
+        throw const FileProtectionException(
+          FileProtectionFailureStage.platformChannel,
+        );
+      });
+      final openedDatabases = <_BootstrapTestDatabase>[];
+
+      Future<AppDatabase> openDatabase({
+        required String databasePath,
+        required ProtectedDataRepository protectedDataRepository,
+        required FileProtectionRepository fileProtectionRepository,
+      }) async {
+        final database = _BootstrapTestDatabase();
+        openedDatabases.add(database);
+        return database;
+      }
+
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        for (final database in openedDatabases) {
+          await database.close();
+        }
+        await protection.dispose();
+      });
+
+      await tester.pumpWidget(
+        ProtectedAppBootstrap(
+          protectedStorageRepository: protection,
+          onboardingStateRepository:
+              const _CompletedOnboardingStateRepository(),
+          databaseOpener: openDatabase,
+        ),
+      );
+      await _pumpUntil(
+        tester,
+        () => openedDatabases.length == 1 && openedDatabases.single.isClosed,
+      );
+
+      expect(openedDatabases.single.isClosed, isTrue);
+      expect(find.text('保護されたデータを利用できません'), findsOneWidget);
+      expect(find.text('エラーコード: PS-CHANNEL'), findsOneWidget);
+      expect(find.text('新規症例'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'stale availability success cannot reactivate a locked bootstrap',
+    (tester) async {
+      final protection = _FaultInjectingProtectedStorage(
+        const ProtectedStoragePaths(
+          applicationSupportPath: '/test/application-support',
+          databasePath: '/test/records.sqlite',
+        ),
+      );
+      final availabilityReadStarted = Completer<void>();
+      final availabilityResult = Completer<bool>();
+      protection.setAvailabilityReader(() {
+        if (!availabilityReadStarted.isCompleted) {
+          availabilityReadStarted.complete();
+        }
+        return availabilityResult.future;
+      });
+      final openedDatabases = <_BootstrapTestDatabase>[];
+
+      Future<AppDatabase> openDatabase({
+        required String databasePath,
+        required ProtectedDataRepository protectedDataRepository,
+        required FileProtectionRepository fileProtectionRepository,
+      }) async {
+        final database = _BootstrapTestDatabase();
+        openedDatabases.add(database);
+        return database;
+      }
+
+      addTearDown(() async {
+        if (!availabilityResult.isCompleted) {
+          availabilityResult.complete(false);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        for (final database in openedDatabases) {
+          await database.close();
+        }
+        await protection.dispose();
+      });
+
+      await tester.pumpWidget(
+        ProtectedAppBootstrap(
+          protectedStorageRepository: protection,
+          onboardingStateRepository:
+              const _CompletedOnboardingStateRepository(),
+          databaseOpener: openDatabase,
+        ),
+      );
+      await _pumpUntil(
+        tester,
+        () =>
+            openedDatabases.length == 1 && availabilityReadStarted.isCompleted,
+      );
+
+      protection.setAvailable(false);
+      await _pumpUntil(
+        tester,
+        () => find.text('端末のロックを解除してください').evaluate().isNotEmpty,
+      );
+      availabilityResult.complete(true);
+      await _pumpUntil(tester, () => openedDatabases.single.isClosed);
+
+      expect(openedDatabases.single.isClosed, isTrue);
+      expect(find.text('端末のロックを解除してください'), findsOneWidget);
+      expect(find.text('保護されたデータを利用できません'), findsNothing);
+      expect(find.text('新規症例'), findsNothing);
+    },
+  );
 
   testWidgets(
     'bootstrap removes and closes a fatal database until explicit retry',

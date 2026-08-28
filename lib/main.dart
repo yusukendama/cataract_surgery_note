@@ -137,19 +137,24 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
         _failureStage = FileProtectionFailureStage.unknown;
       });
     }
-    await staleProtectionSubscription?.cancel();
-    await staleDatabase?.close();
+    AppDatabase? provisionalDatabase;
+    StreamSubscription<DatabaseProtectionFatalEvent>?
+    provisionalProtectionSubscription;
     try {
+      await staleProtectionSubscription?.cancel();
+      await staleDatabase?.close();
       final paths = await _protectedStorage.prepareAppStorage();
       final database = await widget.databaseOpener(
         databasePath: paths.databasePath,
         protectedDataRepository: _protectedStorage,
         fileProtectionRepository: _protectedStorage,
       );
-      if (!mounted ||
-          generation != _generation ||
-          !await _protectedStorage.isAvailable) {
-        await database.close();
+      provisionalDatabase = database;
+      if (!mounted || generation != _generation) {
+        return;
+      }
+      final isAvailable = await _protectedStorage.isAvailable;
+      if (!mounted || generation != _generation || !isAvailable) {
         if (mounted && generation == _generation) {
           setState(() => _state = _BootstrapState.locked);
         }
@@ -162,9 +167,8 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
           event: event,
         ),
       );
+      provisionalProtectionSubscription = protectionSubscription;
       if (database.hasFatalProtectionFailure) {
-        await protectionSubscription.cancel();
-        await database.close();
         if (mounted && generation == _generation) {
           setState(() {
             _state = _BootstrapState.failed;
@@ -178,26 +182,36 @@ class _ProtectedAppBootstrapState extends State<ProtectedAppBootstrap> {
         _databaseProtectionSubscription = protectionSubscription;
         _state = _BootstrapState.ready;
       });
+      provisionalProtectionSubscription = null;
+      provisionalDatabase = null;
     } on ProtectedDataUnavailableException {
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() => _state = _BootstrapState.locked);
       }
     } on FileProtectionException catch (error) {
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           _state = _BootstrapState.failed;
           _failureStage = error.stage;
         });
       }
     } on Object {
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           _state = _BootstrapState.failed;
           _failureStage = FileProtectionFailureStage.databaseOpen;
         });
       }
     } finally {
-      _initializationActive = false;
+      try {
+        await provisionalProtectionSubscription?.cancel();
+      } finally {
+        try {
+          await provisionalDatabase?.close();
+        } finally {
+          _initializationActive = false;
+        }
+      }
     }
   }
 

@@ -881,11 +881,7 @@ class _RecordDetailBodyState extends ConsumerState<_RecordDetailBody> {
     try {
       final service = ref.read(recordVideoServiceProvider);
       await service.deleteRecordAndManagedVideos(widget.record.id);
-      ref.invalidate(surgeryRecordsProvider);
-      ref.invalidate(surgeryRecordProgressProvider);
-      ref.invalidate(recordProcedureTimingSnapshotProvider(widget.record.id));
-      ref.invalidate(surgeryAnalysisProvider);
-      ref.invalidate(videoStorageMaintenanceProvider);
+      _invalidateRecordProviders();
       if (mounted) {
         if (service.hasPendingCleanup) {
           _showMessage(

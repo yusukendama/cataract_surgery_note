@@ -26,6 +26,11 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 
 flutter_ios_podfile_setup
 
+# The app only uses FileType.custom, which is backed by UIDocumentPicker.
+# Do not compile file_picker's unused photo-library and audio picker surfaces.
+Pod::PICKER_MEDIA = false
+Pod::PICKER_AUDIO = false
+
 target 'Runner' do
   use_frameworks!
 

@@ -67,6 +67,7 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(paths.databasePath, fixture.manager.databaseURL.path)
     try assertCompleteProtection(fixture.documents)
     try assertCompleteProtection(fixture.manager.databaseURL)
+    try assertExcludedFromBackup(fixture.manager.databaseURL)
     XCTAssertFalse(
       FileManager.default.fileExists(atPath: fixture.manager.videosURL.path)
     )
@@ -87,9 +88,13 @@ class RunnerTests: XCTestCase {
     )
     let wal = URL(fileURLWithPath: fixture.manager.databaseURL.path + "-wal")
     let shm = URL(fileURLWithPath: fixture.manager.databaseURL.path + "-shm")
-    XCTAssertTrue(FileManager.default.createFile(atPath: wal.path, contents: Data()))
-    XCTAssertTrue(FileManager.default.createFile(atPath: shm.path, contents: Data()))
-    for url in [fixture.manager.databaseURL, wal, shm] {
+    let journal = URL(fileURLWithPath: fixture.manager.databaseURL.path + "-journal")
+    for sidecar in [wal, shm, journal] {
+      XCTAssertTrue(
+        FileManager.default.createFile(atPath: sidecar.path, contents: Data())
+      )
+    }
+    for url in [fixture.manager.databaseURL, wal, shm, journal] {
       try FileManager.default.setAttributes(
         [.protectionKey: FileProtectionType.none],
         ofItemAtPath: url.path
@@ -98,8 +103,9 @@ class RunnerTests: XCTestCase {
 
     _ = try fixture.manager.prepareAppStorage()
 
-    for url in [fixture.manager.databaseURL, wal, shm] {
+    for url in [fixture.manager.databaseURL, wal, shm, journal] {
       try assertCompleteProtection(url)
+      try assertExcludedFromBackup(url)
     }
   }
 
@@ -246,9 +252,11 @@ class RunnerTests: XCTestCase {
       )
     }
     try fixture.manager.verifyDatabaseFiles()
+    try assertExcludedFromBackup(fixture.manager.databaseURL)
     for sidecar in [wal, shm]
     where FileManager.default.fileExists(atPath: sidecar.path) {
       try assertCompleteProtection(sidecar)
+      try assertExcludedFromBackup(sidecar)
     }
 
     var logFrames = Int32()
@@ -264,6 +272,7 @@ class RunnerTests: XCTestCase {
       SQLITE_OK
     )
     try fixture.manager.verifyDatabaseFiles()
+    try assertExcludedFromBackup(fixture.manager.databaseURL)
     XCTAssertEqual(sqlite3_close(database), SQLITE_OK)
     database = nil
 
@@ -273,6 +282,11 @@ class RunnerTests: XCTestCase {
       on: database
     )
     try fixture.manager.verifyDatabaseFiles()
+    try assertExcludedFromBackup(fixture.manager.databaseURL)
+    for sidecar in [wal, shm]
+    where FileManager.default.fileExists(atPath: sidecar.path) {
+      try assertExcludedFromBackup(sidecar)
+    }
     XCTAssertEqual(sqlite3_close(database), SQLITE_OK)
     database = nil
   }
@@ -427,6 +441,15 @@ class RunnerTests: XCTestCase {
       file: file,
       line: line
     )
+  }
+
+  private func assertExcludedFromBackup(
+    _ url: URL,
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) throws {
+    let values = try url.resourceValues(forKeys: [.isExcludedFromBackupKey])
+    XCTAssertEqual(values.isExcludedFromBackup, true, file: file, line: line)
   }
 
   private func execute(

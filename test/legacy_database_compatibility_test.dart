@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/file_sha256.dart';
 import 'package:cataract_surgery_note/src/data/record_video_service.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
@@ -94,8 +95,24 @@ void main() {
         'video_display_name',
         'case_memo',
         'review_schema_version',
+        'surgery_day',
       ]),
     );
+    final migratedDays = await database.customSelect('''
+SELECT id, surgery_date, surgery_day
+FROM surgery_records
+ORDER BY id
+''').get();
+    for (final row in migratedDays) {
+      final legacyDisplayDate = DateTime.fromMillisecondsSinceEpoch(
+        row.read<int>('surgery_date'),
+        isUtc: true,
+      ).toLocal();
+      expect(
+        row.read<int>('surgery_day'),
+        SurgeryDayCodec.encode(legacyDisplayDate),
+      );
+    }
     final reviewColumns = await database
         .customSelect('PRAGMA table_info(surgical_step_reviews)')
         .get();
@@ -179,6 +196,42 @@ WHERE surgery_record_id = ? AND step = ?
         step: SurgicalStep.capsulorhexis,
       ))!.isSkipped,
       isFalse,
+    );
+    await repository.close();
+  });
+
+  test('legacy手術日のbackfillは非NULLのcivil値を再openで上書きしない', () async {
+    final fixture = File(p.join(temporaryDirectory.path, 'civil-day.sqlite'));
+    await createBuild1Fixture(fixture);
+
+    var database = openFixtureWithCurrentCompatibility(fixture);
+    await database.customSelect('SELECT 1').getSingle();
+    final initiallyMigrated = await database
+        .customSelect(
+          'SELECT surgery_day FROM surgery_records WHERE id = ?',
+          variables: const [Variable<String>(build1RightRecordId)],
+        )
+        .getSingle();
+    expect(initiallyMigrated.read<int?>('surgery_day'), isNotNull);
+    await database.customStatement(
+      'UPDATE surgery_records SET surgery_day = ? WHERE id = ?',
+      [19991231, build1RightRecordId],
+    );
+    await database.close();
+
+    database = openFixtureWithCurrentCompatibility(fixture);
+    final repository = SurgeryRepository(database);
+    final reopened = await repository.getRecord(build1RightRecordId);
+    expect(reopened!.surgeryDate, DateTime(1999, 12, 31));
+    expect(
+      (await database
+              .customSelect(
+                'SELECT surgery_day FROM surgery_records WHERE id = ?',
+                variables: const [Variable<String>(build1RightRecordId)],
+              )
+              .getSingle())
+          .read<int>('surgery_day'),
+      19991231,
     );
     await repository.close();
   });

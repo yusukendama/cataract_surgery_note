@@ -9,6 +9,26 @@ import '../domain/surgery_trend.dart';
 import 'app_database.dart';
 import 'record_mutation_coordinator.dart';
 
+const _surgeryDayOrderExpression = '''
+COALESCE(
+  surgery_day,
+  CAST(
+    strftime('%Y%m%d', surgery_date / 1000.0, 'unixepoch', 'localtime')
+    AS INTEGER
+  )
+)
+''';
+
+const _aliasedSurgeryDayOrderExpression = '''
+COALESCE(
+  r.surgery_day,
+  CAST(
+    strftime('%Y%m%d', r.surgery_date / 1000.0, 'unixepoch', 'localtime')
+    AS INTEGER
+  )
+)
+''';
+
 class ReviewSaveResult {
   const ReviewSaveResult({required this.record, required this.reviews});
 
@@ -159,7 +179,7 @@ SELECT EXISTS(
   Future<List<SurgeryRecord>> watchableListSnapshot() async {
     final rows = await _database.customSelect('''
 SELECT * FROM surgery_records
-ORDER BY surgery_date DESC, created_at DESC, id ASC
+ORDER BY $_surgeryDayOrderExpression DESC, created_at DESC, id ASC
 ''', readsFrom: const {}).get();
     return rows.map(_recordFromRow).toList();
   }
@@ -168,7 +188,7 @@ ORDER BY surgery_date DESC, created_at DESC, id ASC
     return _database
         .customSelect('''
 SELECT * FROM surgery_records
-ORDER BY surgery_date DESC, created_at DESC, id ASC
+ORDER BY $_surgeryDayOrderExpression DESC, created_at DESC, id ASC
 ''', readsFrom: const {})
         .watch()
         .map((rows) => rows.map(_recordFromRow).toList());
@@ -226,7 +246,9 @@ FROM surgery_records AS r
 LEFT JOIN surgical_step_reviews AS s
   ON s.surgery_record_id = r.id
 GROUP BY r.id
-ORDER BY r.surgery_date DESC, r.created_at DESC, r.id ASC
+ORDER BY $_aliasedSurgeryDayOrderExpression DESC,
+  r.created_at DESC,
+  r.id ASC
 ''', readsFrom: const {}).get();
     return rows
         .map((row) {
@@ -302,6 +324,7 @@ WHERE surgery_record_id = ?
 SELECT
   r.id AS record_id,
   r.surgery_date,
+  r.surgery_day,
   r.created_at,
   r.eye_side,
   s.step,
@@ -311,7 +334,9 @@ SELECT
 FROM surgery_records AS r
 LEFT JOIN surgical_step_reviews AS s
   ON s.surgery_record_id = r.id
-ORDER BY r.surgery_date ASC, r.created_at ASC, r.id COLLATE BINARY ASC
+ORDER BY $_aliasedSurgeryDayOrderExpression ASC,
+  r.created_at ASC,
+  r.id COLLATE BINARY ASC
 ''', readsFrom: const {}).get();
 
     final catalogById = <String, SurgeryAnalysisRecord>{};
@@ -322,7 +347,7 @@ ORDER BY r.surgery_date ASC, r.created_at ASC, r.id COLLATE BINARY ASC
       if (recordId.isEmpty) {
         throw const FormatException('分析SnapshotのrecordIdが空です。');
       }
-      final surgeryDate = _millisToDate(row.read<int>('surgery_date'));
+      final surgeryDate = _surgeryDateFromRow(row);
       final createdAt = _millisToDate(row.read<int>('created_at'));
       final rawEyeSide = row.read<String>('eye_side');
       final eyeSide = EyeSide.values
@@ -479,14 +504,15 @@ ORDER BY r.surgery_date ASC, r.created_at ASC, r.id COLLATE BINARY ASC
         await _database.customStatement(
           '''
 INSERT INTO surgery_records (
-  id, surgery_date, eye_side, review_status,
+  id, surgery_date, surgery_day, eye_side, review_status,
   review_schema_version, video_path, video_display_name,
   case_memo, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''',
           [
             record.id,
             _dateToMillis(record.surgeryDate),
+            SurgeryDayCodec.encode(record.surgeryDate),
             record.eyeSide.name,
             record.reviewStatus.name,
             record.reviewSchemaVersion,
@@ -798,11 +824,12 @@ WHERE surgery_record_id = ?
       final affected = await _database.customUpdate(
         '''
 UPDATE surgery_records
-SET surgery_date = ?, eye_side = ?, updated_at = ?
+SET surgery_date = ?, surgery_day = ?, eye_side = ?, updated_at = ?
 WHERE id = ?
 ''',
         variables: <Variable<Object>>[
           Variable<int>(_dateToMillis(normalizedDate)),
+          Variable<int>(SurgeryDayCodec.encode(normalizedDate)),
           Variable<String>(eyeSide.name),
           Variable<int>(_dateToMillis(DateTime.now())),
           Variable<String>(surgeryRecordId),
@@ -1513,7 +1540,7 @@ INSERT OR IGNORE INTO surgical_step_reviews (
   SurgeryRecord _recordFromRow(QueryRow row) {
     return SurgeryRecord(
       id: row.read<String>('id'),
-      surgeryDate: _millisToDate(row.read<int>('surgery_date')),
+      surgeryDate: _surgeryDateFromRow(row),
       eyeSide: EyeSide.values.byName(row.read<String>('eye_side')),
       reviewStatus: ReviewStatus.values.byName(
         row.read<String>('review_status'),
@@ -1550,5 +1577,12 @@ INSERT OR IGNORE INTO surgical_step_reviews (
       milliseconds,
       isUtc: true,
     ).toLocal();
+  }
+
+  DateTime _surgeryDateFromRow(QueryRow row) {
+    final encodedDay = row.read<int?>('surgery_day');
+    return encodedDay == null
+        ? _millisToDate(row.read<int>('surgery_date'))
+        : SurgeryDayCodec.decode(encodedDay);
   }
 }

@@ -108,11 +108,13 @@ final class ProtectedStorageManager {
     try perform(stage: .databaseFile) {
       try requireRegularFileWithoutLink(databaseURL)
       try verifyOrRepairCompleteProtection(of: databaseURL)
+      try applyAndVerifyBackupExclusion(to: databaseURL)
     }
     for sidecar in existingDatabaseSidecars() {
       try perform(stage: .databaseSidecar) {
         try requireRegularFileWithoutLink(sidecar)
         try verifyOrRepairCompleteProtection(of: sidecar)
+        try applyAndVerifyBackupExclusion(to: sidecar)
       }
     }
   }
@@ -164,12 +166,14 @@ final class ProtectedStorageManager {
       }
       try requireRegularFileWithoutLink(databaseURL)
       try applyAndVerifyCompleteProtection(to: databaseURL)
+      try applyAndVerifyBackupExclusion(to: databaseURL)
     }
 
     for sidecar in existingDatabaseSidecars() {
       try perform(stage: .databaseSidecar) {
         try requireRegularFileWithoutLink(sidecar)
         try applyAndVerifyCompleteProtection(to: sidecar)
+        try applyAndVerifyBackupExclusion(to: sidecar)
       }
     }
   }

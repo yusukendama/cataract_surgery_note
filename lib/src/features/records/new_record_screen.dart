@@ -333,7 +333,8 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
         candidate,
         cancellationToken: cancellationToken,
       );
-      if (!mounted) {
+      if (!mounted ||
+          !identical(_pendingPreviewCancellation, cancellationToken)) {
         await _disposeVideoController(controller);
         return;
       }
@@ -344,7 +345,8 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
         _isVideoLoading = false;
       });
     } on Object {
-      if (!mounted) {
+      if (!mounted ||
+          !identical(_pendingPreviewCancellation, cancellationToken)) {
         return;
       }
       setState(() {
@@ -376,7 +378,6 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
       return;
     }
     setState(() => _isSelectingVideo = true);
-    _pendingPreviewCancellation?.cancel();
     final currentController = _videoController;
     try {
       if (currentController?.value.isPlaying ?? false) {
@@ -403,6 +404,9 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
           return;
         }
 
+        final previousCancellation = _pendingPreviewCancellation;
+        _pendingPreviewCancellation = null;
+        previousCancellation?.cancel();
         await _commitVideoChange(
           candidate,
           null,
@@ -417,7 +421,6 @@ class _NewRecordScreenState extends ConsumerState<NewRecordScreen> {
         return;
       }
     } finally {
-      _pendingPreviewCancellation = null;
       if (mounted) {
         setState(() => _isSelectingVideo = false);
       }

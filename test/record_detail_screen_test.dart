@@ -685,7 +685,7 @@ void main() {
     expect(unchangedCcc!.reflection, '保持する記録');
   });
 
-  testWidgets('症例削除後は到着時刻snapshotの保持cacheを破棄する', (tester) async {
+  testWidgets('症例削除後は症例と到着時刻snapshotの保持cacheを破棄する', (tester) async {
     final (database, record) = await createRecord(tester);
     addTearDown(database.close);
     final repository = SurgeryRepository(database);
@@ -745,14 +745,28 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '削除'));
     await pumpUntilVisible(tester, find.text('症例を削除しました'));
+    await tester.pump();
 
     late SurgeryRecord? deletedRecord;
+    late SurgeryRecord? invalidatedRecord;
     await tester.runAsync(() async {
-      deletedRecord = await repository.getRecord(record.id);
+      deletedRecord = await repository
+          .getRecord(record.id)
+          .timeout(
+            const Duration(seconds: 2),
+            onTimeout: () => throw StateError('repository read timed out'),
+          );
+      invalidatedRecord = await container
+          .read(surgeryRecordProvider(record.id).future)
+          .timeout(
+            const Duration(seconds: 2),
+            onTimeout: () => throw StateError('provider read timed out'),
+          );
     });
     container.read(recordProcedureTimingSnapshotProvider(record.id));
 
     expect(deletedRecord, isNull);
+    expect(invalidatedRecord, isNull);
     expect(snapshotReads, 2);
   });
 

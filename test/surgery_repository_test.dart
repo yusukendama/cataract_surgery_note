@@ -2,6 +2,7 @@ import 'package:cataract_surgery_note/src/data/app_database.dart';
 import 'package:cataract_surgery_note/src/data/surgery_repository.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_models.dart';
 import 'package:cataract_surgery_note/src/domain/surgery_trend.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -45,6 +46,89 @@ void main() {
     expect(restored.surgeryDate.year, 2026);
     expect(restored.surgeryDate.month, 6);
     expect(restored.surgeryDate.day, 29);
+
+    final persisted = await database
+        .customSelect(
+          'SELECT surgery_day FROM surgery_records WHERE id = ?',
+          variables: [Variable<String>(record.id)],
+        )
+        .getSingle();
+    expect(persisted.read<int>('surgery_day'), 20260629);
+  });
+
+  test('civil手術日を正としてlegacy instantと独立して読取・整列する', () async {
+    final earlier = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 20),
+      eyeSide: EyeSide.right,
+    );
+    final later = await repository.createRecord(
+      surgeryDate: DateTime(2026, 8, 21),
+      eyeSide: EyeSide.left,
+    );
+    await database.customStatement(
+      'UPDATE surgery_records SET surgery_date = surgery_date + ? WHERE id = ?',
+      [const Duration(days: 30).inMilliseconds, earlier.id],
+    );
+    await database.customStatement(
+      'UPDATE surgery_records SET surgery_date = surgery_date - ? WHERE id = ?',
+      [const Duration(days: 30).inMilliseconds, later.id],
+    );
+
+    final restoredEarlier = await repository.getRecord(earlier.id);
+    expect(restoredEarlier!.surgeryDate, DateTime(2026, 8, 20));
+    expect(
+      (await repository.watchableListSnapshot()).map((record) => record.id),
+      [later.id, earlier.id],
+    );
+    expect(
+      (await repository.fetchRecordProgressSnapshots()).map(
+        (snapshot) => snapshot.record.id,
+      ),
+      [later.id, earlier.id],
+    );
+
+    final analysis = await repository.fetchAnalysisSnapshot();
+    expect(analysis.catalog.map((record) => record.recordId), [
+      earlier.id,
+      later.id,
+    ]);
+    expect(analysis.measurements.map((measurement) => measurement.recordId), [
+      earlier.id,
+      later.id,
+    ]);
+  });
+
+  test('surgery_dayがNULLのraw行は旧instant codecで読み込む', () async {
+    await database.customSelect('SELECT 1').getSingle();
+    final legacyInstant = DateTime.utc(2026, 8, 20, 18, 30);
+    final createdAt = DateTime.utc(2026, 8, 20, 19).millisecondsSinceEpoch;
+    await database.customStatement(
+      '''
+INSERT INTO surgery_records (
+  id, surgery_date, eye_side, review_status, review_schema_version,
+  video_path, video_display_name, case_memo, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, NULL, NULL, '', ?, ?)
+''',
+      [
+        'legacy-null-surgery-day',
+        legacyInstant.millisecondsSinceEpoch,
+        EyeSide.right.name,
+        ReviewStatus.draft.name,
+        null,
+        createdAt,
+        createdAt,
+      ],
+    );
+
+    final restored = await repository.getRecord('legacy-null-surgery-day');
+    expect(restored!.surgeryDate, legacyInstant.toLocal());
+    final row = await database
+        .customSelect(
+          'SELECT surgery_day FROM surgery_records WHERE id = ?',
+          variables: const [Variable<String>('legacy-null-surgery-day')],
+        )
+        .getSingle();
+    expect(row.read<int?>('surgery_day'), isNull);
   });
 
   test('CCCレビュー保存と再取得', () async {
@@ -604,7 +688,7 @@ CREATE VIEW surgery_records AS
 SELECT * FROM surgery_records_source
 UNION ALL
 SELECT
-  id, surgery_date + 86400000, eye_side, review_status,
+  id, surgery_date + 86400000, surgery_day + 1, eye_side, review_status,
   review_schema_version, video_path, video_display_name, case_memo,
   created_at, updated_at
 FROM surgery_records_source

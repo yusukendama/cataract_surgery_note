@@ -8,6 +8,34 @@ import 'package:drift_flutter/drift_flutter.dart';
 
 import 'protected_storage.dart';
 
+/// Stable storage codec for a calendar date without a time zone.
+///
+/// Surgery dates are user-entered civil dates, not instants. Persisting the
+/// components as YYYYMMDD keeps the same displayed day when the device time
+/// zone changes, while timestamps continue to use UTC epoch milliseconds.
+abstract final class SurgeryDayCodec {
+  static int encode(DateTime date) {
+    if (date.year < 1 || date.year > 9999) {
+      throw RangeError.range(date.year, 1, 9999, 'date.year');
+    }
+    return date.year * 10000 + date.month * 100 + date.day;
+  }
+
+  static DateTime decode(int encodedDay) {
+    final year = encodedDay ~/ 10000;
+    final month = (encodedDay ~/ 100) % 100;
+    final day = encodedDay % 100;
+    if (year < 1 || year > 9999) {
+      throw FormatException('Invalid surgery day: $encodedDay');
+    }
+    final decoded = DateTime(year, month, day);
+    if (decoded.year != year || decoded.month != month || decoded.day != day) {
+      throw FormatException('Invalid surgery day: $encodedDay');
+    }
+    return decoded;
+  }
+}
+
 enum DatabaseProtectionFatalReason {
   protectedDataUnavailable,
   verificationFailed,
@@ -115,6 +143,7 @@ class AppDatabase extends GeneratedDatabase {
 CREATE TABLE IF NOT EXISTS surgery_records (
   id TEXT NOT NULL PRIMARY KEY,
   surgery_date INTEGER NOT NULL,
+  surgery_day INTEGER NULL,
   eye_side TEXT NOT NULL,
   review_status TEXT NOT NULL,
   review_schema_version INTEGER NULL,
@@ -159,6 +188,20 @@ ON surgical_step_reviews(surgery_record_id)
         'review_schema_version',
         'INTEGER NULL',
       );
+      await _ensureColumn('surgery_records', 'surgery_day', 'INTEGER NULL');
+      // Legacy surgery_date values were displayed by decoding the stored UTC
+      // instant in the device's current local time zone. Capture that visible
+      // calendar day exactly once; later opens must not reinterpret it after a
+      // time-zone change. Malformed legacy values remain NULL and keep using
+      // the repository's legacy fallback.
+      await customStatement('''
+UPDATE surgery_records
+SET surgery_day = CAST(
+  strftime('%Y%m%d', surgery_date / 1000.0, 'unixepoch', 'localtime')
+  AS INTEGER
+)
+WHERE surgery_day IS NULL
+''');
       await _ensureColumn(
         'surgical_step_reviews',
         'is_skipped',
