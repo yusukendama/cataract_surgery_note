@@ -17,8 +17,9 @@ import 'record_detail_screen.dart';
 import 'record_list_help_button.dart';
 import 'record_month_group.dart';
 
-typedef NewRecordScreenBuilder =
-    Widget Function(VerifiedVideoCandidate candidate);
+typedef NewRecordScreenBuilder = Widget Function(
+  VerifiedVideoCandidate candidate,
+);
 
 class RecordListScreen extends ConsumerStatefulWidget {
   const RecordListScreen({this.newRecordScreenBuilder, super.key});
@@ -522,9 +523,9 @@ class _RecordListItem extends ConsumerWidget {
                               children: [
                                 Text(
                                   dateLabel,
-                                  style: Theme.of(
-                                    context,
-                                  ).textTheme.titleMedium,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleMedium,
                                 ),
                                 Text(
                                   record.eyeSide.label,
@@ -744,9 +745,8 @@ class _RecordMetadataLine extends StatelessWidget {
         Expanded(
           child: Text(
             text,
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: color),
+            style: Theme.of(context).textTheme.bodySmall
+                ?.copyWith(color: color),
           ),
         ),
       ],
@@ -900,11 +900,12 @@ class _TotalRecordCount extends StatelessWidget {
               container: true,
               label: '総手術件数 $count件',
               child: ExcludeSemantics(
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
+                child: Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 16,
+                  runSpacing: 4,
                   children: [
                     Text('総手術件数', style: textTheme.titleMedium),
-                    const SizedBox(width: 16),
                     Text(
                       '$count件',
                       key: const Key('record-total-count-value'),
@@ -917,21 +918,69 @@ class _TotalRecordCount extends StatelessWidget {
                 ),
               ),
             ),
-            Semantics(
-              label: '要対応のみ',
-              button: true,
+            _CompactNeedsAttentionFilter(
               selected: showNeedsAttentionOnly,
-              onTap: () => onFilterChanged(!showNeedsAttentionOnly),
-              child: ExcludeSemantics(
-                child: FilterChip(
-                  key: const Key('record-needs-attention-filter'),
-                  label: const Text('要対応のみ'),
-                  selected: showNeedsAttentionOnly,
-                  onSelected: onFilterChanged,
-                ),
-              ),
+              onSelected: onFilterChanged,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CompactNeedsAttentionFilter extends StatelessWidget {
+  const _CompactNeedsAttentionFilter({
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final bool selected;
+  final ValueChanged<bool> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final highContrast = MediaQuery.highContrastOf(context);
+
+    return Semantics(
+      key: const Key('record-needs-attention-filter-tap-target'),
+      label: '要対応のみ',
+      button: true,
+      selected: selected,
+      onTap: () => onSelected(!selected),
+      child: ExcludeSemantics(
+        child: FilterChip(
+          key: const Key('record-needs-attention-filter'),
+          label: const Text('要対応のみ'),
+          labelStyle: textTheme.labelMedium?.copyWith(
+            color: selected
+                ? colorScheme.onSurface
+                : colorScheme.onSurfaceVariant,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+          ),
+          labelPadding: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          selected: selected,
+          onSelected: onSelected,
+          showCheckmark: true,
+          checkmarkColor: colorScheme.onSurface,
+          backgroundColor: Colors.transparent,
+          selectedColor: colorScheme.surfaceContainerHighest,
+          side: BorderSide(
+            color: selected || highContrast
+                ? colorScheme.outline
+                : colorScheme.outlineVariant,
+          ),
+          shape: const StadiumBorder(),
+          elevation: 0,
+          pressElevation: 0,
+          shadowColor: Colors.transparent,
+          selectedShadowColor: Colors.transparent,
+          // Keep Material's 32dp chip surface while retaining its 48dp target.
+          materialTapTargetSize: MaterialTapTargetSize.padded,
+          visualDensity: VisualDensity.standard,
         ),
       ),
     );
