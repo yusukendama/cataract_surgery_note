@@ -10,12 +10,26 @@ import 'package:cataract_surgery_note/src/features/records/record_detail_screen.
 import 'package:cataract_surgery_note/src/features/records/record_list_screen.dart';
 import 'package:cataract_surgery_note/src/features/records/record_month_group.dart';
 import 'package:cataract_surgery_note/src/features/video_import/video_registration_guidance_screen.dart';
+import 'package:cataract_surgery_note/src/theme/app_theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 typedef _VideoStateLoader = Future<RecordVideoState> Function();
 typedef _ProgressLoader = Future<List<SurgeryRecordProgress>> Function();
+
+double _contrastRatio(Color first, Color second) {
+  final firstLuminance = first.computeLuminance();
+  final secondLuminance = second.computeLuminance();
+  final lighter = firstLuminance > secondLuminance
+      ? firstLuminance
+      : secondLuminance;
+  final darker = firstLuminance > secondLuminance
+      ? secondLuminance
+      : firstLuminance;
+  return (lighter + 0.05) / (darker + 0.05);
+}
 
 void main() {
   SurgeryRecord record({
@@ -76,6 +90,11 @@ void main() {
     _ProgressLoader? progressLoader,
     Map<String, RecordVideoState> videoStates = const {},
     Map<String, _VideoStateLoader> videoLoaders = const {},
+    TextScaler? textScaler,
+    ThemeData? theme,
+    ThemeData? darkTheme,
+    ThemeMode? themeMode,
+    bool highContrast = false,
     bool settle = true,
   }) async {
     configureView(tester, size: size);
@@ -105,12 +124,10 @@ void main() {
             );
           }),
         if (detailRecord != null) ...[
-          surgeryRecordProvider(
-            detailRecord.id,
-          ).overrideWith((ref) async => detailRecord),
-          recordVideoFileProvider(
-            detailRecord.id,
-          ).overrideWith((ref) async => null),
+          surgeryRecordProvider(detailRecord.id)
+              .overrideWith((ref) async => detailRecord),
+          recordVideoFileProvider(detailRecord.id)
+              .overrideWith((ref) async => null),
         ],
       ],
     );
@@ -118,7 +135,24 @@ void main() {
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(home: RecordListScreen()),
+        child: MaterialApp(
+          theme: theme,
+          darkTheme: darkTheme,
+          themeMode: themeMode ?? ThemeMode.system,
+          builder: textScaler == null && !highContrast
+              ? null
+              : (context, child) {
+                  final mediaQuery = MediaQuery.of(context);
+                  return MediaQuery(
+                    data: mediaQuery.copyWith(
+                      textScaler: textScaler ?? mediaQuery.textScaler,
+                      highContrast: highContrast,
+                    ),
+                    child: child!,
+                  );
+                },
+          home: const RecordListScreen(),
+        ),
       ),
     );
     if (settle) {
@@ -183,6 +217,172 @@ void main() {
     expect(find.text('最初の症例を登録'), findsOneWidget);
     expect(find.byType(SliverPersistentHeader), findsNothing);
   });
+
+  testWidgets('要対応フィルターは見た目を小さく保ち操作領域を44以上確保する', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await pumpList(tester, [
+      record(id: 'compact-filter', surgeryDate: DateTime(2026, 8, 8)),
+    ]);
+
+    final chipFinder = find.byKey(const Key('record-needs-attention-filter'));
+    final tapTargetFinder = find.byKey(
+      const Key('record-needs-attention-filter-tap-target'),
+    );
+    final chip = tester.widget<FilterChip>(chipFinder);
+    final colorScheme = Theme.of(tester.element(chipFinder)).colorScheme;
+
+    expect(tester.getSize(chipFinder).width, lessThan(160));
+    expect(tester.getSize(tapTargetFinder).height, greaterThanOrEqualTo(44));
+    expect(tester.getSize(tapTargetFinder).width, greaterThanOrEqualTo(44));
+    expect(chip.materialTapTargetSize, MaterialTapTargetSize.padded);
+    expect(chip.visualDensity, VisualDensity.standard);
+    expect(chip.labelPadding, const EdgeInsets.symmetric(horizontal: 4));
+    expect(chip.padding, const EdgeInsets.symmetric(horizontal: 4));
+    expect(
+      chip.labelStyle?.fontSize,
+      Theme.of(tester.element(chipFinder)).textTheme.labelMedium?.fontSize,
+    );
+    expect(chip.backgroundColor, Colors.transparent);
+    expect(chip.selectedColor, colorScheme.surfaceContainerHighest);
+    expect(chip.showCheckmark, isTrue);
+    expect(chip.avatar, isNull);
+
+    final semanticsNode = tester.getSemantics(find.bySemanticsLabel('要対応のみ'));
+    expect(semanticsNode.rect.height, greaterThanOrEqualTo(44));
+    expect(
+      semanticsNode.getSemanticsData().flagsCollection.isSelected,
+      Tristate.isFalse,
+    );
+
+    final tapTargetRect = tester.getRect(tapTargetFinder);
+    await tester.tapAt(Offset(tapTargetRect.center.dx, tapTargetRect.top + 2));
+    await tester.pumpAndSettle();
+
+    final selectedChip = tester.widget<FilterChip>(chipFinder);
+    expect(selectedChip.selected, isTrue);
+    expect(selectedChip.labelStyle?.fontWeight, FontWeight.w600);
+    semantics.dispose();
+  });
+
+  testWidgets('狭幅と文字倍率2で総件数とフィルターを安全に折り返す', (tester) async {
+    await pumpList(
+      tester,
+      [record(id: 'narrow-filter', surgeryDate: DateTime(2026, 8, 8))],
+      size: const Size(320, 700),
+      textScaler: TextScaler.linear(2),
+    );
+
+    expect(tester.takeException(), isNull);
+    final cardRect = tester.getRect(
+      find.byKey(const Key('record-total-count')),
+    );
+    final countRect = tester.getRect(
+      find.byKey(const Key('record-total-count-value')),
+    );
+    final filterRect = tester.getRect(
+      find.byKey(const Key('record-needs-attention-filter-tap-target')),
+    );
+
+    void expectFilterLabelFits() {
+      final labelParagraphFinder = find.byWidgetPredicate(
+        (widget) => widget is RichText && widget.text.toPlainText() == '要対応のみ',
+      );
+      expect(labelParagraphFinder, findsOneWidget);
+      final paragraph = tester.renderObject<RenderParagraph>(
+        labelParagraphFinder,
+      );
+      expect(paragraph.didExceedMaxLines, isFalse);
+    }
+
+    expect(filterRect.top, greaterThan(countRect.bottom));
+    expect(filterRect.left, closeTo(countRect.left, 1));
+    expect(filterRect.right, lessThanOrEqualTo(cardRect.right - 20));
+    expectFilterLabelFits();
+
+    await tester.tap(find.byKey(const Key('record-needs-attention-filter')));
+    await tester.pumpAndSettle();
+
+    expectFilterLabelFits();
+    expect(tester.takeException(), isNull);
+  });
+
+  for (final themeMode in [ThemeMode.light, ThemeMode.dark]) {
+    for (final highContrast in [false, true]) {
+      testWidgets('本番${themeMode.name}テーマ・高コントラスト$highContrastで状態を判別できる', (
+        tester,
+      ) async {
+        await pumpList(
+          tester,
+          [record(id: 'themed-filter', surgeryDate: DateTime(2026, 8, 8))],
+          theme: AppTheme.light,
+          darkTheme: AppTheme.dark,
+          themeMode: themeMode,
+          highContrast: highContrast,
+        );
+
+        final chipFinder = find.byKey(
+          const Key('record-needs-attention-filter'),
+        );
+        final context = tester.element(chipFinder);
+        final colorScheme = Theme.of(context).colorScheme;
+        final chip = tester.widget<FilterChip>(chipFinder);
+
+        expect(
+          Theme.of(context).brightness,
+          themeMode == ThemeMode.light ? Brightness.light : Brightness.dark,
+        );
+        expect(MediaQuery.highContrastOf(context), highContrast);
+        expect(chip.backgroundColor, Colors.transparent);
+        expect(chip.selectedColor, colorScheme.surfaceContainerHighest);
+        expect(
+          chip.side?.color,
+          highContrast ? colorScheme.outline : colorScheme.outlineVariant,
+        );
+        expect(chip.labelStyle?.color, colorScheme.onSurfaceVariant);
+        expect(chip.showCheckmark, isTrue);
+        expect(
+          _contrastRatio(
+            chip.labelStyle!.color!,
+            colorScheme.surfaceContainerLow,
+          ),
+          greaterThanOrEqualTo(4.5),
+        );
+        if (highContrast) {
+          expect(
+            _contrastRatio(chip.side!.color, colorScheme.surfaceContainerLow),
+            greaterThanOrEqualTo(3),
+          );
+        }
+
+        await tester.tap(chipFinder);
+        await tester.pumpAndSettle();
+
+        final selectedChip = tester.widget<FilterChip>(chipFinder);
+        expect(selectedChip.selected, isTrue);
+        expect(selectedChip.side?.color, colorScheme.outline);
+        expect(selectedChip.labelStyle?.color, colorScheme.onSurface);
+        expect(selectedChip.labelStyle?.fontWeight, FontWeight.w600);
+        expect(selectedChip.checkmarkColor, colorScheme.onSurface);
+        expect(
+          _contrastRatio(
+            selectedChip.labelStyle!.color!,
+            colorScheme.surfaceContainerHighest,
+          ),
+          greaterThanOrEqualTo(4.5),
+        );
+        if (highContrast) {
+          expect(
+            _contrastRatio(
+              selectedChip.side!.color,
+              colorScheme.surfaceContainerHighest,
+            ),
+            greaterThanOrEqualTo(3),
+          );
+        }
+        expect(tester.takeException(), isNull);
+      });
+    }
+  }
 
   testWidgets('ヘルプメニューから使い方と動画の目安を開ける', (tester) async {
     await pumpList(tester, const []);
@@ -312,6 +512,14 @@ void main() {
     expect(find.text('動画あり'), findsNothing);
     expect(failedStateLoadCount, 1);
 
+    await tester.tap(find.byKey(const Key('record-needs-attention-filter')));
+    await tester.pumpAndSettle();
+
+    for (final id in ['unregistered', 'missing', 'invalid', 'check-failed']) {
+      expect(find.byKey(Key('record-list-item-$id')), findsOneWidget);
+    }
+    expect(find.byKey(const Key('record-list-item-normal')), findsNothing);
+
     await tester.tap(
       find.byKey(const Key('record-video-state-retry-check-failed')),
     );
@@ -319,6 +527,10 @@ void main() {
 
     expect(failedStateLoadCount, 2);
     expect(find.text('動画状態を確認できません'), findsNothing);
+    expect(
+      find.byKey(const Key('record-list-item-check-failed')),
+      findsNothing,
+    );
   });
 
   testWidgets('同一症例のレビュー中と動画問題を複数Chipで表示する', (tester) async {
@@ -870,12 +1082,25 @@ void main() {
       [august, july],
       size: const Size(800, 1000),
       detailRecord: july,
+      progress: [
+        progressFor(
+          august,
+          timingReviewStatus: CaseTimingReviewStatus.inProgress,
+        ),
+        progressFor(
+          july,
+          timingReviewStatus: CaseTimingReviewStatus.inProgress,
+        ),
+      ],
     );
 
     await tester.tap(find.byKey(const Key('record-month-header-2026-7')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('record-list-item-august')), findsOneWidget);
     expect(find.byKey(const Key('record-list-item-july')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('record-needs-attention-filter')));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('record-list-item-july')));
     await tester.pumpAndSettle();
@@ -886,6 +1111,49 @@ void main() {
     expect(find.byType(RecordListScreen), findsOneWidget);
     expect(find.byKey(const Key('record-list-item-august')), findsOneWidget);
     expect(find.byKey(const Key('record-list-item-july')), findsOneWidget);
+    expect(
+      tester
+          .widget<FilterChip>(
+            find.byKey(const Key('record-needs-attention-filter')),
+          )
+          .selected,
+      isTrue,
+    );
+  });
+
+  testWidgets('新しい一覧画面インスタンスではフィルターがOFFに戻る', (tester) async {
+    final item = record(
+      id: 'new-list-instance',
+      surgeryDate: DateTime(2026, 8, 8),
+    );
+    final progress = [
+      progressFor(item, timingReviewStatus: CaseTimingReviewStatus.inProgress),
+    ];
+    await pumpList(tester, [item], progress: progress);
+
+    await tester.tap(find.byKey(const Key('record-needs-attention-filter')));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<FilterChip>(
+            find.byKey(const Key('record-needs-attention-filter')),
+          )
+          .selected,
+      isTrue,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    await pumpList(tester, [item], progress: progress);
+
+    expect(
+      tester
+          .widget<FilterChip>(
+            find.byKey(const Key('record-needs-attention-filter')),
+          )
+          .selected,
+      isFalse,
+    );
   });
 
   testWidgets('症例カードをVoiceOverのactivate操作で詳細へ開ける', (tester) async {
